@@ -186,13 +186,17 @@ export class CodexService extends EventEmitter {
     const refreshedUser = this.db.getUserById(user.id);
     invariant(refreshedUser?.status === 'active', 403, 'USER_DISABLED', '该用户已停用。');
     invariant(refreshedUser.networkAccess === user.networkAccess, 409, 'USER_POLICY_CHANGED', '用户网络策略已变化，请重新提交任务。');
+    const refreshedProject = this.db.getProjectForUser(project.id, refreshedUser.id);
+    invariant(refreshedProject && refreshedProject.accessId === project.accessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已撤销。');
     const refreshedActive = [...this.activeByChat.values()].filter((entry) => entry.user.id === refreshedUser.id).length;
     invariant(refreshedActive < refreshedUser.maxConcurrentTurns, 429, 'USER_CONCURRENCY_LIMIT', '已达到该用户的并发任务上限。');
     context.user = refreshedUser;
+    context.project = refreshedProject;
     this.contextByThread.set(threadId, context);
     const active = {
-      chat, project, user: refreshedUser, threadId, turnId: null, emit,
+      chat, project: refreshedProject, user: refreshedUser, threadId, turnId: null, emit,
       assistantText: '', agentItemsWithDelta: new Set(), completed: false,
+      commandControllers: new Set(),
       resolve: null, reject: null,
     };
     const completion = new Promise((resolve, reject) => { active.resolve = resolve; active.reject = reject; });
@@ -207,7 +211,7 @@ export class CodexService extends EventEmitter {
       const result = await this.client.request('turn/start', {
         threadId,
         input: [{ type: 'text', text }],
-        cwd: this.workspace.projectRoot(project),
+        cwd: this.workspace.projectRoot(refreshedProject),
         model: this.config.codexModel,
         effort: reasoningEffort,
         approvalPolicy: 'never',
@@ -224,12 +228,14 @@ export class CodexService extends EventEmitter {
   async interrupt(chatId) {
     const active = this.activeByChat.get(chatId);
     if (!active) return false;
+    for (const controller of active.commandControllers) controller.abort();
     if (active.turnId) await this.client.request('turn/interrupt', { threadId: active.threadId, turnId: active.turnId }, 15_000);
     return true;
   }
 
   async interruptUser(userId) {
     const targets = [...this.activeByChat.values()].filter((active) => active.user.id === userId);
+    for (const active of targets) for (const controller of active.commandControllers) controller.abort();
     await Promise.allSettled(targets.map((active) => active.turnId
       ? this.client.request('turn/interrupt', { threadId: active.threadId, turnId: active.turnId }, 15_000)
       : Promise.resolve()));
@@ -328,12 +334,14 @@ export class CodexService extends EventEmitter {
   }
 
   #assertQuota(active, nextBytes, previousBytes = 0) {
-    const usage = this.workspace.usage(active.user.id);
+    const usage = this.workspace.usageForUser(active.user.id, this.db.listProjectsForUser(active.user.id));
     invariant(usage.bytes - previousBytes + nextBytes <= active.user.maxStorageBytes, 413, 'STORAGE_QUOTA', '写入将超过用户存储配额。');
   }
 
   async #callTool(active, name, args) {
-    const { project, user } = active;
+    const { user } = active;
+    const project = this.db.getProjectForUser(active.project.id, user.id);
+    invariant(project && project.accessId === active.project.accessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已撤销。');
     if (name === 'workspace_list') {
       return this.workspace.tree(project, args.path || '', Math.min(12, Math.max(1, Number(args.max_depth) || 5)));
     }
@@ -373,10 +381,17 @@ export class CodexService extends EventEmitter {
     if (name === 'workspace_exec') {
       const command = String(args.command || '');
       invariant(command.length > 0 && command.length <= 50_000, 400, 'INVALID_COMMAND', '命令长度必须为 1–50000。');
-      const result = await runSandboxedCommand({
-        config: this.config, workspace: this.workspace, project, user, command, cwd: args.cwd || '',
-      });
-      const usage = this.workspace.usage(user.id);
+      const controller = new AbortController();
+      active.commandControllers.add(controller);
+      let result;
+      try {
+        result = await runSandboxedCommand({
+          config: this.config, workspace: this.workspace, project, user, command, cwd: args.cwd || '', signal: controller.signal,
+        });
+      } finally {
+        active.commandControllers.delete(controller);
+      }
+      const usage = this.workspace.usageForUser(user.id, this.db.listProjectsForUser(user.id));
       return { ...result, storageBytes: usage.bytes, storageQuotaBytes: user.maxStorageBytes };
     }
     throw new HttpError(400, 'UNKNOWN_TOOL', `未知工作区工具: ${name}`);
@@ -385,6 +400,7 @@ export class CodexService extends EventEmitter {
   #finish(active, error = null, turn = null) {
     if (active.completed) return;
     active.completed = true;
+    for (const controller of active.commandControllers) controller.abort();
     this.activeByChat.delete(active.chat.id);
     this.activeByThread.delete(active.threadId);
     this.globalActive = Math.max(0, this.globalActive - 1);

@@ -4,7 +4,8 @@ import { randomBytes } from 'node:crypto';
 import ExcelJS from 'exceljs';
 import { HttpError, invariant } from './errors.mjs';
 
-const HIDDEN_ROOT_ENTRIES = new Set(['.trash', '.home', '.tmp']);
+const HIDDEN_ROOT_ENTRIES = new Set(['.git', '.trash', '.home', '.tmp']);
+const RESERVED_PATH_PARTS = new Set(['.git', '.trash', '.home', '.tmp']);
 
 export function slugify(value) {
   const base = String(value || 'project').normalize('NFKC').toLowerCase()
@@ -24,6 +25,7 @@ function normalizedRelative(value = '') {
   invariant(!path.posix.isAbsolute(raw), 400, 'INVALID_PATH', '只允许工作区相对路径。');
   const parts = raw.split('/').filter((part) => part && part !== '.');
   invariant(!parts.some((part) => part === '..'), 400, 'INVALID_PATH', '路径不能离开工作区。');
+  invariant(!parts.some((part) => RESERVED_PATH_PARTS.has(part)), 403, 'RESERVED_PATH', '该内部路径不允许通过文件接口访问。');
   return parts.join('/');
 }
 
@@ -41,8 +43,16 @@ function cellValue(value) {
 
 export class WorkspaceService {
   constructor(config) {
-    this.config = config;
-    fs.mkdirSync(config.workspacesRoot, { recursive: true, mode: 0o700 });
+    const dataRoot = config.dataDir || path.dirname(config.workspacesRoot);
+    this.config = {
+      ...config,
+      treesRoot: config.treesRoot || path.join(dataRoot, 'trees'),
+      runtimeRoot: config.runtimeRoot || path.join(dataRoot, 'runtime'),
+      trashRoot: config.trashRoot || path.join(dataRoot, 'trash'),
+    };
+    for (const root of [this.config.workspacesRoot, this.config.treesRoot, this.config.runtimeRoot, this.config.trashRoot]) {
+      fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+    }
   }
 
   userRoot(userId) {
@@ -53,16 +63,27 @@ export class WorkspaceService {
   ensureUserRoot(userId) {
     const root = this.userRoot(userId);
     fs.mkdirSync(root, { recursive: true, mode: 0o700 });
-    fs.mkdirSync(path.join(root, '.trash'), { recursive: true, mode: 0o700 });
-    fs.mkdirSync(path.join(root, '.home'), { recursive: true, mode: 0o700 });
-    fs.mkdirSync(path.join(root, '.tmp'), { recursive: true, mode: 0o700 });
+    return root;
+  }
+
+  ensureRuntimeRoot(userId) {
+    invariant(/^[a-f0-9-]{36}$/i.test(String(userId)), 400, 'INVALID_USER', '用户标识无效。');
+    const root = path.join(this.config.runtimeRoot, userId);
+    fs.mkdirSync(path.join(root, 'home'), { recursive: true, mode: 0o700 });
+    fs.mkdirSync(path.join(root, 'tmp'), { recursive: true, mode: 0o700 });
     return root;
   }
 
   projectRoot(project) {
-    const root = this.userRoot(project.userId);
-    const candidate = path.resolve(root, project.slug);
-    invariant(inside(root, candidate), 500, 'PROJECT_PATH_INVALID', '项目目录配置无效。');
+    const ownerRoot = this.userRoot(project.userId);
+    const candidate = path.resolve(project.treePath || path.join(ownerRoot, project.slug));
+    const allowedRoots = [path.resolve(this.config.workspacesRoot), path.resolve(this.config.treesRoot)];
+    invariant(allowedRoots.some((root) => inside(root, candidate)), 500, 'PROJECT_PATH_INVALID', '项目目录配置无效。');
+    if (fs.existsSync(candidate)) {
+      invariant(!fs.lstatSync(candidate).isSymbolicLink(), 403, 'PROJECT_SYMLINK_NOT_ALLOWED', '项目目录不能是符号链接。');
+      const actual = fs.realpathSync(candidate);
+      invariant(allowedRoots.some((root) => inside(fs.realpathSync(root), actual)), 403, 'PROJECT_PATH_ESCAPE', '项目目录指向受控区域之外。');
+    }
     return candidate;
   }
 
@@ -76,7 +97,7 @@ export class WorkspaceService {
     fs.writeFileSync(path.join(projectRoot, 'AGENTS.md'), [
       '# Codex Harness workspace',
       '',
-      '- Work only inside this project unless the user explicitly asks to inspect another project they own.',
+      '- Work only inside this authorized project; never inspect another project, even under the same account.',
       '- Use the workspace tools supplied by Codex Harness for files and commands.',
       '- Never attempt to inspect host credentials, Codex state, or other users.',
       '',
@@ -221,8 +242,8 @@ export class WorkspaceService {
   moveToTrash(project, relativePath) {
     const { target, relative } = this.resolve(project, relativePath, { mustExist: true });
     invariant(relative, 400, 'INVALID_PATH', '不能删除项目根目录。');
-    const userRoot = this.ensureUserRoot(project.userId);
-    const trashRoot = path.join(userRoot, '.trash', 'files', project.id);
+    const actorId = project.accessUserId || project.userId;
+    const trashRoot = path.join(this.config.trashRoot, actorId, 'files', project.accessId || project.id);
     fs.mkdirSync(trashRoot, { recursive: true, mode: 0o700 });
     const safeName = path.basename(relative).replace(/[^a-zA-Z0-9._\u3400-\u9fff-]/g, '_');
     const destination = path.join(trashRoot, `${Date.now()}-${randomBytes(3).toString('hex')}-${safeName}`);
@@ -233,7 +254,7 @@ export class WorkspaceService {
   trashProject(project) {
     const projectRoot = this.projectRoot(project);
     if (!fs.existsSync(projectRoot)) return { recoverable: false };
-    const trashRoot = path.join(this.ensureUserRoot(project.userId), '.trash', 'projects');
+    const trashRoot = path.join(this.config.trashRoot, project.userId, 'projects');
     fs.mkdirSync(trashRoot, { recursive: true, mode: 0o700 });
     const destination = path.join(trashRoot, `${Date.now()}-${project.id}-${project.slug}`);
     fs.renameSync(projectRoot, destination);
@@ -246,7 +267,7 @@ export class WorkspaceService {
     let files = 0;
     const visit = (dir) => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        if (entry.name === '.trash') continue;
+        if (HIDDEN_ROOT_ENTRIES.has(entry.name)) continue;
         const full = path.join(dir, entry.name);
         const stat = fs.lstatSync(full);
         if (stat.isSymbolicLink()) continue;
@@ -258,5 +279,34 @@ export class WorkspaceService {
       throw new HttpError(500, 'USAGE_SCAN_FAILED', '无法统计工作区用量。', error.message);
     }
     return { bytes, files };
+  }
+
+  projectUsage(project) {
+    const root = this.projectRoot(project);
+    let bytes = 0;
+    let files = 0;
+    const visit = (directory) => {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        if (entry.name === '.git') continue;
+        const full = path.join(directory, entry.name);
+        const stat = fs.lstatSync(full);
+        if (stat.isSymbolicLink()) continue;
+        if (stat.isDirectory()) visit(full);
+        else { bytes += stat.size; files += 1; }
+      }
+    };
+    if (fs.existsSync(root)) visit(root);
+    return { bytes, files };
+  }
+
+  usageForUser(userId, accessibleProjects = []) {
+    const total = this.usage(userId);
+    for (const project of accessibleProjects) {
+      if (project.accessKind !== 'shared') continue;
+      const shared = this.projectUsage(project);
+      total.bytes += shared.bytes;
+      total.files += shared.files;
+    }
+    return total;
   }
 }

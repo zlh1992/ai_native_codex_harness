@@ -4,7 +4,7 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = {
   me: null, csrf: '', projects: [], chats: [], selectedProject: null, selectedChat: null,
   selectedFile: null, selectedFileInfo: null, fileEntries: [], fileContent: null, viewerMode: 'preview',
-  runningTurns: new Map(), maxConcurrentTurns: 40, admin: null, view: 'workbench',
+  runningTurns: new Map(), maxConcurrentTurns: 40,
 };
 
 function formatBytes(value) {
@@ -96,16 +96,23 @@ async function bootstrap() {
     const data = await api('/api/me');
     state.me = data.user;
     state.csrf = data.csrfToken;
+    if (data.user.role === 'admin' && new URLSearchParams(location.search).get('workbench') !== '1') {
+      location.replace('/boss.html');
+      return;
+    }
     showApp();
     $('#user-chip').textContent = `${data.user.displayName} · ${data.user.role === 'admin' ? '超级管理员' : data.user.username}`;
     $('#model-badge').textContent = data.model;
     $('#codex-status').classList.toggle('online', data.codex.ready);
+    $('#boss-nav').classList.toggle('hidden', data.user.role !== 'admin');
     state.maxConcurrentTurns = data.codex.maxConcurrentTurns || 40;
     updateConcurrencyIndicator();
-    $('#admin-nav').classList.toggle('hidden', data.user.role !== 'admin');
     $('#effort-select').innerHTML = data.efforts.map((value) => `<option value="${value}" ${value === data.defaultEffort ? 'selected' : ''}>${value}</option>`).join('');
     updateUsage(data.usage, data.user.maxStorageBytes);
     await loadProjects();
+    const requestedProject = new URLSearchParams(location.search).get('project');
+    const selected = requestedProject && state.projects.find((project) => project.id === requestedProject);
+    if (selected) await selectProject(selected);
   } catch { showLogin(); }
 }
 
@@ -114,8 +121,8 @@ function updateUsage(usage, quota) {
   $('#storage-meter').style.width = `${Math.min(100, Number(usage?.bytes || 0) / Number(quota || 1) * 100)}%`;
 }
 
-async function loadProjects(all = false) {
-  const data = await api(`/api/projects${all ? '?all=1' : ''}`);
+async function loadProjects() {
+  const data = await api('/api/projects');
   state.projects = data.projects;
   renderProjects();
   if (state.selectedProject) {
@@ -129,7 +136,7 @@ function renderProjects() {
   const root = $('#project-list');
   if (!state.projects.length) { root.className = 'project-list empty-state'; root.textContent = '还没有项目，点击 ＋ 创建'; return; }
   root.className = 'project-list';
-  root.innerHTML = state.projects.map((project) => `<button class="project-item ${state.selectedProject?.id === project.id ? 'active' : ''}" data-id="${project.id}"><b><i class="project-dot"></i>${escapeHtml(project.name)}</b><span>${escapeHtml(project.description || project.slug)}</span></button>`).join('');
+  root.innerHTML = state.projects.map((project) => `<button class="project-item ${state.selectedProject?.id === project.id ? 'active' : ''}" data-id="${project.id}"><b><i class="project-dot"></i>${escapeHtml(project.name)}</b><span>${project.accessKind === 'shared' ? '共享给我 · ' : ''}${escapeHtml(project.description || project.slug)}</span></button>`).join('');
   $$('.project-item', root).forEach((button) => button.addEventListener('click', () => selectProject(state.projects.find((item) => item.id === button.dataset.id))));
 }
 
@@ -153,7 +160,7 @@ function resetProject() {
 async function refreshUsage() {
   if (!state.selectedProject) return;
   const data = await api(`/api/projects/${state.selectedProject.id}`);
-  if (data.project.userId === state.me.id) updateUsage(data.usage, state.me.maxStorageBytes);
+  updateUsage(data.usage, state.me.maxStorageBytes);
 }
 
 async function loadChats() {
@@ -501,54 +508,9 @@ async function writeFile(filePath, content) {
   toast(`已保存 ${filePath}`);
 }
 
-async function loadAdmin() {
-  const data = await api('/api/admin/dashboard');
-  state.admin = data;
-  const metrics = [
-    ['用户', data.stats.users], ['活跃用户', data.stats.activeUsers], ['项目', data.stats.projects],
-    ['对话', data.stats.chats], ['运行中 / 上限', `${data.codex.activeTurns} / ${data.codex.maxConcurrentTurns}`],
-  ];
-  $('#metric-grid').innerHTML = metrics.map(([label, value], index) => `<div class="metric ${index === 4 ? 'accent' : ''}"><span>${label.toUpperCase()}</span><b>${value}</b></div>`).join('');
-  $('#user-table').innerHTML = data.users.map((user) => `<tr><td><b>${escapeHtml(user.displayName)}</b><br><span>@${escapeHtml(user.username)} · ${user.role}</span></td><td><span class="status-tag ${user.status !== 'active' ? 'off' : ''}">${user.status === 'active' ? '启用' : '停用'}</span></td><td>${user.networkAccess ? '允许' : '关闭'}</td><td>${user.projectCount} / ${user.maxProjects}<br>${formatBytes(user.usage.bytes)} / ${formatBytes(user.maxStorageBytes)}<br>并发 ${user.maxConcurrentTurns} / ${data.codex.maxConcurrentTurns}</td><td>${formatDate(user.lastLoginAt, true)}</td><td><button class="table-action" data-edit-user="${user.id}">管理</button></td></tr>`).join('');
-  $$('[data-edit-user]').forEach((button) => button.addEventListener('click', () => openUserDialog(data.users.find((user) => user.id === button.dataset.editUser))));
-  $('#project-count').textContent = `${data.projects.length} 个`;
-  $('#admin-project-list').innerHTML = data.projects.map((project) => `<div class="admin-project"><div><b>${escapeHtml(project.name)}</b><span>@${escapeHtml(project.username)} · ${escapeHtml(project.slug)}</span></div><button class="table-action" data-manage-project="${project.id}">管理文件</button></div>`).join('') || '<div class="empty-state">暂无项目</div>';
-  $$('[data-manage-project]').forEach((button) => button.addEventListener('click', async () => {
-    switchView('workbench'); await loadProjects(true); await selectProject(state.projects.find((project) => project.id === button.dataset.manageProject));
-  }));
-  await loadAudit();
-}
-
-async function loadAudit() {
-  const data = await api('/api/admin/audit?limit=120');
-  $('#audit-list').innerHTML = data.audit.map((entry) => `<div class="audit-row"><time>${formatDate(entry.createdAt, true)}</time><div><b>${escapeHtml(entry.action)}</b><span>${escapeHtml(entry.actorUsername)} · ${escapeHtml(entry.targetType)} ${escapeHtml(entry.targetId || '')}</span></div></div>`).join('');
-}
-
 function switchView(view) {
-  if (view === 'admin' && state.me.role !== 'admin') return;
-  state.view = view;
   $('#workbench-view').classList.toggle('hidden', view !== 'workbench');
-  $('#admin-view').classList.toggle('hidden', view !== 'admin');
   $$('.nav-button').forEach((button) => button.classList.toggle('active', button.dataset.view === view));
-  if (view === 'admin') loadAdmin().catch((error) => toast(error.message, 'error'));
-}
-
-function openUserDialog(user = null) {
-  const form = $('#user-form'); form.reset();
-  $('[name=id]', form).value = user?.id || '';
-  $('[name=username]', form).value = user?.username || '';
-  $('[name=username]', form).disabled = Boolean(user);
-  $('[name=displayName]', form).value = user?.displayName || '';
-  $('[name=password]', form).required = !user;
-  $('[name=maxProjects]', form).value = user?.maxProjects || 10;
-  $('[name=maxStorageGb]', form).value = Math.max(1, Math.round((user?.maxStorageBytes || 2 * 1024 ** 3) / 1024 ** 3));
-  $('[name=maxConcurrentTurns]', form).value = user?.maxConcurrentTurns || 40;
-  $('[name=networkAccess]', form).checked = Boolean(user?.networkAccess);
-  $('[name=active]', form).checked = !user || user.status === 'active';
-  $('#status-field').classList.toggle('hidden', !user || user.role === 'admin');
-  $('#user-dialog-title').textContent = user ? `管理 ${user.username}` : '创建用户';
-  $('.form-error', form).textContent = '';
-  $('#user-dialog').showModal();
 }
 
 function clamp(value, minimum, maximum) {
@@ -629,12 +591,11 @@ $('#login-form').addEventListener('submit', async (event) => {
 });
 
 $('#logout-button').addEventListener('click', async () => { try { await api('/api/logout', { method: 'POST' }); } finally { showLogin(); } });
+$('#boss-nav').addEventListener('click', () => location.assign('/boss.html'));
 $$('[data-view]').forEach((button) => button.addEventListener('click', () => switchView(button.dataset.view)));
 
 $('#new-project').addEventListener('click', () => {
   $('#project-form').reset(); $('.form-error', $('#project-form')).textContent = '';
-  const ownerField = $('#project-owner-field'); ownerField.classList.toggle('hidden', state.me.role !== 'admin' || !state.admin);
-  if (state.admin) $('select', ownerField).innerHTML = state.admin.users.filter((user) => user.status === 'active').map((user) => `<option value="${user.id}" ${user.id === state.me.id ? 'selected' : ''}>${escapeHtml(user.username)}</option>`).join('');
   $('#project-dialog').showModal();
 });
 
@@ -643,8 +604,8 @@ $('#project-form').addEventListener('submit', async (event) => {
   if (event.submitter?.value === 'cancel') return $('#project-dialog').close();
   const form = new FormData(event.currentTarget);
   try {
-    const data = await api('/api/projects', { method: 'POST', body: { name: form.get('name'), description: form.get('description'), userId: form.get('userId') || undefined } });
-    $('#project-dialog').close(); await loadProjects(state.me.role === 'admin' && state.projects.some((p) => p.username)); await selectProject(data.project); toast('隔离项目已创建');
+    const data = await api('/api/projects', { method: 'POST', body: { name: form.get('name'), description: form.get('description') } });
+    $('#project-dialog').close(); await loadProjects(); await selectProject(data.project); toast('隔离项目已创建');
   } catch (error) { $('.form-error', event.currentTarget).textContent = error.message; }
 });
 
@@ -685,18 +646,5 @@ $('#delete-file').addEventListener('click', async () => {
   if (!state.selectedFile || !window.confirm(`将 ${state.selectedFile} 移到可恢复的废纸篓？`)) return;
   try { await api(`/api/projects/${state.selectedProject.id}/file?path=${encodeURIComponent(state.selectedFile)}`, { method: 'DELETE' }); closeViewer(); await loadFiles(); toast('已移到废纸篓'); } catch (error) { toast(error.message, 'error'); }
 });
-
-$('#new-user').addEventListener('click', () => openUserDialog());
-$('#user-form').addEventListener('submit', async (event) => {
-  event.preventDefault(); if (event.submitter?.value === 'cancel') return $('#user-dialog').close();
-  const form = new FormData(event.currentTarget); const id = form.get('id');
-  const body = { displayName: form.get('displayName'), maxProjects: Number(form.get('maxProjects')), maxStorageBytes: Number(form.get('maxStorageGb')) * 1024 ** 3, maxConcurrentTurns: Number(form.get('maxConcurrentTurns')), networkAccess: form.get('networkAccess') === 'on' };
-  if (!id) body.username = form.get('username');
-  if (form.get('password')) body.password = form.get('password');
-  if (id) body.status = form.get('active') === 'on' ? 'active' : 'disabled';
-  try { await api(id ? `/api/admin/users/${id}` : '/api/admin/users', { method: id ? 'PATCH' : 'POST', body }); $('#user-dialog').close(); await loadAdmin(); toast(id ? '用户策略已更新' : '用户已创建'); } catch (error) { $('.form-error', event.currentTarget).textContent = error.message; }
-});
-$('#refresh-admin').addEventListener('click', () => loadAdmin());
-$('#refresh-audit').addEventListener('click', () => loadAudit());
 
 setupResizers(); health(); bootstrap();

@@ -12,7 +12,7 @@
     "dev": "NODE_ENV=development node --watch src/server.mjs",
     "admin": "node src/cli.mjs",
     "test": "node --test test/*.test.mjs",
-    "check": "node --check src/server.mjs && node --check public/app.js && bash -n bin/*.sh && npm test"
+    "check": "node --check src/server.mjs && node --check src/worktree-service.mjs && node --check public/app.js && node --check public/boss.js && bash -n bin/*.sh && npm test"
   },
   "dependencies": {
     "exceljs": "^4.4.0"

@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-本项目让多个受控用户共享这台 Mac 的 Codex 计算与登录，但不共享工作目录、项目记录、会话入口或文件 API。超级管理员是唯一的跨租户角色。
+本项目让多个受控用户共享这台 Mac 的 Codex 计算与登录。唯一超级账户可管理账号和查看项目元数据，但项目内容权限仍只由 OWNER/SHARED ACL 决定。
 
 ## 2. 请求链路
 
@@ -28,11 +28,13 @@ Browser ─HTTPS─> Tunnel ─HTTP loopback─> Harness HTTP Server
 
 - 用户目录：`.data/workspaces/<user-uuid>/`
 - 项目目录：`.data/workspaces/<user-uuid>/<project-slug>/`
-- 可恢复废纸篓：`.data/workspaces/<user-uuid>/.trash/`
+- 老板共享给员工的 tree：`.data/trees/<project-access-uuid>/`
+- 命令 HOME/TMP：`.data/runtime/<user-uuid>/`
+- 可恢复废纸篓：`.data/trash/<user-uuid>/`
 - 元数据：`.data/harness.sqlite`
 - Codex 原生 thread：由本机 Codex 存储；本项目数据库只保存服务端签发的 chat 与 thread 映射。
 
-普通用户对项目的查询都附加 `user_id` 所有权检查。管理员可以跨用户读取项目，但仍须通过同一套规范路径和符号链接检查。
+每次项目、文件、对话和 Codex 工具调用都重新查询有效 OWNER/SHARED 记录，并使用数据库绑定的 `tree_path`；浏览器提供的 owner、tree、cwd 或 Codex thread id 均不被信任。超级账户没有内容旁路，只能通过专用驾驶舱查询跨用户元数据。
 
 ## 4. 为什么不用 app-server WebSocket / ACP
 
@@ -43,7 +45,7 @@ Browser ─HTTPS─> Tunnel ─HTTP loopback─> Harness HTTP Server
 仅仅把 turn 的 `cwd` 指到项目目录并不足以隔离不受信任用户，因为普通 workspace-write 沙箱的读取边界可能大于单个项目。因此实现采用两层控制：
 
 1. app-server 关闭内置 Shell、unified exec、浏览器、插件、MCP、computer use、image generation 和 multi-agent，并把 turn 自身设为 read-only、never approval。
-2. 模型只能调用 `workspace_list/read/write/replace/mkdir/delete/search/exec` 动态工具。前七个由后端做规范路径校验；`workspace_exec` 再进入 macOS Seatbelt，默认只允许读取系统运行时和当前用户根目录，只允许写当前用户根目录。
+2. 模型只能调用 `workspace_list/read/write/replace/mkdir/delete/search/exec` 动态工具。前七个由后端做规范路径、保留目录与符号链接校验；`workspace_exec` 再进入 macOS Seatbelt，只允许读写当前绑定 tree 与独立 runtime，不能读取同一员工的另一个项目。共享 worktree 的 `.git` 指针也被文件 API 与 Seatbelt 隐藏。
 
 命令环境只包含最小 `PATH/HOME/TMPDIR/LANG/TERM/CI`，不会继承 Harness、Cloudflare 或 Codex 的密码/token 环境变量。网络默认关闭；管理员可按用户开启。
 
@@ -54,7 +56,7 @@ Browser ─HTTPS─> Tunnel ─HTTP loopback─> Harness HTTP Server
 - Cookie：HttpOnly、SameSite=Strict；公网配置 `Secure`。
 - 写请求：同时校验会话、Origin 和 session-bound CSRF token。
 - 登录：按来源 IP 的滑动窗口限速；成功/失败均写审计。
-- RBAC：`user` 与 `admin` 两种不可由 Web 提权的角色。
+- RBAC：`user` 与唯一 `admin` 两种不可由 Web 提权的账号角色；内容访问另由 OWNER/SHARED ACL 控制。
 
 ## 7. 资源和滥用边界
 
@@ -68,7 +70,7 @@ Browser ─HTTPS─> Tunnel ─HTTP loopback─> Harness HTTP Server
 
 ## 8. 备份和恢复
 
-停止服务后备份 `.data/harness.sqlite*` 与 `.data/workspaces/`。SQLite 使用 WAL，在线备份应使用 SQLite backup API 或同时复制主文件、`-wal` 和 `-shm`。删除的项目/文件位于用户 `.trash`；恢复时由管理员把目标移动回原项目并确认所有权和权限。
+停止服务后备份 `.data/harness.sqlite*`、`.data/workspaces/`、`.data/trees/` 和 `.data/trash/`。SQLite 使用 WAL，在线备份应使用 SQLite backup API 或同时复制主文件、`-wal` 和 `-shm`。恢复文件前必须核对对应项目 ACL 与 tree 绑定。
 
 ## 9. 信任与账号边界
 

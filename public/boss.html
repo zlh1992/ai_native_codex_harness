@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Boss 驾驶舱 · Codex Harness</title>
+  <link rel="stylesheet" href="/boss.css">
+</head>
+<body>
+  <div class="ambient"></div>
+  <header class="cockpit-bar">
+    <a class="identity" href="/boss.html"><span>CH</span><div><b>老板驾驶舱</b><small>CODEX HARNESS / CONTROL</small></div></a>
+    <nav>
+      <a class="nav-active" href="#overview">总览</a>
+      <a href="#people">员工</a>
+      <a href="#projects">项目权限</a>
+      <a href="#audit">审计</a>
+    </nav>
+    <div class="bar-actions">
+      <span id="boss-chip" class="boss-chip">正在验证身份</span>
+      <a class="workbench-link" href="/?workbench=1">我的工作台 ↗</a>
+      <button id="logout" class="icon-button" title="退出登录">↪</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="overview" class="hero">
+      <div>
+        <p class="eyebrow">OWNER CONTROL PLANE</p>
+        <h1>把权限边界，<em>看得见。</em></h1>
+        <p class="hero-copy">账号管理与内容访问彻底分开。你能管理所有员工和项目元数据，但只有自己拥有或明确获授权的项目才能打开内容。</p>
+      </div>
+      <div class="hero-status"><i id="codex-light"></i><div><small>本机执行面</small><b id="codex-label">正在连接</b></div></div>
+    </section>
+
+    <section id="metric-grid" class="metric-grid" aria-label="系统指标"></section>
+
+    <section id="people" class="panel people-panel">
+      <div class="panel-title">
+        <div><p class="eyebrow">IDENTITY & POLICY</p><h2>员工账号</h2><p>创建账号、重置密码、停用会话，并控制联网与配额。</p></div>
+        <button id="new-user" class="primary">＋ 新员工</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>员工</th><th>状态</th><th>联网</th><th>项目 / 共享</th><th>空间</th><th>最近登录</th><th></th></tr></thead>
+          <tbody id="employee-table"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="projects" class="panel projects-panel">
+      <div class="panel-title">
+        <div><p class="eyebrow">PROJECT ACCESS</p><h2>项目与授权</h2><p>老板项目可授权一名员工并创建独立 Git worktree；员工自有项目只显示元数据。</p></div>
+        <div class="title-actions"><button id="refresh" class="secondary">刷新</button><button id="new-project" class="primary">＋ 我的项目</button></div>
+      </div>
+      <div class="scope-legend"><span><i class="owner-dot"></i>我的项目，可管理内容与授权</span><span><i class="locked-dot"></i>员工项目，仅元数据</span></div>
+      <div id="project-grid" class="project-grid"></div>
+    </section>
+
+    <section id="audit" class="panel audit-panel">
+      <div class="panel-title"><div><p class="eyebrow">AUDIT TRAIL</p><h2>最近审计</h2></div><button id="refresh-audit" class="secondary">刷新</button></div>
+      <div id="audit-list" class="audit-list"></div>
+    </section>
+  </main>
+
+  <dialog id="user-dialog">
+    <form method="dialog" id="user-form">
+      <div class="dialog-title"><div><p class="eyebrow">EMPLOYEE ACCOUNT</p><h2 id="user-dialog-title">创建员工</h2></div><button value="cancel" class="close-button" aria-label="关闭">×</button></div>
+      <input name="id" type="hidden">
+      <div class="field-grid"><label>用户名<input name="username" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{2,31}"></label><label>显示名称<input name="displayName" required maxlength="64"></label></div>
+      <label>密码<input name="password" type="password" minlength="12" autocomplete="new-password"><small>新员工必填，至少 12 位；编辑时留空表示不修改。</small></label>
+      <div class="field-grid three"><label>项目上限<input name="maxProjects" type="number" min="1" value="100"></label><label>空间上限（GB）<input name="maxStorageGb" type="number" min="1" value="2"></label><label>并发任务<input name="maxConcurrentTurns" type="number" min="1" max="40" value="40"></label></div>
+      <div class="toggle-row"><label><input name="networkAccess" type="checkbox"> 允许命令访问公网</label><label id="status-field" class="hidden"><input name="active" type="checkbox"> 账号启用</label></div>
+      <p class="form-error" role="alert"></p>
+      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button value="default" class="primary">保存</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="project-dialog">
+    <form method="dialog" id="project-form">
+      <div class="dialog-title"><div><p class="eyebrow">OWNER PROJECT</p><h2>创建老板项目</h2></div><button value="cancel" class="close-button" aria-label="关闭">×</button></div>
+      <label>项目名称<input name="name" maxlength="80" required></label>
+      <label>项目说明<textarea name="description" maxlength="1000" rows="4"></textarea></label>
+      <p class="form-error" role="alert"></p>
+      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button value="default" class="primary">创建并初始化 Git</button></div>
+    </form>
+  </dialog>
+
+  <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+  <script type="module" src="/boss.js"></script>
+</body>
+</html>

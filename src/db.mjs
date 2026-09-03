@@ -60,6 +60,23 @@ export class HarnessDatabase {
         UNIQUE(user_id, slug)
       );
       CREATE INDEX IF NOT EXISTS projects_user_id_idx ON projects(user_id);
+      CREATE TABLE IF NOT EXISTS project_access (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        access_kind TEXT NOT NULL CHECK(access_kind IN ('owner','shared')),
+        tree_path TEXT NOT NULL,
+        branch_name TEXT,
+        status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','revoked')),
+        created_at TEXT NOT NULL,
+        revoked_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS project_access_project_idx ON project_access(project_id, status);
+      CREATE INDEX IF NOT EXISTS project_access_user_idx ON project_access(user_id, status);
+      CREATE UNIQUE INDEX IF NOT EXISTS project_access_active_user_idx
+        ON project_access(project_id,user_id) WHERE status='active';
+      CREATE UNIQUE INDEX IF NOT EXISTS project_access_one_share_idx
+        ON project_access(project_id) WHERE access_kind='shared' AND status='active';
       CREATE TABLE IF NOT EXISTS chats (
         id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -96,6 +113,33 @@ export class HarnessDatabase {
       CREATE INDEX IF NOT EXISTS audit_created_idx ON audit_log(created_at DESC);
       CREATE INDEX IF NOT EXISTS audit_actor_idx ON audit_log(actor_user_id);
     `);
+    this.#ensureColumn('projects', 'repo_kind', "TEXT NOT NULL DEFAULT 'directory'");
+    this.#ensureColumn('chats', 'project_access_id', 'TEXT');
+    this.#ensureColumn('chats', 'tree_path', 'TEXT');
+    this.#backfillOwnerAccess();
+  }
+
+  #ensureColumn(table, name, definition) {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all();
+    if (!columns.some((column) => column.name === name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+  }
+
+  #backfillOwnerAccess() {
+    const insert = this.db.prepare(`INSERT INTO project_access
+      (id,project_id,user_id,access_kind,tree_path,status,created_at)
+      VALUES (?,?,?,?,?,'active',?)`);
+    const missing = this.db.prepare(`SELECT p.* FROM projects p WHERE NOT EXISTS (
+      SELECT 1 FROM project_access a WHERE a.project_id=p.id AND a.user_id=p.user_id AND a.access_kind='owner' AND a.status='active'
+    )`).all();
+    for (const project of missing) {
+      insert.run(randomUUID(), project.id, project.user_id, 'owner', path.join(this.config.workspacesRoot, project.user_id, project.slug), now());
+    }
+    this.db.exec(`UPDATE chats SET
+      project_access_id=COALESCE(project_access_id, (SELECT a.id FROM project_access a
+        WHERE a.project_id=chats.project_id AND a.user_id=chats.user_id AND a.status='active' LIMIT 1)),
+      tree_path=COALESCE(tree_path, (SELECT a.tree_path FROM project_access a
+        WHERE a.project_id=chats.project_id AND a.user_id=chats.user_id AND a.status='active' LIMIT 1))
+      WHERE project_access_id IS NULL OR tree_path IS NULL`);
   }
 
   close() { this.db.close(); }
@@ -105,6 +149,7 @@ export class HarnessDatabase {
   }
 
   createUser({ username, displayName, passwordHash, role = 'user', networkAccess, maxProjects, maxStorageBytes, maxConcurrentTurns }) {
+    if (role === 'admin' && this.countAdmins() > 0) throw new Error('系统只允许一个超级管理员账号。');
     const id = randomUUID();
     const timestamp = now();
     this.db.prepare(`INSERT INTO users
@@ -145,9 +190,13 @@ export class HarnessDatabase {
   listUsers() {
     return this.db.prepare(`SELECT u.*,
       (SELECT COUNT(*) FROM projects p WHERE p.user_id=u.id) AS project_count,
+      (SELECT COUNT(*) FROM project_access a WHERE a.user_id=u.id AND a.access_kind='shared' AND a.status='active') AS shared_project_count,
       (SELECT COUNT(*) FROM chats c WHERE c.user_id=u.id) AS chat_count
       FROM users u ORDER BY CASE role WHEN 'admin' THEN 0 ELSE 1 END, username COLLATE NOCASE`).all()
-      .map((row) => ({ ...this.publicUser(row), projectCount: row.project_count, chatCount: row.chat_count }));
+      .map((row) => ({
+        ...this.publicUser(row), projectCount: row.project_count,
+        sharedProjectCount: row.shared_project_count, chatCount: row.chat_count,
+      }));
   }
 
   updateUser(id, patch) {
@@ -209,7 +258,14 @@ export class HarnessDatabase {
     const timestamp = now();
     this.db.prepare('INSERT INTO projects (id,user_id,slug,name,description,created_at,updated_at) VALUES (?,?,?,?,?,?,?)')
       .run(id, userId, slug, name, description, timestamp, timestamp);
-    return this.getProject(id);
+    const project = this.getProject(id);
+    try {
+      this.createOwnerAccess(project);
+    } catch (error) {
+      this.db.prepare('DELETE FROM projects WHERE id=?').run(id);
+      throw error;
+    }
+    return this.getProjectForUser(id, userId);
   }
 
   mapProject(row) {
@@ -217,6 +273,11 @@ export class HarnessDatabase {
       id: row.id, userId: row.user_id, slug: row.slug, name: row.name,
       description: row.description, createdAt: row.created_at, updatedAt: row.updated_at,
       username: row.username, displayName: row.display_name,
+      repoKind: row.repo_kind || 'directory', accessId: row.access_id,
+      accessUserId: row.access_user_id, accessKind: row.access_kind,
+      treePath: row.tree_path, branchName: row.branch_name,
+      sharedUserId: row.shared_user_id, sharedUsername: row.shared_username,
+      sharedDisplayName: row.shared_display_name, sharedAccessId: row.shared_access_id,
     } : null;
   }
 
@@ -231,6 +292,80 @@ export class HarnessDatabase {
     return this.db.prepare(sql).all(...(userId ? [userId] : [])).map((row) => this.mapProject(row));
   }
 
+  createOwnerAccess(project) {
+    const id = randomUUID();
+    this.db.prepare(`INSERT INTO project_access
+      (id,project_id,user_id,access_kind,tree_path,status,created_at) VALUES (?,?,?,?,?,'active',?)`)
+      .run(id, project.id, project.userId, 'owner', path.join(this.config.workspacesRoot, project.userId, project.slug), now());
+    return this.getProjectAccessById(id);
+  }
+
+  getProjectForUser(projectId, userId) {
+    return this.mapProject(this.db.prepare(`SELECT p.*,owner.username,owner.display_name,
+      a.id AS access_id,a.user_id AS access_user_id,a.access_kind,a.tree_path,a.branch_name
+      FROM projects p JOIN users owner ON owner.id=p.user_id
+      JOIN project_access a ON a.project_id=p.id AND a.user_id=? AND a.status='active'
+      WHERE p.id=?`).get(userId, projectId));
+  }
+
+  listProjectsForUser(userId) {
+    return this.db.prepare(`SELECT p.*,owner.username,owner.display_name,
+      a.id AS access_id,a.user_id AS access_user_id,a.access_kind,a.tree_path,a.branch_name
+      FROM project_access a JOIN projects p ON p.id=a.project_id JOIN users owner ON owner.id=p.user_id
+      WHERE a.user_id=? AND a.status='active' ORDER BY p.updated_at DESC`).all(userId).map((row) => this.mapProject(row));
+  }
+
+  listAdminProjects() {
+    return this.db.prepare(`SELECT p.*,owner.username,owner.display_name,
+      shared.id AS shared_access_id,shared.user_id AS shared_user_id,
+      shared_user.username AS shared_username,shared_user.display_name AS shared_display_name
+      FROM projects p JOIN users owner ON owner.id=p.user_id
+      LEFT JOIN project_access shared ON shared.project_id=p.id AND shared.access_kind='shared' AND shared.status='active'
+      LEFT JOIN users shared_user ON shared_user.id=shared.user_id
+      ORDER BY p.updated_at DESC`).all().map((row) => this.mapProject(row));
+  }
+
+  getProjectAccessById(id) {
+    const row = this.db.prepare(`SELECT a.*,u.username,u.display_name FROM project_access a
+      JOIN users u ON u.id=a.user_id WHERE a.id=?`).get(id);
+    return row ? {
+      id: row.id, projectId: row.project_id, userId: row.user_id,
+      accessKind: row.access_kind, treePath: row.tree_path, branchName: row.branch_name,
+      status: row.status, username: row.username, displayName: row.display_name,
+      createdAt: row.created_at, revokedAt: row.revoked_at,
+    } : null;
+  }
+
+  listProjectAccess(projectId, { activeOnly = false } = {}) {
+    return this.db.prepare(`SELECT a.*,u.username,u.display_name FROM project_access a JOIN users u ON u.id=a.user_id
+      WHERE a.project_id=? ${activeOnly ? "AND a.status='active'" : ''}
+      ORDER BY CASE a.access_kind WHEN 'owner' THEN 0 ELSE 1 END,a.created_at DESC`).all(projectId)
+      .map((row) => ({
+        id: row.id, projectId: row.project_id, userId: row.user_id,
+        accessKind: row.access_kind, treePath: row.tree_path, branchName: row.branch_name,
+        status: row.status, username: row.username, displayName: row.display_name,
+        createdAt: row.created_at, revokedAt: row.revoked_at,
+      }));
+  }
+
+  grantProjectAccess({ id = randomUUID(), projectId, userId, treePath, branchName }) {
+    this.db.prepare(`INSERT INTO project_access
+      (id,project_id,user_id,access_kind,tree_path,branch_name,status,created_at)
+      VALUES (?,?,?,'shared',?,?,'active',?)`).run(id, projectId, userId, treePath, branchName, now());
+    return this.getProjectAccessById(id);
+  }
+
+  revokeProjectAccess(id) {
+    this.db.prepare("UPDATE project_access SET status='revoked',revoked_at=? WHERE id=? AND access_kind='shared' AND status='active'")
+      .run(now(), id);
+    return this.getProjectAccessById(id);
+  }
+
+  setProjectRepoKind(id, repoKind) {
+    this.db.prepare('UPDATE projects SET repo_kind=?,updated_at=? WHERE id=?').run(repoKind, now(), id);
+    return this.getProject(id);
+  }
+
   updateProject(id, { name, description }) {
     this.db.prepare('UPDATE projects SET name=?,description=?,updated_at=? WHERE id=?').run(name, description, now(), id);
     return this.getProject(id);
@@ -239,11 +374,11 @@ export class HarnessDatabase {
   touchProject(id) { this.db.prepare('UPDATE projects SET updated_at=? WHERE id=?').run(now(), id); }
   deleteProject(id) { this.db.prepare('DELETE FROM projects WHERE id=?').run(id); }
 
-  createChat({ projectId, userId, title }) {
+  createChat({ projectId, userId, projectAccessId, treePath, title }) {
     const id = randomUUID();
     const timestamp = now();
-    this.db.prepare('INSERT INTO chats (id,project_id,user_id,title,created_at,updated_at) VALUES (?,?,?,?,?,?)')
-      .run(id, projectId, userId, title, timestamp, timestamp);
+    this.db.prepare('INSERT INTO chats (id,project_id,user_id,project_access_id,tree_path,title,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)')
+      .run(id, projectId, userId, projectAccessId, treePath, title, timestamp, timestamp);
     return this.getChat(id);
   }
 
@@ -251,6 +386,7 @@ export class HarnessDatabase {
     return row ? {
       id: row.id, projectId: row.project_id, userId: row.user_id, title: row.title,
       codexThreadId: row.codex_thread_id, status: row.status,
+      projectAccessId: row.project_access_id, treePath: row.tree_path,
       createdAt: row.created_at, updatedAt: row.updated_at,
       projectName: row.project_name, projectSlug: row.project_slug,
       username: row.username,
@@ -319,10 +455,14 @@ export class HarnessDatabase {
 
   stats() {
     const count = (table, where = '') => Number(this.db.prepare(`SELECT COUNT(*) AS count FROM ${table} ${where}`).get().count);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
     return {
       users: count('users'), activeUsers: count('users', "WHERE status='active'"),
+      todayActiveUsers: Number(this.db.prepare('SELECT COUNT(*) AS count FROM users WHERE last_login_at>=?').get(today.toISOString()).count),
       projects: count('projects'), chats: count('chats'), messages: count('messages'),
       runningChats: count('chats', "WHERE status='running'"),
+      activeShares: count('project_access', "WHERE access_kind='shared' AND status='active'"),
     };
   }
 }

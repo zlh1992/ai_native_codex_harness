@@ -38,7 +38,7 @@
       <button class="brand-button" data-view="workbench"><span class="mark small">C</span><span>CODEX<br><b>HARNESS</b></span></button>
       <nav>
         <button class="nav-button active" data-view="workbench">工作台</button>
-        <button id="admin-nav" class="nav-button hidden" data-view="admin">驾驶舱</button>
+        <button id="boss-nav" class="nav-button hidden">驾驶舱</button>
       </nav>
       <div class="topbar-right">
         <span id="codex-status" class="backend-status"><i></i> Codex</span>
@@ -121,18 +121,6 @@
       </aside>
     </section>
 
-    <section id="admin-view" class="admin-view hidden">
-      <div class="admin-title">
-        <div><p class="eyebrow">SUPER ADMIN COCKPIT</p><h1>系统驾驶舱</h1><p>用户、工作区、配额和审计集中管理。</p></div>
-        <button id="new-user" class="primary">＋ 创建用户</button>
-      </div>
-      <div id="metric-grid" class="metric-grid"></div>
-      <div class="admin-grid">
-        <section class="admin-card users-card"><div class="card-title"><h2>用户与权限</h2><button id="refresh-admin" class="icon-button">↻</button></div><div class="table-wrap"><table><thead><tr><th>用户</th><th>状态</th><th>网络</th><th>项目 / 空间</th><th>最近登录</th><th></th></tr></thead><tbody id="user-table"></tbody></table></div></section>
-        <section class="admin-card projects-card"><div class="card-title"><h2>全部项目</h2><span id="project-count"></span></div><div id="admin-project-list" class="admin-project-list"></div></section>
-        <section class="admin-card audit-card"><div class="card-title"><h2>最近审计</h2><button id="refresh-audit" class="icon-button">↻</button></div><div id="audit-list" class="audit-list"></div></section>
-      </div>
-    </section>
   </div>
 
   <dialog id="project-dialog">
@@ -140,22 +128,8 @@
       <div class="dialog-title"><span class="mark small">C</span><div><p class="eyebrow">NEW WORKSPACE</p><h2>创建隔离项目</h2></div></div>
       <label>项目名称<input name="name" maxlength="80" required placeholder="例如：客户门户"></label>
       <label>项目说明<textarea name="description" maxlength="1000" rows="3" placeholder="目标、技术栈或上下文"></textarea></label>
-      <label id="project-owner-field" class="hidden">所有者<select name="userId"></select></label>
       <p class="form-error"></p>
       <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button value="default" class="primary">创建项目</button></div>
-    </form>
-  </dialog>
-
-  <dialog id="user-dialog">
-    <form method="dialog" id="user-form" class="dialog-form">
-      <div class="dialog-title"><span class="mark small">U</span><div><p class="eyebrow">ACCOUNT & POLICY</p><h2 id="user-dialog-title">创建用户</h2></div></div>
-      <input name="id" type="hidden">
-      <div class="field-grid"><label>用户名<input name="username" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{2,31}"></label><label>显示名称<input name="displayName" required maxlength="64"></label></div>
-      <label>密码<input name="password" type="password" minlength="12" autocomplete="new-password"><small>新用户必填；编辑时留空表示不修改。</small></label>
-      <div class="field-grid three"><label>项目上限<input name="maxProjects" type="number" min="1" value="10"></label><label>空间上限（GB）<input name="maxStorageGb" type="number" min="1" value="2"></label><label>并发任务<input name="maxConcurrentTurns" type="number" min="1" max="40" value="40"></label></div>
-      <div class="toggle-row"><label><input name="networkAccess" type="checkbox"> 允许项目命令访问公网</label><label id="status-field" class="hidden"><input name="active" type="checkbox"> 账号启用</label></div>
-      <p class="form-error"></p>
-      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button value="default" class="primary">保存用户</button></div>
     </form>
   </dialog>
 

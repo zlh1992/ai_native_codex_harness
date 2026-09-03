@@ -1,0 +1,44 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { WorkspaceService } from '../src/fs-service.mjs';
+import { WorktreeService } from '../src/worktree-service.mjs';
+
+test('a shared project uses its own worktree and preserves dirty data on revoke', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-harness-worktree-'));
+  const config = {
+    dataDir: base,
+    workspacesRoot: path.join(base, 'workspaces'),
+    treesRoot: path.join(base, 'trees'),
+    runtimeRoot: path.join(base, 'runtime'),
+    trashRoot: path.join(base, 'trash'),
+    fileMaxBytes: 1024 * 1024,
+    uploadMaxBytes: 1024 * 1024,
+  };
+  const workspace = new WorkspaceService(config);
+  const worktrees = new WorktreeService(config);
+  const ownerProject = {
+    id: randomUUID(), userId: randomUUID(), accessUserId: randomUUID(), accessId: randomUUID(),
+    slug: 'boss-project', name: 'Boss project', description: '', accessKind: 'owner',
+  };
+  ownerProject.accessUserId = ownerProject.userId;
+  workspace.createProject(ownerProject);
+  worktrees.initialize(workspace.projectRoot(ownerProject));
+
+  const accessId = randomUUID();
+  const shared = worktrees.createShare({ projectRoot: workspace.projectRoot(ownerProject), projectId: ownerProject.id, accessId });
+  const employeeProject = { ...ownerProject, accessId, accessUserId: randomUUID(), accessKind: 'shared', treePath: shared.treePath };
+  assert.throws(() => workspace.readFile(employeeProject, '.git'), /内部路径/);
+  workspace.writeFile(employeeProject, 'employee-only.txt', 'private work in progress');
+  assert.equal(workspace.readFile(employeeProject, 'employee-only.txt').content, 'private work in progress');
+  assert.deepEqual(workspace.usageForUser(employeeProject.accessUserId, [employeeProject]), workspace.projectUsage(employeeProject));
+  assert.equal(fs.existsSync(path.join(workspace.projectRoot(ownerProject), 'employee-only.txt')), false);
+  assert.throws(() => workspace.projectRoot({ ...employeeProject, treePath: path.join(base, 'outside') }), /项目目录配置无效/);
+
+  const cleanup = worktrees.removeShare({ projectRoot: workspace.projectRoot(ownerProject), treePath: shared.treePath });
+  assert.deepEqual({ removed: cleanup.removed, dirty: cleanup.dirty }, { removed: false, dirty: true });
+  assert.equal(fs.existsSync(shared.treePath), true);
+});

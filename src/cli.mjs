@@ -51,6 +51,7 @@ const command = process.argv[2];
 
 try {
   if (command === 'create-admin') {
+    if (db.countAdmins() > 0) throw new Error('超级管理员已存在；系统只允许一个老板账号。');
     const usernameArg = process.argv.find((value) => value.startsWith('--username='));
     let username = usernameArg?.slice('--username='.length) || '';
     if (!username && stdin.isTTY) {
@@ -63,6 +64,7 @@ try {
     const password = await hiddenQuestion('超级管理员密码（至少 12 位）: ');
     const confirmation = stdin.isTTY ? await hiddenQuestion('再次输入密码: ') : password;
     if (password !== confirmation) throw new Error('两次输入的密码不一致。');
+    if (password.length < 12 || password.length > 256) throw new Error('密码长度必须为 12–256 个字符。');
     const user = db.createUser({
       username, displayName: '超级管理员', passwordHash: await hashPassword(password), role: 'admin',
       networkAccess: true, maxProjects: 1000, maxStorageBytes: 1024 * 1024 * 1024 * 1024,
@@ -79,6 +81,7 @@ try {
     const password = await hiddenQuestion('新密码（至少 12 位）: ');
     const confirmation = stdin.isTTY ? await hiddenQuestion('再次输入密码: ') : password;
     if (password !== confirmation) throw new Error('两次输入的密码不一致。');
+    if (password.length < 12 || password.length > 256) throw new Error('密码长度必须为 12–256 个字符。');
     db.updateUser(row.id, { passwordHash: await hashPassword(password) });
     db.deleteUserSessions(row.id);
     db.audit({ actorUserId: row.id, action: 'password.reset_cli', targetType: 'user', targetId: row.id });

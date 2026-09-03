@@ -11,21 +11,26 @@ function readableRoot(root) {
   return `(subpath "${seatbeltString(root)}")`;
 }
 
-export function buildSeatbeltProfile({ userRoot, networkAccess }) {
+export function buildSeatbeltProfile({ userRoot, readableRoots = [], writableRoots = [], deniedPaths = [], networkAccess }) {
+  const allowedWriteRoots = [...new Set([...(writableRoots.length ? writableRoots : [userRoot])].filter(Boolean))];
   const runtimeRoots = [
-    userRoot,
+    ...allowedWriteRoots, ...readableRoots,
     '/bin', '/sbin', '/usr', '/System',
     '/Library/Apple', '/Library/Developer', '/Library/Frameworks', '/Library/Python', '/Library/Ruby',
     '/Applications/Xcode.app',
     '/opt/homebrew', '/usr/local', '/private/var/select',
-  ].filter((candidate) => candidate === userRoot || fs.existsSync(candidate));
+  ].filter((candidate) => allowedWriteRoots.includes(candidate) || readableRoots.includes(candidate) || fs.existsSync(candidate));
   return [
     '(version 1)',
     '(deny default)',
     '(import "system.sb")',
     '(allow process*)',
     `(allow file-read* ${runtimeRoots.map(readableRoot).join(' ')})`,
-    `(allow file-write* ${readableRoot(userRoot)})`,
+    `(allow file-write* ${allowedWriteRoots.map(readableRoot).join(' ')})`,
+    ...deniedPaths.flatMap((denied) => [
+      `(deny file-read* (literal "${seatbeltString(denied)}") (subpath "${seatbeltString(denied)}"))`,
+      `(deny file-write* (literal "${seatbeltString(denied)}") (subpath "${seatbeltString(denied)}"))`,
+    ]),
     networkAccess ? '(allow network-outbound)' : '',
   ].filter(Boolean).join(' ');
 }
@@ -37,16 +42,20 @@ function killGroup(child, signal = 'SIGTERM') {
   }
 }
 
-export async function runSandboxedCommand({ config, workspace, project, user, command, cwd = '' }) {
+export async function runSandboxedCommand({ config, workspace, project, user, command, cwd = '', signal }) {
   invariant(process.platform === 'darwin', 501, 'SANDBOX_UNAVAILABLE', '当前安全命令执行器仅支持 macOS Seatbelt。');
-  const projectRoot = workspace.projectRoot(project);
-  const userRoot = fs.realpathSync(workspace.ensureUserRoot(user.id));
+  const projectRoot = fs.realpathSync(workspace.projectRoot(project));
+  const runtimeRoot = fs.realpathSync(workspace.ensureRuntimeRoot(user.id));
   const requestedCwd = workspace.resolve(project, cwd || '', { mustExist: true, directory: true }).target;
-  const home = path.join(userRoot, '.home');
-  const tmp = path.join(userRoot, '.tmp');
+  const home = path.join(runtimeRoot, 'home');
+  const tmp = path.join(runtimeRoot, 'tmp');
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });
   fs.mkdirSync(tmp, { recursive: true, mode: 0o700 });
-  const profile = buildSeatbeltProfile({ userRoot, networkAccess: user.networkAccess });
+  const profile = buildSeatbeltProfile({
+    writableRoots: [projectRoot, runtimeRoot],
+    deniedPaths: project.accessKind === 'shared' ? [path.join(projectRoot, '.git')] : [],
+    networkAccess: user.networkAccess,
+  });
   const cpuSeconds = Math.max(5, Math.ceil(config.commandTimeoutMs / 1000));
   const wrapped = `ulimit -t ${cpuSeconds}; ulimit -n 256; ulimit -u 96; ${String(command)}`;
   const env = {
@@ -71,6 +80,7 @@ export async function runSandboxedCommand({ config, workspace, project, user, co
     let bytes = 0;
     let truncated = false;
     let timedOut = false;
+    let aborted = false;
     const collect = (stream, chunk) => {
       if (bytes >= config.commandMaxOutputBytes) { truncated = true; return; }
       const remaining = config.commandMaxOutputBytes - bytes;
@@ -86,19 +96,29 @@ export async function runSandboxedCommand({ config, workspace, project, user, co
       killGroup(child, 'SIGTERM');
       setTimeout(() => killGroup(child, 'SIGKILL'), 1500).unref();
     }, config.commandTimeoutMs);
+    const abort = () => {
+      aborted = true;
+      killGroup(child, 'SIGTERM');
+      setTimeout(() => killGroup(child, 'SIGKILL'), 1500).unref();
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
     child.on('error', (error) => {
       clearTimeout(timer);
-      resolve({ ok: false, exitCode: null, output: error.message, timedOut, truncated });
+      signal?.removeEventListener('abort', abort);
+      resolve({ ok: false, exitCode: null, output: error.message, timedOut, aborted, truncated });
     });
-    child.on('close', (code, signal) => {
+    child.on('close', (code, closeSignal) => {
       clearTimeout(timer);
+      signal?.removeEventListener?.('abort', abort);
       const output = Buffer.concat(chunks).toString('utf8');
       resolve({
-        ok: code === 0 && !timedOut,
+        ok: code === 0 && !timedOut && !aborted,
         exitCode: code,
-        signal,
+        signal: closeSignal,
         output: `${output}${truncated ? '\n[output truncated]' : ''}${timedOut ? '\n[command timed out]' : ''}`.trim(),
         timedOut,
+        aborted,
         truncated,
       });
     });
