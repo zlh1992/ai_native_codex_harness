@@ -1,0 +1,25 @@
+{
+  "name": "codex-harness-remote",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-tenant browser workbench backed by the local Codex app-server.",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "dev": "NODE_ENV=development node --watch src/server.mjs",
+    "admin": "node src/cli.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check src/server.mjs && node --check public/app.js && bash -n bin/*.sh && npm test"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0"
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "11.1.1"
+    }
+  }
+}

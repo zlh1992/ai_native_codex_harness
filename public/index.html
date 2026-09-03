@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Codex Harness</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="grain"></div>
+  <main id="login-view" class="login-shell">
+    <section class="login-copy">
+      <div class="wordmark"><span class="mark">C</span> CODEX / HARNESS</div>
+      <p class="eyebrow">LOCAL MAC · REMOTE WORKBENCH</p>
+      <h1>把一台 Mac，变成一间安全的<br><em>Codex 工作室。</em></h1>
+      <p class="lede">独立账号、隔离项目、实时编程。代码留在管理员指定的本机工作区中。</p>
+      <div class="trust-row">
+        <span>独立工作区</span><span>受控命令沙箱</span><span>全量审计</span>
+      </div>
+    </section>
+    <section class="login-card">
+      <div class="status-pill"><i></i><span id="login-health">正在连接本机服务</span></div>
+      <h2>登录工作台</h2>
+      <p>使用管理员分配给你的账号。</p>
+      <form id="login-form">
+        <label>用户名<input id="login-username" name="username" autocomplete="username" required autofocus></label>
+        <label>密码<input id="login-password" name="password" type="password" autocomplete="current-password" required></label>
+        <button class="primary wide" type="submit"><span>进入 Codex</span><b>↗</b></button>
+      </form>
+      <p id="login-error" class="form-error" role="alert"></p>
+      <p class="login-foot">仅限授权用户 · 会话使用 HttpOnly 安全 Cookie</p>
+    </section>
+  </main>
+
+  <div id="app-view" class="app-shell hidden">
+    <header class="topbar">
+      <button class="brand-button" data-view="workbench"><span class="mark small">C</span><span>CODEX<br><b>HARNESS</b></span></button>
+      <nav>
+        <button class="nav-button active" data-view="workbench">工作台</button>
+        <button id="admin-nav" class="nav-button hidden" data-view="admin">驾驶舱</button>
+      </nav>
+      <div class="topbar-right">
+        <span id="codex-status" class="backend-status"><i></i> Codex</span>
+        <span id="model-badge" class="model-badge"></span>
+        <span id="user-chip" class="user-chip"></span>
+        <button id="logout-button" class="icon-button" title="退出登录">↪</button>
+      </div>
+    </header>
+
+    <section id="workbench-view" class="workbench">
+      <aside class="project-rail panel">
+        <div class="rail-heading">
+          <div><p class="eyebrow">WORKSPACES</p><h2>项目</h2></div>
+          <button id="new-project" class="square-button" title="新建项目">＋</button>
+        </div>
+        <div id="project-list" class="project-list empty-state">暂无项目</div>
+        <div class="storage-card">
+          <div><span>空间用量</span><b id="storage-label">0 B</b></div>
+          <div class="meter"><i id="storage-meter"></i></div>
+        </div>
+        <div class="rail-heading chat-heading">
+          <div><p class="eyebrow">THREADS</p><h2>对话</h2></div>
+          <button id="new-chat" class="square-button" title="新建对话">＋</button>
+        </div>
+        <div id="chat-list" class="chat-list empty-state">请先选择项目</div>
+      </aside>
+
+      <div id="left-resizer" class="panel-resizer vertical" role="separator" aria-label="调整项目栏宽度" aria-orientation="vertical" tabindex="0"></div>
+
+      <section class="chat-stage panel">
+        <div class="stage-header">
+          <div><p id="project-kicker" class="eyebrow">SELECT A PROJECT</p><h2 id="chat-title">欢迎使用 Codex Harness</h2></div>
+          <div class="turn-controls">
+            <label>推理强度<select id="effort-select"></select></label>
+            <button id="stop-turn" class="danger-button hidden">停止</button>
+          </div>
+        </div>
+        <div id="message-list" class="message-list">
+          <div class="welcome-message">
+            <span class="mark">C</span>
+            <h3>从一个项目开始。</h3>
+            <p>创建或选择项目，再新建对话。Codex 会在隔离的本机目录中读取、编写和验证代码。</p>
+          </div>
+        </div>
+        <div id="activity-strip" class="activity-strip hidden"></div>
+        <form id="composer" class="composer">
+          <textarea id="prompt-input" rows="1" maxlength="100000" placeholder="告诉 Codex 你想构建什么…" disabled></textarea>
+          <button id="send-button" class="send-button" type="submit" disabled>↑</button>
+          <div class="composer-foot"><span id="composer-context">选择一个对话后即可开始</span><span>⌘ Enter 发送</span></div>
+        </form>
+      </section>
+
+      <div id="right-resizer" class="panel-resizer vertical" role="separator" aria-label="调整文件栏宽度" aria-orientation="vertical" tabindex="0"></div>
+
+      <aside class="files-panel panel viewer-closed">
+        <div class="files-header">
+          <div><p class="eyebrow">PROJECT FILES</p><h2>文件</h2></div>
+          <div class="file-actions">
+            <button id="new-file" class="icon-button" title="新建文件">＋文</button>
+            <button id="new-folder" class="icon-button" title="新建目录">＋夹</button>
+            <label class="icon-button upload-label" title="上传文件">上传<input id="upload-file" type="file" hidden></label>
+            <button id="refresh-files" class="icon-button" title="刷新">↻</button>
+          </div>
+        </div>
+        <div id="file-tree" class="file-tree empty-state">选择项目后浏览文件</div>
+        <div id="file-tree-resizer" class="panel-resizer horizontal hidden" role="separator" aria-label="调整文件列表和预览区高度" aria-orientation="horizontal" tabindex="0"></div>
+        <section id="editor-pane" class="editor-pane hidden">
+          <div class="editor-header">
+            <span id="editor-path"></span>
+            <div class="viewer-actions">
+              <div id="viewer-tabs" class="viewer-tabs hidden"><button id="preview-tab" class="viewer-tab active">预览</button><button id="source-tab" class="viewer-tab">源码</button></div>
+              <a id="download-file" class="text-link" href="#" download>下载</a>
+              <button id="delete-file" class="text-danger">移到废纸篓</button>
+              <button id="save-file" class="primary compact">保存</button>
+            </div>
+          </div>
+          <div id="file-preview" class="file-preview"></div>
+          <textarea id="file-editor" spellcheck="false"></textarea>
+        </section>
+      </aside>
+    </section>
+
+    <section id="admin-view" class="admin-view hidden">
+      <div class="admin-title">
+        <div><p class="eyebrow">SUPER ADMIN COCKPIT</p><h1>系统驾驶舱</h1><p>用户、工作区、配额和审计集中管理。</p></div>
+        <button id="new-user" class="primary">＋ 创建用户</button>
+      </div>
+      <div id="metric-grid" class="metric-grid"></div>
+      <div class="admin-grid">
+        <section class="admin-card users-card"><div class="card-title"><h2>用户与权限</h2><button id="refresh-admin" class="icon-button">↻</button></div><div class="table-wrap"><table><thead><tr><th>用户</th><th>状态</th><th>网络</th><th>项目 / 空间</th><th>最近登录</th><th></th></tr></thead><tbody id="user-table"></tbody></table></div></section>
+        <section class="admin-card projects-card"><div class="card-title"><h2>全部项目</h2><span id="project-count"></span></div><div id="admin-project-list" class="admin-project-list"></div></section>
+        <section class="admin-card audit-card"><div class="card-title"><h2>最近审计</h2><button id="refresh-audit" class="icon-button">↻</button></div><div id="audit-list" class="audit-list"></div></section>
+      </div>
+    </section>
+  </div>
+
+  <dialog id="project-dialog">
+    <form method="dialog" id="project-form" class="dialog-form">
+      <div class="dialog-title"><span class="mark small">C</span><div><p class="eyebrow">NEW WORKSPACE</p><h2>创建隔离项目</h2></div></div>
+      <label>项目名称<input name="name" maxlength="80" required placeholder="例如：客户门户"></label>
+      <label>项目说明<textarea name="description" maxlength="1000" rows="3" placeholder="目标、技术栈或上下文"></textarea></label>
+      <label id="project-owner-field" class="hidden">所有者<select name="userId"></select></label>
+      <p class="form-error"></p>
+      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button value="default" class="primary">创建项目</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="user-dialog">
+    <form method="dialog" id="user-form" class="dialog-form">
+      <div class="dialog-title"><span class="mark small">U</span><div><p class="eyebrow">ACCOUNT & POLICY</p><h2 id="user-dialog-title">创建用户</h2></div></div>
+      <input name="id" type="hidden">
+      <div class="field-grid"><label>用户名<input name="username" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{2,31}"></label><label>显示名称<input name="displayName" required maxlength="64"></label></div>
+      <label>密码<input name="password" type="password" minlength="12" autocomplete="new-password"><small>新用户必填；编辑时留空表示不修改。</small></label>
+      <div class="field-grid three"><label>项目上限<input name="maxProjects" type="number" min="1" value="10"></label><label>空间上限（GB）<input name="maxStorageGb" type="number" min="1" value="2"></label><label>并发任务<input name="maxConcurrentTurns" type="number" min="1" max="40" value="40"></label></div>
+      <div class="toggle-row"><label><input name="networkAccess" type="checkbox"> 允许项目命令访问公网</label><label id="status-field" class="hidden"><input name="active" type="checkbox"> 账号启用</label></div>
+      <p class="form-error"></p>
+      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button value="default" class="primary">保存用户</button></div>
+    </form>
+  </dialog>
+
+  <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
