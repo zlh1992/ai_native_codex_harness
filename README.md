@@ -55,12 +55,13 @@ macOS `launchd` 使用独立标签 `com.codex-harness-remote.server` 与 `com.co
 - 老板项目主目录与员工共享 Git worktree 分离；每个老板项目最多授权一名员工，撤权立即关闭 ACL，脏工作树保留、干净工作树自动移除。
 - API 拒绝绝对路径、`..`、`.git` 等内部路径和越界符号链接；删除操作移动到 `.data/trash`，便于恢复。
 - Codex app-server 只使用 stdio；不向浏览器提供原始 RPC；会话/turn 映射由服务端验证。
-- 关闭 Codex 内置 Shell、patch、浏览器、插件、MCP、电脑控制和多智能体。模型只得到后端托管的 `workspace_*` 动态工具。
+- 关闭 Codex 内置 Shell、浏览器、插件、外部 MCP 和电脑控制；保留原生 apply-patch/diff、approval、plan、goal、skills 与子代理。动态 `workspace_*` 工具仍由后端做 ACL 和路径校验。
 - 项目命令使用无秘密环境，并套用 macOS Seatbelt：默认不能读这台 Mac 的用户主目录或其他用户工作区；网络权限由超级管理员按用户开关。
-- 命令超时、输出上限、进程/文件描述符上限、用户并发、全局并发、项目数和存储配额；全局和单用户 Codex turn 上限均可配置，硬上限为 40。
+- 命令超时、输出上限、进程/文件描述符上限、用户并发、全局并发、项目数和存储配额；员工项目硬上限 100，全局 Codex turn 硬上限 40，Portal 同时运行 11 个 root turn，其中 EXECUTE lease 为 2 个。
 - 浏览器内项目/对话管理、跨用户/项目/对话并发、流式 Codex 输出、工具活动、停止 turn、文件树、编辑器、上传、可恢复删除。
 - 可拖拽调整项目栏、对话栏、文件栏以及文件树/预览区；支持 SVG/图片、DOT 配套 SVG、PDF、Excel、CSV/TSV、Markdown、JSON 和源代码预览。
 - 独立老板驾驶舱：全局指标、员工创建/停用/重置密码、网络与配额、项目授权/worktree 生命周期和审计；原工作台保留给员工及老板自己的项目。
+- 员工任务首页：老板 roadmap 拆分的线性任务、EDIT/EXECUTE 模式、浏览器原生审批、plan/diff/goal 展示和最终回复不可变提交快照；完整对话历史继续由 Codex thread 保存。
 
 ## 常用命令
 

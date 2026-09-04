@@ -32,20 +32,34 @@ export class CodexAppServerClient extends EventEmitter {
   async #start() {
     const disabledFeatures = [
       'apps', 'plugins', 'shell_tool', 'unified_exec', 'view_image', 'browser_use',
-      'in_app_browser', 'computer_use', 'image_generation', 'multi_agent',
+      'in_app_browser', 'computer_use', 'image_generation',
       'workspace_dependencies', 'skill_search', 'web_search',
     ];
     const args = [
       'app-server', '--stdio',
       '-c', `model_provider="${this.config.codexModelProvider}"`,
       '-c', `model_providers.${this.config.codexModelProvider}={name="OpenAI HTTPS",base_url="${this.config.chatgptCodexBaseUrl}",wire_api="responses",requires_openai_auth=true,supports_websockets=false}`,
+      '-c', 'agents.enabled=true',
+      '-c', `agents.max_concurrent_threads_per_session=${this.config.maxSubagentsPerRoot}`,
+      '-c', `agents.default_subagent_model="${this.config.subagentModel}"`,
+      '-c', 'agents.default_subagent_reasoning_effort="medium"',
     ];
+    for (const role of ['default', 'worker', 'explorer']) {
+      args.push('-c', `agents.${role}.description="Portal-managed Luna subagent"`);
+      args.push('-c', `agents.${role}.config_file="${this.config.portalAgentConfig}"`);
+    }
     for (const feature of disabledFeatures) args.push('--disable', feature);
     this.stopping = false;
     this.lastError = null;
-    const childEnv = { ...process.env };
-    for (const key of Object.keys(childEnv)) {
-      if (/^(ADMIN_PASSWORD|CODEX_HARNESS_ADMIN_PASSWORD|PUBLIC_TUNNEL_TOKEN|CLOUDFLARE_API_TOKEN)$/i.test(key)) delete childEnv[key];
+    // App Server authenticates from local Codex state and does not need Portal,
+    // Cloudflare, Git, CI, or arbitrary developer secrets from the web process.
+    const childEnv = {};
+    for (const key of [
+      'HOME', 'PATH', 'TMPDIR', 'LANG', 'LC_ALL', 'USER', 'LOGNAME', 'SHELL', 'TERM',
+      'CODEX_HOME', 'XDG_CONFIG_HOME', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
+      'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+    ]) {
+      if (process.env[key] !== undefined) childEnv[key] = process.env[key];
     }
     this.process = spawn(this.config.codexBin, args, {
       cwd: this.config.rootDir,
@@ -66,10 +80,16 @@ export class CodexAppServerClient extends EventEmitter {
       this.emit('exit', error);
     });
     readline.createInterface({ input: this.process.stdout }).on('line', (line) => this.#handleLine(line));
-    await this.request('initialize', {
+    const initialized = await this.request('initialize', {
       clientInfo: { name: 'codex_harness_remote', title: 'Codex Harness Remote', version: '1.0.0' },
       capabilities: { experimentalApi: true },
     }, 30_000);
+    const versionMarker = `/${this.config.codexCliVersion} `;
+    if (!String(initialized.userAgent || '').includes(versionMarker)) {
+      const actual = String(initialized.userAgent || 'unknown');
+      try { this.process?.kill('SIGTERM'); } catch { /* already stopped */ }
+      throw new Error(`Codex 协议版本不匹配：需要 ${this.config.codexCliVersion}，实际 ${actual}`);
+    }
     this.notify('initialized', {});
     this.started = true;
     this.emit('ready');

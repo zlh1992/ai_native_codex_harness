@@ -4,7 +4,8 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = {
   me: null, csrf: '', projects: [], chats: [], selectedProject: null, selectedChat: null,
   selectedFile: null, selectedFileInfo: null, fileEntries: [], fileContent: null, viewerMode: 'preview',
-  runningTurns: new Map(), maxConcurrentTurns: 40,
+  runningTurns: new Map(), maxConcurrentTurns: 11, tasks: [], selectedTask: null,
+  codexCapacity: null, pendingSubmission: null,
 };
 
 function formatBytes(value) {
@@ -105,14 +106,17 @@ async function bootstrap() {
     $('#model-badge').textContent = data.model;
     $('#codex-status').classList.toggle('online', data.codex.ready);
     $('#boss-nav').classList.toggle('hidden', data.user.role !== 'admin');
-    state.maxConcurrentTurns = data.codex.maxConcurrentTurns || 40;
+    state.codexCapacity = data.codex;
+    state.maxConcurrentTurns = data.codex.maxRootTurns || 11;
     updateConcurrencyIndicator();
+    updateCapacity(data.codex);
     $('#effort-select').innerHTML = data.efforts.map((value) => `<option value="${value}" ${value === data.defaultEffort ? 'selected' : ''}>${value}</option>`).join('');
     updateUsage(data.usage, data.user.maxStorageBytes);
-    await loadProjects();
+    await Promise.all([loadProjects(), loadTasks()]);
     const requestedProject = new URLSearchParams(location.search).get('project');
     const selected = requestedProject && state.projects.find((project) => project.id === requestedProject);
-    if (selected) await selectProject(selected);
+    if (selected) { await selectProject(selected); switchView('workbench'); }
+    else switchView('tasks');
   } catch { showLogin(); }
 }
 
@@ -121,10 +125,64 @@ function updateUsage(usage, quota) {
   $('#storage-meter').style.width = `${Math.min(100, Number(usage?.bytes || 0) / Number(quota || 1) * 100)}%`;
 }
 
+function updateCapacity(capacity = state.codexCapacity || {}) {
+  state.codexCapacity = { ...(state.codexCapacity || {}), ...capacity };
+  $('#execute-capacity').textContent = `${state.codexCapacity.activeExecuteLeases || 0} / ${state.codexCapacity.maxExecuteLeases || 2}`;
+}
+
+async function loadTasks() {
+  const data = await api('/api/tasks');
+  state.tasks = data.tasks || [];
+  renderTasks();
+}
+
+function taskStatusLabel(status) {
+  return ({ draft: '草稿', ready: '等待前序', active: '进行中', submitted: '待老板验收', passed: '已通过', rework: '需返工' })[status] || status;
+}
+
+function renderTasks() {
+  const active = state.tasks.filter((task) => ['active', 'rework'].includes(task.status)).length;
+  $('#task-active-count').textContent = String(active);
+  $('#task-submitted-count').textContent = String(state.tasks.filter((task) => task.status === 'submitted').length);
+  $('#task-passed-count').textContent = String(state.tasks.filter((task) => task.status === 'passed').length);
+  $('#visible-project-count').textContent = String(state.projects.length);
+  const root = $('#task-list');
+  if (!state.tasks.length) {
+    root.className = 'task-board empty-state';
+    root.textContent = '老板尚未分配任务。你仍可在工作台处理自己的项目。';
+    return;
+  }
+  root.className = 'task-board';
+  root.innerHTML = state.tasks.map((task) => {
+    const actionable = ['active', 'rework'].includes(task.status);
+    return `<article class="task-card status-${task.status}">
+      <div class="task-card-top"><span class="status-tag ${task.status}">${escapeHtml(taskStatusLabel(task.status))}</span><span>V${task.version} · #${task.position + 1}</span></div>
+      <p class="eyebrow">${escapeHtml(task.roadmapTitle || 'DIRECT TASK')} · ${escapeHtml(task.projectName)}</p>
+      <h3>${escapeHtml(task.title)}</h3>
+      <div class="acceptance"><b>验收标准</b><p>${escapeHtml(task.acceptance)}</p></div>
+      <div class="task-card-foot"><span>${formatDate(task.updatedAt, true)}</span>${actionable ? `<button class="primary task-open" data-id="${task.id}">${task.status === 'rework' ? '继续返工' : '进入任务'}</button>` : ''}</div>
+    </article>`;
+  }).join('');
+  $$('.task-open', root).forEach((button) => button.addEventListener('click', () => openTask(button.dataset.id)));
+}
+
+async function openTask(taskId) {
+  try {
+    const data = await api(`/api/tasks/${taskId}/chat`, { method: 'POST' });
+    state.selectedTask = data.task;
+    let project = state.projects.find((item) => item.id === data.project.id);
+    if (!project) { await loadProjects(); project = state.projects.find((item) => item.id === data.project.id); }
+    await selectProject(project);
+    await selectChat(data.chat);
+    switchView('workbench');
+  } catch (error) { toast(error.message, 'error'); await loadTasks(); }
+}
+
 async function loadProjects() {
   const data = await api('/api/projects');
   state.projects = data.projects;
   renderProjects();
+  if (state.tasks) renderTasks();
   if (state.selectedProject) {
     const refreshed = state.projects.find((item) => item.id === state.selectedProject.id);
     if (refreshed) await selectProject(refreshed, false);
@@ -141,8 +199,9 @@ function renderProjects() {
 }
 
 async function selectProject(project, clearChat = true) {
+  if (!project) return toast('项目授权已失效，请刷新任务列表。', 'error');
   state.selectedProject = project;
-  if (clearChat) state.selectedChat = null;
+  if (clearChat) { state.selectedChat = null; state.selectedTask = null; }
   closeViewer();
   renderProjects();
   $('#project-kicker').textContent = project.username ? `${project.username.toUpperCase()} / ${project.slug}` : project.slug;
@@ -152,7 +211,7 @@ async function selectProject(project, clearChat = true) {
 }
 
 function resetProject() {
-  state.selectedProject = null; state.selectedChat = null; closeViewer();
+  state.selectedProject = null; state.selectedChat = null; state.selectedTask = null; closeViewer();
   renderProjects(); renderChats(); renderMessages([]);
   $('#file-tree').className = 'file-tree empty-state'; $('#file-tree').textContent = '选择项目后浏览文件';
 }
@@ -188,10 +247,12 @@ async function selectChat(chat) {
   $('#chat-title').textContent = chat.title;
   const data = await api(`/api/chats/${chat.id}`);
   state.selectedChat = data.chat;
+  state.selectedTask = data.task || null;
   renderMessages(data.messages);
   const running = state.runningTurns.get(chat.id);
   if (running) renderLiveTurn(running, !data.messages.some((message) => message.role === 'user' && message.content === running.prompt));
   renderActivity(running);
+  await refreshTurnInsights();
   setComposer(true);
 }
 
@@ -202,6 +263,8 @@ function renderMessages(messages) {
     return;
   }
   root.innerHTML = messages.map(messageHtml).join('');
+  const snapshot = [...messages].reverse().find((message) => message.role === 'assistant' && message.metadata);
+  renderPlanDiff(snapshot?.metadata?.plan || [], snapshot?.metadata?.diffSnapshot || '');
   root.scrollTop = root.scrollHeight;
 }
 
@@ -211,7 +274,11 @@ function messageHtml(message) {
     return `<div class="message event"><div class="tool-event">↳ ${escapeHtml(message.content)} ${result?.exitCode !== undefined ? `· exit ${escapeHtml(result.exitCode)}` : ''}</div></div>`;
   }
   const label = message.role === 'user' ? 'YOU' : message.role === 'error' ? 'ERROR' : 'CODEX';
-  return `<article class="message ${message.role}"><div class="message-label">${label}</div><div class="message-body">${markdown(message.content)}</div></article>`;
+  const canSubmit = message.role === 'assistant' && message.metadata?.turnRunId && message.metadata?.finalItemId
+    && state.selectedTask && message.metadata.taskId === state.selectedTask.id
+    && message.metadata.taskVersion === state.selectedTask.version && ['active', 'rework'].includes(state.selectedTask.status);
+  const action = canSubmit ? `<div class="message-actions"><button class="submit-task-button" data-turn-run-id="${escapeHtml(message.metadata.turnRunId)}" data-item-id="${escapeHtml(message.metadata.finalItemId)}" data-task-version="${escapeHtml(message.metadata.taskVersion)}">提交任务 Done</button></div>` : '';
+  return `<article class="message ${message.role}"><div class="message-label">${label}</div><div class="message-body">${markdown(message.content)}</div>${action}</article>`;
 }
 
 function appendMessage(role, content = '') {
@@ -240,7 +307,7 @@ function setComposer(enabled) {
   $('#send-button').disabled = !usable;
   $('#stop-turn').classList.toggle('hidden', !selectedChatRunning());
   $('#composer-context').textContent = state.selectedChat
-    ? `${state.selectedProject.name} · ${state.selectedChat.title}${selectedChatRunning() ? ' · 正在运行，可切换到其他对话并行提问' : ''}`
+    ? `${state.selectedProject.name} · ${state.selectedChat.title}${state.selectedTask ? ` · 任务 V${state.selectedTask.version}` : ''}${selectedChatRunning() ? ' · 正在运行，可切换到其他对话并行提问' : ''}`
     : '选择一个对话后即可开始';
 }
 
@@ -266,10 +333,61 @@ function renderActivity(entry) {
   strip.innerHTML = `<div class="activity-line"><i>●</i><span>${escapeHtml(entry.statusText || 'Codex 正在思考…')}</span></div>${entry.events.map((event) => `<div class="activity-line"><i>${event.done ? '✓' : '↳'}</i><span>${escapeHtml(event.name)}</span></div>`).join('')}`;
 }
 
+function updateInsightsVisibility() {
+  const visible = !$('#goal-card').classList.contains('hidden') || $('#approval-list').children.length
+    || !$('#plan-panel').classList.contains('hidden') || !$('#diff-panel').classList.contains('hidden');
+  $('#turn-insights').classList.toggle('hidden', !visible);
+}
+
+function renderPlanDiff(plan = [], diff = '') {
+  const planPanel = $('#plan-panel');
+  planPanel.classList.toggle('hidden', !plan.length);
+  $('div', planPanel).innerHTML = plan.map((item) => `<p><i class="plan-${escapeHtml(item.status)}"></i><span>${escapeHtml(item.step)}</span><b>${escapeHtml(item.status)}</b></p>`).join('');
+  const diffPanel = $('#diff-panel');
+  diffPanel.classList.toggle('hidden', !diff);
+  $('pre', diffPanel).textContent = diff;
+  updateInsightsVisibility();
+}
+
+function renderApprovals(approvals = []) {
+  const root = $('#approval-list');
+  root.innerHTML = approvals.map((approval) => {
+    const request = approval.request || {};
+    return `<article class="approval-card" data-id="${escapeHtml(approval.id || approval.approvalId)}">
+      <div><span class="status-tag rework">等待批准</span><b>${approval.kind === 'file' ? '文件修改' : '命令执行'}</b></div>
+      ${request.reason ? `<p>${escapeHtml(request.reason)}</p>` : ''}
+      ${request.command ? `<pre>${escapeHtml(request.command)}</pre>` : ''}
+      ${request.cwd ? `<small>cwd · ${escapeHtml(request.cwd)}</small>` : ''}
+      <div class="approval-actions"><button data-decision="decline" class="secondary">拒绝</button><button data-decision="accept" class="primary">批准一次</button></div>
+    </article>`;
+  }).join('');
+  updateInsightsVisibility();
+}
+
+async function refreshTurnInsights() {
+  if (!state.selectedChat) {
+    $('#goal-card').classList.add('hidden'); renderApprovals([]); updateInsightsVisibility(); return;
+  }
+  const chatId = state.selectedChat.id;
+  try {
+    const [goalData, approvalData] = await Promise.all([
+      api(`/api/chats/${chatId}/goal`), api(`/api/chats/${chatId}/approvals`),
+    ]);
+    if (state.selectedChat?.id !== chatId) return;
+    const goal = goalData.goal;
+    const card = $('#goal-card');
+    card.classList.toggle('hidden', !goal && !state.selectedTask);
+    if (goal || state.selectedTask) card.innerHTML = `<p class="eyebrow">CODEX GOAL · ${escapeHtml(goal?.status || '等待同步')}</p><b>${escapeHtml(state.selectedTask?.title || goal?.objective || '')}</b><p>${escapeHtml(state.selectedTask?.acceptance || goal?.objective || '')}</p><small>Goal 完成不等于任务通过；仍需从最终回复提交快照并等待老板验收。</small>`;
+    renderApprovals(approvalData.approvals || []);
+    updateInsightsVisibility();
+  } catch (error) { toast(error.message, 'error'); }
+}
+
 async function sendTurn(prompt) {
   const chat = { ...state.selectedChat, status: 'running' };
   const project = { ...state.selectedProject };
-  const entry = { chatId: chat.id, projectId: project.id, prompt, text: '', events: [], statusText: 'Codex 正在思考…' };
+  const mode = $('#mode-select').value;
+  const entry = { chatId: chat.id, projectId: project.id, prompt, mode, text: '', events: [], approvals: [], plan: [], diff: '', statusText: 'Codex 正在思考…' };
   state.runningTurns.set(chat.id, entry);
   state.selectedChat = chat;
   const localChat = state.chats.find((item) => item.id === chat.id); if (localChat) localChat.status = 'running';
@@ -280,7 +398,7 @@ async function sendTurn(prompt) {
   try {
     const response = await fetch(`/api/chats/${chat.id}/turns`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-csrf-token': state.csrf },
-      credentials: 'same-origin', body: JSON.stringify({ prompt, effort: $('#effort-select').value }),
+      credentials: 'same-origin', body: JSON.stringify({ prompt, effort: $('#effort-select').value, mode }),
     });
     if (!response.ok || !response.body) {
       const payload = response.headers.get('content-type')?.includes('json') ? await response.json() : null;
@@ -308,7 +426,36 @@ async function sendTurn(prompt) {
         } else if (event === 'tool_completed') {
           const tool = entry.events.find((item) => item.callId === data.callId); if (tool) tool.done = true; renderActivity(entry);
         } else if (event === 'turn_status') {
-          entry.statusText = data.status === 'running' ? 'Codex 正在执行…' : 'Codex 正在启动…'; renderActivity(entry);
+          entry.statusText = data.status === 'running' ? `Codex 正在执行 · ${entry.mode.toUpperCase()}` : 'Codex 正在启动…'; renderActivity(entry);
+        } else if (event === 'turn_queued') {
+          entry.statusText = `${data.mode} 正在排队 · 前方 ${Math.max(0, Number(data.position) - 1)} 个任务`;
+          updateCapacity({ activeExecuteLeases: data.executeLeases, maxExecuteLeases: data.maxExecuteLeases });
+          renderActivity(entry);
+        } else if (event === 'approval_required') {
+          entry.approvals.push({ id: data.approvalId, kind: data.kind, request: data.request });
+          if (state.selectedChat?.id === chat.id) renderApprovals(entry.approvals);
+          entry.statusText = '等待你批准操作…'; renderActivity(entry);
+        } else if (event === 'approval_resolved') {
+          entry.approvals = entry.approvals.filter((approval) => approval.id !== data.approvalId);
+          if (state.selectedChat?.id === chat.id) renderApprovals(entry.approvals);
+          entry.statusText = 'Codex 继续执行…'; renderActivity(entry);
+        } else if (event === 'plan_updated') {
+          entry.plan = data.plan || [];
+          if (state.selectedChat?.id === chat.id) renderPlanDiff(entry.plan, entry.diff);
+        } else if (event === 'diff_updated') {
+          entry.diff = data.diff || '';
+          if (state.selectedChat?.id === chat.id) renderPlanDiff(entry.plan, entry.diff);
+        } else if (event === 'subagent_updated') {
+          const count = Number(data.count) > 0 ? `${data.count}/${data.limit || 3}` : `上限 ${data.limit || 3}`;
+          entry.events.push({ name: `子代理 ${count} · ${data.model || 'gpt-5.6-luna'}`, done: data.phase === 'completed' });
+          renderActivity(entry);
+        } else if (event === 'native_item') {
+          const item = data.item || {};
+          const label = item.type === 'fileChange' ? '原生文件 diff' : item.type === 'commandExecution' ? '原生命令' : item.tool || item.type;
+          const existing = entry.events.find((value) => value.callId === item.id);
+          if (existing) existing.done = data.phase === 'completed';
+          else entry.events.push({ callId: item.id, name: label, done: data.phase === 'completed' });
+          renderActivity(entry);
         } else if (event === 'turn_error' || event === 'codex_error') {
           throw new Error(data.message || 'Codex 任务失败');
         }
@@ -324,8 +471,11 @@ async function sendTurn(prompt) {
     updateConcurrencyIndicator(); renderActivity(state.runningTurns.get(state.selectedChat?.id)); setComposer(true);
     if (state.selectedProject) await loadChats();
     if (visibleChat) {
-      const data = await api(`/api/chats/${chat.id}`); state.selectedChat = data.chat; renderMessages(data.messages); setComposer(true);
+      const data = await api(`/api/chats/${chat.id}`);
+      state.selectedChat = data.chat; state.selectedTask = data.task || null;
+      renderMessages(data.messages); setComposer(true); await refreshTurnInsights();
     }
+    await loadTasks();
     if (state.selectedProject?.id === project.id) await Promise.all([loadFiles(), refreshUsage()]);
   }
 }
@@ -509,6 +659,7 @@ async function writeFile(filePath, content) {
 }
 
 function switchView(view) {
+  $('#tasks-view').classList.toggle('hidden', view !== 'tasks');
   $('#workbench-view').classList.toggle('hidden', view !== 'workbench');
   $$('.nav-button').forEach((button) => button.classList.toggle('active', button.dataset.view === view));
 }
@@ -593,6 +744,49 @@ $('#login-form').addEventListener('submit', async (event) => {
 $('#logout-button').addEventListener('click', async () => { try { await api('/api/logout', { method: 'POST' }); } finally { showLogin(); } });
 $('#boss-nav').addEventListener('click', () => location.assign('/boss.html'));
 $$('[data-view]').forEach((button) => button.addEventListener('click', () => switchView(button.dataset.view)));
+$('#refresh-tasks').addEventListener('click', () => Promise.all([loadTasks(), loadProjects()]).then(renderTasks).catch((error) => toast(error.message, 'error')));
+
+$('#approval-list').addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-decision]');
+  const card = event.target.closest('.approval-card');
+  if (!button || !card || !state.selectedChat) return;
+  button.disabled = true;
+  try {
+    await api(`/api/chats/${state.selectedChat.id}/approvals/${encodeURIComponent(card.dataset.id)}`, {
+      method: 'POST', body: { decision: button.dataset.decision },
+    });
+    card.remove(); updateInsightsVisibility();
+  } catch (error) { button.disabled = false; toast(error.message, 'error'); }
+});
+
+$('#message-list').addEventListener('click', (event) => {
+  const button = event.target.closest('.submit-task-button');
+  if (!button || !state.selectedTask || !state.selectedChat) return;
+  state.pendingSubmission = {
+    taskId: state.selectedTask.id, taskVersion: Number(button.dataset.taskVersion), chatId: state.selectedChat.id,
+    turnRunId: button.dataset.turnRunId, itemId: button.dataset.itemId,
+  };
+  $('#submit-form').reset();
+  $('.form-error', $('#submit-form')).textContent = '';
+  $('#submit-summary').textContent = `${state.selectedTask.title} · V${state.selectedTask.version}。将保存这条最终回复及本轮 diff 的不可变快照。`;
+  $('#submit-dialog').showModal();
+});
+
+$('#submit-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (event.submitter?.value === 'cancel') { $('#submit-dialog').close(); return; }
+  const pending = state.pendingSubmission;
+  if (!pending) return;
+  const target = event.currentTarget;
+  const form = new FormData(target);
+  try {
+    await api(`/api/tasks/${pending.taskId}/submissions`, { method: 'POST', body: { ...pending, note: form.get('note') } });
+    $('#submit-dialog').close(); state.pendingSubmission = null;
+    await loadTasks();
+    if (state.selectedChat) await selectChat(state.selectedChat);
+    toast('任务快照已提交，等待老板验收');
+  } catch (error) { $('.form-error', target).textContent = error.message; }
+});
 
 $('#new-project').addEventListener('click', () => {
   $('#project-form').reset(); $('.form-error', $('#project-form')).textContent = '';
@@ -602,11 +796,12 @@ $('#new-project').addEventListener('click', () => {
 $('#project-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (event.submitter?.value === 'cancel') return $('#project-dialog').close();
-  const form = new FormData(event.currentTarget);
+  const target = event.currentTarget;
+  const form = new FormData(target);
   try {
     const data = await api('/api/projects', { method: 'POST', body: { name: form.get('name'), description: form.get('description') } });
     $('#project-dialog').close(); await loadProjects(); await selectProject(data.project); toast('隔离项目已创建');
-  } catch (error) { $('.form-error', event.currentTarget).textContent = error.message; }
+  } catch (error) { $('.form-error', target).textContent = error.message; }
 });
 
 $('#new-chat').addEventListener('click', async () => {

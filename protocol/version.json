@@ -1,0 +1,6 @@
+{
+  "codexCli": "0.148.0-alpha.9",
+  "generatedBy": "codex app-server generate-ts --out protocol/generated",
+  "generatedAt": "2026-09-04",
+  "contract": "v2"
+}

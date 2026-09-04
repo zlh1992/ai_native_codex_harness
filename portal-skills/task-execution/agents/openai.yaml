@@ -1,0 +1,4 @@
+interface:
+  display_name: "Task execution"
+  short_description: "Execute an assigned task against its acceptance criteria"
+  default_prompt: "Use $task-execution to complete my assigned task and verify every acceptance criterion."

@@ -44,8 +44,8 @@ Browser ─HTTPS─> Tunnel ─HTTP loopback─> Harness HTTP Server
 
 仅仅把 turn 的 `cwd` 指到项目目录并不足以隔离不受信任用户，因为普通 workspace-write 沙箱的读取边界可能大于单个项目。因此实现采用两层控制：
 
-1. app-server 关闭内置 Shell、unified exec、浏览器、插件、MCP、computer use、image generation 和 multi-agent，并把 turn 自身设为 read-only、never approval。
-2. 模型只能调用 `workspace_list/read/write/replace/mkdir/delete/search/exec` 动态工具。前七个由后端做规范路径、保留目录与符号链接校验；`workspace_exec` 再进入 macOS Seatbelt，只允许读写当前绑定 tree 与独立 runtime，不能读取同一员工的另一个项目。共享 worktree 的 `.git` 指针也被文件 API 与 Seatbelt 隐藏。
+1. app-server 关闭内置 Shell、unified exec、浏览器、插件、外部 MCP、computer use 和 image generation；保留原生 apply-patch、diff、approval、plan、goal、skills 与 multi-agent。每个 turn 使用只包含当前 tree 的 `workspaceWrite` 和 `on-request` approval。
+2. 模型可调用 `workspace_list/read/write/replace/mkdir/delete/search/exec` 动态工具和原生 apply-patch。前七个由后端做规范路径、保留目录与符号链接校验；`workspace_exec` 仅在 EXECUTE turn 获得浏览器一次批准后进入 macOS Seatbelt，只允许读写当前绑定 tree 与独立 runtime，不能读取同一员工的另一个项目。原生 apply-patch 受 App Server `workspaceWrite` 的唯一可写根约束。共享 worktree 的 `.git` 指针也被文件 API 与 Seatbelt 隐藏。
 
 命令环境只包含最小 `PATH/HOME/TMPDIR/LANG/TERM/CI`，不会继承 Harness、Cloudflare 或 Codex 的密码/token 环境变量。网络默认关闭；管理员可按用户开启。
 
@@ -60,7 +60,7 @@ Browser ─HTTPS─> Tunnel ─HTTP loopback─> Harness HTTP Server
 
 ## 7. 资源和滥用边界
 
-- 全局与用户级 Codex turn 并发限制（均可配置，硬上限 40）；同一对话串行，不同对话、项目和用户可并发。
+- App Server 全局 turn 硬上限 40，Portal active root turn 硬上限 11，EXECUTE lease 硬上限 2；同一对话串行，不同对话、项目和用户可并发。
 - 每用户项目数和逻辑存储配额。
 - Shell 的 wall timeout、CPU ulimit、进程数、文件描述符和输出字节上限。
 - 项目命令的网络访问按用户关闭/开启。

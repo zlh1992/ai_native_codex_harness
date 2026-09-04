@@ -37,7 +37,8 @@
     <header class="topbar">
       <button class="brand-button" data-view="workbench"><span class="mark small">C</span><span>CODEX<br><b>HARNESS</b></span></button>
       <nav>
-        <button class="nav-button active" data-view="workbench">工作台</button>
+        <button id="tasks-nav" class="nav-button active" data-view="tasks">任务首页</button>
+        <button class="nav-button" data-view="workbench">工作台</button>
         <button id="boss-nav" class="nav-button hidden">驾驶舱</button>
       </nav>
       <div class="topbar-right">
@@ -48,7 +49,22 @@
       </div>
     </header>
 
-    <section id="workbench-view" class="workbench">
+    <section id="tasks-view" class="employee-home">
+      <div class="employee-hero">
+        <div><p class="eyebrow">MY DELIVERY QUEUE</p><h1>我的任务</h1><p>只显示分配给你、且当前仍有项目访问权的工作。Codex 目标用于执行，任务提交仍需老板验收。</p></div>
+        <div class="capacity-card"><span>执行席位</span><b id="execute-capacity">0 / 2</b><small>EXECUTE 满员时自动排队，EDIT 不受影响</small></div>
+      </div>
+      <div class="employee-summary">
+        <div><span>进行中</span><b id="task-active-count">0</b></div>
+        <div><span>待审核</span><b id="task-submitted-count">0</b></div>
+        <div><span>已通过</span><b id="task-passed-count">0</b></div>
+        <div><span>可见项目</span><b id="visible-project-count">0</b></div>
+      </div>
+      <div class="task-section-title"><div><p class="eyebrow">LINEAR ROADMAP</p><h2>交付队列</h2></div><button id="refresh-tasks" class="secondary">刷新</button></div>
+      <div id="task-list" class="task-board empty-state">暂无分配任务</div>
+    </section>
+
+    <section id="workbench-view" class="workbench hidden">
       <aside class="project-rail panel">
         <div class="rail-heading">
           <div><p class="eyebrow">WORKSPACES</p><h2>项目</h2></div>
@@ -72,6 +88,7 @@
         <div class="stage-header">
           <div><p id="project-kicker" class="eyebrow">SELECT A PROJECT</p><h2 id="chat-title">欢迎使用 Codex Harness</h2></div>
           <div class="turn-controls">
+            <label>模式<select id="mode-select"><option value="edit">EDIT · 读写</option><option value="execute">EXECUTE · 命令</option></select></label>
             <label>推理强度<select id="effort-select"></select></label>
             <button id="stop-turn" class="danger-button hidden">停止</button>
           </div>
@@ -84,6 +101,12 @@
           </div>
         </div>
         <div id="activity-strip" class="activity-strip hidden"></div>
+        <section id="turn-insights" class="turn-insights hidden">
+          <div id="goal-card" class="insight-card hidden"></div>
+          <div id="approval-list" class="approval-list"></div>
+          <details id="plan-panel" class="insight-card hidden"><summary>执行计划</summary><div></div></details>
+          <details id="diff-panel" class="insight-card hidden"><summary>本轮 diff</summary><pre></pre></details>
+        </section>
         <form id="composer" class="composer">
           <textarea id="prompt-input" rows="1" maxlength="100000" placeholder="告诉 Codex 你想构建什么…" disabled></textarea>
           <button id="send-button" class="send-button" type="submit" disabled>↑</button>
@@ -130,6 +153,16 @@
       <label>项目说明<textarea name="description" maxlength="1000" rows="3" placeholder="目标、技术栈或上下文"></textarea></label>
       <p class="form-error"></p>
       <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button value="default" class="primary">创建项目</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="submit-dialog">
+    <form method="dialog" id="submit-form" class="dialog-form">
+      <div class="dialog-title"><span class="mark small">✓</span><div><p class="eyebrow">SUBMIT SNAPSHOT</p><h2>提交任务 Done</h2></div></div>
+      <p id="submit-summary" class="dialog-copy"></p>
+      <label>补充说明（可选）<textarea name="note" maxlength="4000" rows="4" placeholder="说明验证方式、已知限制或请老板重点检查的内容"></textarea></label>
+      <p class="form-error"></p>
+      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button value="default" class="primary">提交不可变快照</button></div>
     </form>
   </dialog>
 

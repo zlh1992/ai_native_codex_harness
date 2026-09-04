@@ -181,7 +181,8 @@ $('#logout').addEventListener('click', async () => { try { await api('/api/logou
 $('#user-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (event.submitter?.value === 'cancel') return $('#user-dialog').close();
-  const form = new FormData(event.currentTarget);
+  const target = event.currentTarget;
+  const form = new FormData(target);
   const id = form.get('id');
   const body = {
     displayName: form.get('displayName'),
@@ -198,19 +199,20 @@ $('#user-form').addEventListener('submit', async (event) => {
     $('#user-dialog').close();
     toast(id ? '员工策略已更新。' : '员工账号已创建。');
     await load();
-  } catch (error) { $('.form-error', event.currentTarget).textContent = error.message; }
+  } catch (error) { $('.form-error', target).textContent = error.message; }
 });
 
 $('#project-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (event.submitter?.value === 'cancel') return $('#project-dialog').close();
-  const form = new FormData(event.currentTarget);
+  const target = event.currentTarget;
+  const form = new FormData(target);
   try {
     await api('/api/projects', { method: 'POST', body: { name: form.get('name'), description: form.get('description') } });
     $('#project-dialog').close();
     toast('老板项目已创建并初始化 Git。');
     await load();
-  } catch (error) { $('.form-error', event.currentTarget).textContent = error.message; }
+  } catch (error) { $('.form-error', target).textContent = error.message; }
 });
 
 async function bootstrap() {

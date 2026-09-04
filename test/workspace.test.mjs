@@ -20,6 +20,7 @@ test('workspace file CRUD stays inside the project', () => {
   assert.equal(service.readFile(project, 'src/index.js').content, 'console.log("ok")\n');
   assert.throws(() => service.readFile(project, '../secret'), /路径不能离开工作区/);
   assert.throws(() => service.writeFile(project, '/tmp/escape', 'bad'), /相对路径/);
+  assert.throws(() => service.writeFile(project, '.codex/agents/override.toml', 'model = "other"'), /内部路径/);
   const deleted = service.moveToTrash(project, 'src/index.js');
   assert.equal(deleted.recoverable, true);
   assert.equal(fs.existsSync(path.join(service.projectRoot(project), 'src/index.js')), false);

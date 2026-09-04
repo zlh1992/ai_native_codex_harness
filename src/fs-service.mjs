@@ -4,8 +4,8 @@ import { randomBytes } from 'node:crypto';
 import ExcelJS from 'exceljs';
 import { HttpError, invariant } from './errors.mjs';
 
-const HIDDEN_ROOT_ENTRIES = new Set(['.git', '.trash', '.home', '.tmp']);
-const RESERVED_PATH_PARTS = new Set(['.git', '.trash', '.home', '.tmp']);
+const HIDDEN_ROOT_ENTRIES = new Set(['.git', '.codex', '.trash', '.home', '.tmp']);
+const RESERVED_PATH_PARTS = new Set(['.git', '.codex', '.trash', '.home', '.tmp']);
 
 export function slugify(value) {
   const base = String(value || 'project').normalize('NFKC').toLowerCase()
