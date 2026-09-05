@@ -23,7 +23,7 @@ node src/cli.mjs reset-password --username=superadmin
 - 用户总数、活跃用户、项目、对话与正在运行的 Codex turn。
 - 每个用户的状态、网络权限、项目数、空间用量、上限和最近登录。
 - 所有项目的所有者、说明和授权状态。员工自有项目只显示元数据，超级管理员身份不会获得其文件或对话权限。
-- 老板自己的项目可授权给一名启用中的员工。系统从当前 Git 快照创建独立 worktree；撤权后 ACL 立即失效，干净 worktree 自动移除，存在未提交修改时原地保留。
+- 老板自己的项目可同时授权多名启用员工，每人得到独立 worktree。系统复制 owner 当前 HEAD、已跟踪修改和未跟踪文件；撤权先禁止新访问并等待 turn/approval/subagent/lease 排空，干净 tree 自动移除，脏 tree 原地保留，再次授权同一员工会恢复原 tree。
 - 最近的登录、用户、项目、文件、对话和 turn 审计事件。
 
 ## 新建用户
@@ -66,11 +66,14 @@ node src/cli.mjs reset-password --username=superadmin
 tail -f "$HOME/Library/Logs/CodexHarnessRemote/server.log"
 node src/cli.mjs list-users
 npm run check
+npm run gate
 ```
 
 进程管理：`start-public.sh` 启动本地服务和公网隧道；`stop-tunnel.sh` 只关闭公网；`start-tunnel.sh` 恢复公网；`stop.sh` 才会关闭全部。本项目使用自己的 `.tools/cloudflared`，不依赖其他 Harness 项目的进程或工具目录。
 
-修改 `.env` 后重启服务。升级 Codex 后先运行 `npm run check`，再用老板与员工测试账号完成“创建老板项目 → 授权 → 员工修改只落共享 worktree → 撤权后拒绝访问”的验收。
+修改 `.env` 后重启服务。升级 Codex 或修改权限、任务、事件代码后必须运行 `npm run gate`。它固定执行“老板项目 → 双员工独立授权 → 同 tree 串行/文件锁 → 运行中项目禁止删除 → 员工任务提交 → 老板审核推进 → SSE 游标重放及跨边界拒绝 → 运行中撤权排空 → 脏树恢复 → resume 失败显式恢复”的隔离端到端验收。
+
+请从 macOS 主机终端或具备 loopback 监听及 Seatbelt 权限的 CI 执行完整门控。受限代理沙箱通常禁止监听临时端口及嵌套 `sandbox-exec`；遇到这类环境错误应切换到主机执行，不能跳过安全和 HTTP 端到端用例后宣称门控通过。
 
 ## 事件处理
 

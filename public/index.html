@@ -122,7 +122,7 @@
           <div class="file-actions">
             <button id="new-file" class="icon-button" title="新建文件">＋文</button>
             <button id="new-folder" class="icon-button" title="新建目录">＋夹</button>
-            <label class="icon-button upload-label" title="上传文件">上传<input id="upload-file" type="file" hidden></label>
+            <label class="icon-button upload-label" title="从本机上传文件">↑ 上传<input id="upload-file" type="file" hidden></label>
             <button id="refresh-files" class="icon-button" title="刷新">↻</button>
           </div>
         </div>
@@ -133,7 +133,7 @@
             <span id="editor-path"></span>
             <div class="viewer-actions">
               <div id="viewer-tabs" class="viewer-tabs hidden"><button id="preview-tab" class="viewer-tab active">预览</button><button id="source-tab" class="viewer-tab">源码</button></div>
-              <a id="download-file" class="text-link" href="#" download>下载</a>
+              <a id="download-file" class="text-link" href="#" download>↓ 下载</a>
               <button id="delete-file" class="text-danger">移到废纸篓</button>
               <button id="save-file" class="primary compact">保存</button>
             </div>
@@ -153,6 +153,36 @@
       <label>项目说明<textarea name="description" maxlength="1000" rows="3" placeholder="目标、技术栈或上下文"></textarea></label>
       <p class="form-error"></p>
       <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button value="default" class="primary">创建项目</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="text-dialog">
+    <form method="dialog" id="text-form" class="dialog-form">
+      <div class="dialog-title"><span class="mark small">C</span><div><p id="text-dialog-eyebrow" class="eyebrow">NEW ITEM</p><h2 id="text-dialog-title">新建</h2></div></div>
+      <label><span id="text-dialog-label">名称</span><input id="text-dialog-input" name="value" maxlength="500" required autocomplete="off"></label>
+      <p class="form-error" role="alert"></p>
+      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button id="text-dialog-submit" value="default" class="primary">确认</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog">
+    <form method="dialog" id="confirm-form" class="dialog-form">
+      <div class="dialog-title"><span class="mark small">!</span><div><p id="confirm-dialog-eyebrow" class="eyebrow">CONFIRM ACTION</p><h2 id="confirm-dialog-title">确认操作</h2></div></div>
+      <p id="confirm-dialog-message" class="dialog-copy"></p>
+      <p class="form-error" role="alert"></p>
+      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button id="confirm-dialog-submit" value="default" class="danger-button">确认</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="upload-dialog">
+    <form method="dialog" id="upload-form" class="dialog-form">
+      <div class="dialog-title"><span class="mark small">↑</span><div><p class="eyebrow">UPLOAD FILE</p><h2>上传本机文件</h2></div></div>
+      <label>本机文件<input id="upload-source-name" readonly></label>
+      <label>保存到项目路径<input id="upload-destination" name="destination" maxlength="500" required autocomplete="off"></label>
+      <small id="upload-file-meta"></small>
+      <label class="upload-overwrite"><input name="overwrite" type="checkbox"> 若项目中已有同名文件，允许覆盖</label>
+      <p class="form-error" role="alert"></p>
+      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button value="default" class="primary">确认上传</button></div>
     </form>
   </dialog>
 

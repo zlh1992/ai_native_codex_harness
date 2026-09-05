@@ -75,8 +75,6 @@ export class HarnessDatabase {
       CREATE INDEX IF NOT EXISTS project_access_user_idx ON project_access(user_id, status);
       CREATE UNIQUE INDEX IF NOT EXISTS project_access_active_user_idx
         ON project_access(project_id,user_id) WHERE status='active';
-      CREATE UNIQUE INDEX IF NOT EXISTS project_access_one_share_idx
-        ON project_access(project_id) WHERE access_kind='shared' AND status='active';
       CREATE TABLE IF NOT EXISTS chats (
         id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -178,8 +176,8 @@ export class HarnessDatabase {
         task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
         task_version INTEGER NOT NULL,
         submitter_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
-        turn_run_id TEXT NOT NULL REFERENCES turn_runs(id) ON DELETE RESTRICT,
+        chat_id TEXT REFERENCES chats(id) ON DELETE SET NULL,
+        turn_run_id TEXT REFERENCES turn_runs(id) ON DELETE SET NULL,
         codex_thread_id TEXT NOT NULL,
         codex_turn_id TEXT NOT NULL,
         final_item_id TEXT NOT NULL,
@@ -204,18 +202,130 @@ export class HarnessDatabase {
       );
       CREATE INDEX IF NOT EXISTS audit_created_idx ON audit_log(created_at DESC);
       CREATE INDEX IF NOT EXISTS audit_actor_idx ON audit_log(actor_user_id);
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS chat_thread_recoveries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+        old_thread_id TEXT,
+        new_thread_id TEXT NOT NULL,
+        reason TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS chat_thread_recoveries_chat_idx
+        ON chat_thread_recoveries(chat_id, id DESC);
+      CREATE TABLE IF NOT EXISTS turn_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        turn_run_id TEXT NOT NULL REFERENCES turn_runs(id) ON DELETE CASCADE,
+        chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+        event_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS turn_events_run_idx ON turn_events(turn_run_id, id);
+      CREATE INDEX IF NOT EXISTS turn_events_chat_idx ON turn_events(chat_id, id);
+      DROP INDEX IF EXISTS project_access_one_share_idx;
     `);
     this.#ensureColumn('projects', 'repo_kind', "TEXT NOT NULL DEFAULT 'directory'");
     this.#ensureColumn('chats', 'project_access_id', 'TEXT');
     this.#ensureColumn('chats', 'tree_path', 'TEXT');
     this.#ensureColumn('chats', 'task_id', 'TEXT REFERENCES tasks(id)');
     this.#ensureColumn('chats', 'task_version', 'INTEGER');
+    this.#ensureColumn('chats', 'thread_state', "TEXT NOT NULL DEFAULT 'ready'");
+    this.#ensureColumn('chats', 'thread_error', 'TEXT');
+    this.#ensureColumn('project_access', 'base_sha', 'TEXT');
+    this.#ensureSubmissionRetentionSchema();
     this.#backfillOwnerAccess();
+    this.#repairOrphanedSubmissionsOnce();
   }
 
   #ensureColumn(table, name, definition) {
     const columns = this.db.prepare(`PRAGMA table_info(${table})`).all();
     if (!columns.some((column) => column.name === name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+  }
+
+  #ensureSubmissionRetentionSchema() {
+    const columns = this.db.prepare('PRAGMA table_info(task_submissions)').all();
+    const foreignKeys = this.db.prepare('PRAGMA foreign_key_list(task_submissions)').all();
+    const chat = columns.find((column) => column.name === 'chat_id');
+    const run = columns.find((column) => column.name === 'turn_run_id');
+    const chatForeignKey = foreignKeys.find((foreignKey) => foreignKey.from === 'chat_id');
+    const runForeignKey = foreignKeys.find((foreignKey) => foreignKey.from === 'turn_run_id');
+    const current = chat?.notnull === 0 && run?.notnull === 0
+      && chatForeignKey?.on_delete === 'SET NULL' && runForeignKey?.on_delete === 'SET NULL';
+    if (current) return;
+
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.exec(`
+        ALTER TABLE task_submissions RENAME TO task_submissions_legacy;
+        CREATE TABLE task_submissions (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          task_version INTEGER NOT NULL,
+          submitter_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          chat_id TEXT REFERENCES chats(id) ON DELETE SET NULL,
+          turn_run_id TEXT REFERENCES turn_runs(id) ON DELETE SET NULL,
+          codex_thread_id TEXT NOT NULL,
+          codex_turn_id TEXT NOT NULL,
+          final_item_id TEXT NOT NULL,
+          final_reply_snapshot TEXT NOT NULL,
+          diff_snapshot TEXT NOT NULL DEFAULT '',
+          employee_note TEXT NOT NULL DEFAULT '',
+          verdict TEXT NOT NULL DEFAULT 'pending' CHECK(verdict IN ('pending','passed','rework')),
+          created_at TEXT NOT NULL,
+          reviewed_at TEXT,
+          UNIQUE(task_id, task_version)
+        );
+        INSERT INTO task_submissions
+          (id,task_id,task_version,submitter_user_id,chat_id,turn_run_id,codex_thread_id,codex_turn_id,
+           final_item_id,final_reply_snapshot,diff_snapshot,employee_note,verdict,created_at,reviewed_at)
+        SELECT id,task_id,task_version,submitter_user_id,chat_id,turn_run_id,codex_thread_id,codex_turn_id,
+           final_item_id,final_reply_snapshot,diff_snapshot,employee_note,verdict,created_at,reviewed_at
+        FROM task_submissions_legacy;
+        DROP TABLE task_submissions_legacy;
+        CREATE INDEX task_submissions_task_idx ON task_submissions(task_id, created_at DESC);
+      `);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  #repairOrphanedSubmissionsOnce() {
+    const migration = 'repair_orphaned_submissions_v1';
+    if (this.db.prepare('SELECT 1 FROM schema_migrations WHERE name=?').get(migration)) return;
+    const timestamp = now();
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const orphans = this.db.prepare(`SELECT t.* FROM tasks t
+        WHERE t.status='submitted' AND NOT EXISTS (
+          SELECT 1 FROM task_submissions s WHERE s.task_id=t.id AND s.task_version=t.version
+        )`).all();
+      const roadmapIds = new Set();
+      for (const task of orphans) {
+        const changed = this.db.prepare("UPDATE tasks SET status='rework',version=version+1,updated_at=? WHERE id=? AND status='submitted' AND version=?")
+          .run(timestamp, task.id, task.version);
+        if (!Number(changed.changes)) continue;
+        if (task.roadmap_id) roadmapIds.add(task.roadmap_id);
+        this.db.prepare(`INSERT INTO audit_log
+          (actor_user_id,action,target_type,target_id,detail_json,created_at)
+          VALUES (NULL,'task.submission_orphan_repaired','task',?,?,?)`)
+          .run(task.id, JSON.stringify({ previousVersion: task.version, nextVersion: task.version + 1 }), timestamp);
+      }
+      for (const roadmapId of roadmapIds) {
+        this.db.prepare("UPDATE roadmaps SET status='rework',version=version+1,updated_at=? WHERE id=?")
+          .run(timestamp, roadmapId);
+      }
+      this.db.prepare('INSERT INTO schema_migrations (name,applied_at) VALUES (?,?)').run(migration, timestamp);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   #backfillOwnerAccess() {
@@ -369,7 +479,7 @@ export class HarnessDatabase {
       username: row.username, displayName: row.display_name,
       repoKind: row.repo_kind || 'directory', accessId: row.access_id,
       accessUserId: row.access_user_id, accessKind: row.access_kind,
-      treePath: row.tree_path, branchName: row.branch_name,
+      treePath: row.tree_path, branchName: row.branch_name, baseSha: row.base_sha,
       sharedUserId: row.shared_user_id, sharedUsername: row.shared_username,
       sharedDisplayName: row.shared_display_name, sharedAccessId: row.shared_access_id,
     } : null;
@@ -396,7 +506,7 @@ export class HarnessDatabase {
 
   getProjectForUser(projectId, userId) {
     return this.mapProject(this.db.prepare(`SELECT p.*,owner.username,owner.display_name,
-      a.id AS access_id,a.user_id AS access_user_id,a.access_kind,a.tree_path,a.branch_name
+      a.id AS access_id,a.user_id AS access_user_id,a.access_kind,a.tree_path,a.branch_name,a.base_sha
       FROM projects p JOIN users owner ON owner.id=p.user_id
       JOIN project_access a ON a.project_id=p.id AND a.user_id=? AND a.status='active'
       WHERE p.id=?`).get(userId, projectId));
@@ -404,19 +514,39 @@ export class HarnessDatabase {
 
   listProjectsForUser(userId) {
     return this.db.prepare(`SELECT p.*,owner.username,owner.display_name,
-      a.id AS access_id,a.user_id AS access_user_id,a.access_kind,a.tree_path,a.branch_name
+      a.id AS access_id,a.user_id AS access_user_id,a.access_kind,a.tree_path,a.branch_name,a.base_sha
       FROM project_access a JOIN projects p ON p.id=a.project_id JOIN users owner ON owner.id=p.user_id
       WHERE a.user_id=? AND a.status='active' ORDER BY p.updated_at DESC`).all(userId).map((row) => this.mapProject(row));
   }
 
   listAdminProjects() {
-    return this.db.prepare(`SELECT p.*,owner.username,owner.display_name,
-      shared.id AS shared_access_id,shared.user_id AS shared_user_id,
-      shared_user.username AS shared_username,shared_user.display_name AS shared_display_name
+    const projects = this.db.prepare(`SELECT p.*,owner.username,owner.display_name
       FROM projects p JOIN users owner ON owner.id=p.user_id
-      LEFT JOIN project_access shared ON shared.project_id=p.id AND shared.access_kind='shared' AND shared.status='active'
-      LEFT JOIN users shared_user ON shared_user.id=shared.user_id
       ORDER BY p.updated_at DESC`).all().map((row) => this.mapProject(row));
+    const activeShares = this.db.prepare(`SELECT a.*,u.username,u.display_name
+      FROM project_access a JOIN users u ON u.id=a.user_id
+      WHERE a.access_kind='shared' AND a.status='active' ORDER BY a.created_at`).all();
+    const byProject = new Map();
+    for (const row of activeShares) {
+      if (!byProject.has(row.project_id)) byProject.set(row.project_id, []);
+      byProject.get(row.project_id).push({
+        id: row.id, projectId: row.project_id, userId: row.user_id,
+        accessKind: row.access_kind, branchName: row.branch_name, baseSha: row.base_sha,
+        status: row.status, username: row.username, displayName: row.display_name,
+        createdAt: row.created_at, revokedAt: row.revoked_at,
+      });
+    }
+    return projects.map((project) => {
+      const sharedAccesses = byProject.get(project.id) || [];
+      const singular = sharedAccesses.length === 1 ? sharedAccesses[0] : null;
+      return {
+        ...project, sharedAccesses,
+        sharedUserId: singular?.userId || null,
+        sharedUsername: singular?.username || null,
+        sharedDisplayName: singular?.displayName || null,
+        sharedAccessId: singular?.id || null,
+      };
+    });
   }
 
   getProjectAccessById(id) {
@@ -425,7 +555,7 @@ export class HarnessDatabase {
     return row ? {
       id: row.id, projectId: row.project_id, userId: row.user_id,
       accessKind: row.access_kind, treePath: row.tree_path, branchName: row.branch_name,
-      status: row.status, username: row.username, displayName: row.display_name,
+      baseSha: row.base_sha, status: row.status, username: row.username, displayName: row.display_name,
       createdAt: row.created_at, revokedAt: row.revoked_at,
     } : null;
   }
@@ -437,15 +567,28 @@ export class HarnessDatabase {
       .map((row) => ({
         id: row.id, projectId: row.project_id, userId: row.user_id,
         accessKind: row.access_kind, treePath: row.tree_path, branchName: row.branch_name,
-        status: row.status, username: row.username, displayName: row.display_name,
+        baseSha: row.base_sha, status: row.status, username: row.username, displayName: row.display_name,
         createdAt: row.created_at, revokedAt: row.revoked_at,
       }));
   }
 
-  grantProjectAccess({ id = randomUUID(), projectId, userId, treePath, branchName }) {
+  grantProjectAccess({ id = randomUUID(), projectId, userId, treePath, branchName, baseSha = null }) {
     this.db.prepare(`INSERT INTO project_access
-      (id,project_id,user_id,access_kind,tree_path,branch_name,status,created_at)
-      VALUES (?,?,?,'shared',?,?,'active',?)`).run(id, projectId, userId, treePath, branchName, now());
+      (id,project_id,user_id,access_kind,tree_path,branch_name,base_sha,status,created_at)
+      VALUES (?,?,?,'shared',?,?,?,'active',?)`).run(id, projectId, userId, treePath, branchName, baseSha, now());
+    return this.getProjectAccessById(id);
+  }
+
+  latestRevokedProjectAccess(projectId, userId) {
+    const row = this.db.prepare(`SELECT id FROM project_access
+      WHERE project_id=? AND user_id=? AND access_kind='shared' AND status='revoked'
+      ORDER BY revoked_at DESC,created_at DESC LIMIT 1`).get(projectId, userId);
+    return row ? this.getProjectAccessById(row.id) : null;
+  }
+
+  restoreProjectAccess(id) {
+    this.db.prepare("UPDATE project_access SET status='active',revoked_at=NULL WHERE id=? AND access_kind='shared' AND status='revoked'")
+      .run(id);
     return this.getProjectAccessById(id);
   }
 
@@ -480,6 +623,7 @@ export class HarnessDatabase {
     return row ? {
       id: row.id, projectId: row.project_id, userId: row.user_id, title: row.title,
       codexThreadId: row.codex_thread_id, status: row.status,
+      threadState: row.thread_state || 'ready', threadError: row.thread_error || null,
       projectAccessId: row.project_access_id, treePath: row.tree_path,
       taskId: row.task_id, taskVersion: row.task_version,
       createdAt: row.created_at, updatedAt: row.updated_at,
@@ -507,7 +651,11 @@ export class HarnessDatabase {
   updateChat(id, patch) {
     const fields = [];
     const values = [];
-    for (const [key, column] of [['title', 'title'], ['codexThreadId', 'codex_thread_id'], ['status', 'status'], ['taskId', 'task_id'], ['taskVersion', 'task_version']]) {
+    for (const [key, column] of [
+      ['title', 'title'], ['codexThreadId', 'codex_thread_id'], ['status', 'status'],
+      ['taskId', 'task_id'], ['taskVersion', 'task_version'], ['threadState', 'thread_state'],
+      ['threadError', 'thread_error'],
+    ]) {
       if (key in patch) { fields.push(`${column}=?`); values.push(patch[key]); }
     }
     fields.push('updated_at=?'); values.push(now(), id);
@@ -515,34 +663,169 @@ export class HarnessDatabase {
     return this.getChat(id);
   }
 
-  deleteChat(id) { this.db.prepare('DELETE FROM chats WHERE id=?').run(id); }
+  chatHasSubmission(id) {
+    return Boolean(this.db.prepare('SELECT 1 FROM task_submissions WHERE chat_id=? LIMIT 1').get(id));
+  }
 
-  addMessage({ chatId, turnId = null, role, kind = 'message', content, metadata = {} }) {
-    const id = randomUUID();
-    const createdAt = now();
-    this.db.prepare('INSERT INTO messages (id,chat_id,turn_id,role,kind,content,metadata_json,created_at) VALUES (?,?,?,?,?,?,?,?)')
+  runtimeForChat(id) {
+    const row = this.db.prepare(`SELECT
+      EXISTS(SELECT 1 FROM turn_runs WHERE chat_id=? AND status IN ('queued','starting','running')) AS turn_busy,
+      EXISTS(SELECT 1 FROM turn_approvals WHERE chat_id=? AND status='pending') AS approval_busy,
+      EXISTS(SELECT 1 FROM execution_leases WHERE chat_id=? AND expires_at>?) AS lease_busy`).get(id, id, id, now());
+    return {
+      busy: Boolean(row?.turn_busy || row?.approval_busy || row?.lease_busy),
+      turnBusy: Boolean(row?.turn_busy), approvalBusy: Boolean(row?.approval_busy), leaseBusy: Boolean(row?.lease_busy),
+    };
+  }
+
+  runtimeForAccess(id) {
+    const row = this.db.prepare(`SELECT
+      EXISTS(SELECT 1 FROM chats c JOIN turn_runs r ON r.chat_id=c.id
+        WHERE c.project_access_id=? AND r.status IN ('queued','starting','running')) AS turn_busy,
+      EXISTS(SELECT 1 FROM chats c JOIN turn_approvals a ON a.chat_id=c.id
+        WHERE c.project_access_id=? AND a.status='pending') AS approval_busy,
+      EXISTS(SELECT 1 FROM chats c JOIN execution_leases l ON l.chat_id=c.id
+        WHERE c.project_access_id=? AND l.expires_at>?) AS lease_busy`).get(id, id, id, now());
+    return {
+      busy: Boolean(row?.turn_busy || row?.approval_busy || row?.lease_busy),
+      turnBusy: Boolean(row?.turn_busy), approvalBusy: Boolean(row?.approval_busy), leaseBusy: Boolean(row?.lease_busy),
+    };
+  }
+
+  runtimeForProject(id) {
+    const row = this.db.prepare(`SELECT
+      EXISTS(SELECT 1 FROM turn_runs WHERE project_id=? AND status IN ('queued','starting','running')) AS turn_busy,
+      EXISTS(SELECT 1 FROM turn_approvals a JOIN chats c ON c.id=a.chat_id
+        WHERE c.project_id=? AND a.status='pending') AS approval_busy,
+      EXISTS(SELECT 1 FROM execution_leases l JOIN chats c ON c.id=l.chat_id
+        WHERE c.project_id=? AND l.expires_at>?) AS lease_busy`).get(id, id, id, now());
+    return {
+      busy: Boolean(row?.turn_busy || row?.approval_busy || row?.lease_busy),
+      turnBusy: Boolean(row?.turn_busy), approvalBusy: Boolean(row?.approval_busy), leaseBusy: Boolean(row?.lease_busy),
+    };
+  }
+
+  deleteChat(id) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      if (this.runtimeForChat(id).busy) throw new Error('对话仍有排队或运行中的任务，不能删除。');
+      if (this.chatHasSubmission(id)) throw new Error('对话包含任务提交证据，不能删除。');
+      this.db.prepare('DELETE FROM chats WHERE id=?').run(id);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  markChatThreadError(id, error) {
+    return this.updateChat(id, { threadState: 'resume_failed', threadError: String(error || '').slice(0, 4000) });
+  }
+
+  recoverChatThread({ chatId, expectedThreadId = null, newThreadId, reason = '' }) {
+    const timestamp = now();
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const chat = this.db.prepare('SELECT * FROM chats WHERE id=?').get(chatId);
+      if (!chat) throw new Error('对话不存在。');
+      if ((chat.codex_thread_id || null) !== (expectedThreadId || null)) throw new Error('对话线程已变化，请刷新后重试。');
+      this.db.prepare(`UPDATE chats SET codex_thread_id=?,thread_state='ready',thread_error=NULL,updated_at=? WHERE id=?`)
+        .run(newThreadId, timestamp, chatId);
+      this.db.prepare(`INSERT INTO chat_thread_recoveries (chat_id,old_thread_id,new_thread_id,reason,created_at)
+        VALUES (?,?,?,?,?)`).run(chatId, chat.codex_thread_id, newThreadId, String(reason).slice(0, 4000), timestamp);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    return this.getChat(chatId);
+  }
+
+  listChatThreadRecoveries(chatId) {
+    return this.db.prepare('SELECT * FROM chat_thread_recoveries WHERE chat_id=? ORDER BY id DESC').all(chatId)
+      .map((row) => ({
+        id: row.id, chatId: row.chat_id, oldThreadId: row.old_thread_id, newThreadId: row.new_thread_id,
+        reason: row.reason, createdAt: row.created_at,
+      }));
+  }
+
+  addMessage({ id = randomUUID(), chatId, turnId = null, role, kind = 'message', content, metadata = {}, createdAt = now() }) {
+    createdAt ||= now();
+    const inserted = this.db.prepare('INSERT OR IGNORE INTO messages (id,chat_id,turn_id,role,kind,content,metadata_json,created_at) VALUES (?,?,?,?,?,?,?,?)')
       .run(id, chatId, turnId, role, kind, content, JSON.stringify(metadata), createdAt);
-    this.updateChat(chatId, {});
-    return { id, chatId, turnId, role, kind, content, metadata, createdAt };
+    if (Number(inserted.changes)) this.updateChat(chatId, {});
+    const row = this.db.prepare('SELECT * FROM messages WHERE id=?').get(id);
+    return row ? {
+      id: row.id, chatId: row.chat_id, turnId: row.turn_id, role: row.role,
+      kind: row.kind, content: row.content, metadata: json(row.metadata_json), createdAt: row.created_at,
+    } : null;
   }
 
   listMessages(chatId, limit = 500) {
-    return this.db.prepare(`SELECT * FROM (SELECT * FROM messages WHERE chat_id=? ORDER BY created_at DESC LIMIT ?)
-      ORDER BY created_at ASC`).all(chatId, limit).map((row) => ({
+    const bounded = limit === null ? null : Math.max(1, Math.min(5000, Number(limit) || 500));
+    const query = bounded === null
+      ? 'SELECT rowid AS message_rowid,* FROM messages WHERE chat_id=? ORDER BY created_at ASC,rowid ASC'
+      : `SELECT * FROM (SELECT rowid AS message_rowid,* FROM messages WHERE chat_id=? ORDER BY created_at DESC,rowid DESC LIMIT ?)
+        ORDER BY created_at ASC,message_rowid ASC`;
+    return this.db.prepare(query).all(...(bounded === null ? [chatId] : [chatId, bounded])).map((row) => ({
       id: row.id, chatId: row.chat_id, turnId: row.turn_id, role: row.role,
       kind: row.kind, content: row.content, metadata: json(row.metadata_json), createdAt: row.created_at,
     }));
+  }
+
+  appendTurnEvent({ turnRunId, chatId, eventType, payload = {} }) {
+    const createdAt = now();
+    const result = this.db.prepare(`INSERT INTO turn_events
+      (turn_run_id,chat_id,event_type,payload_json,created_at) VALUES (?,?,?,?,?)`)
+      .run(turnRunId, chatId, eventType, JSON.stringify(payload), createdAt);
+    return { id: Number(result.lastInsertRowid), turnRunId, chatId, eventType, payload, createdAt };
+  }
+
+  listTurnEvents(chatId, { afterId = 0, limit = 1000, turnRunId = null, throughId = null } = {}) {
+    const safeLimit = Math.max(1, Math.min(5000, Number(limit) || 1000));
+    const clauses = ['chat_id=?', 'id>?'];
+    const params = [chatId, Math.max(0, Number(afterId) || 0)];
+    if (turnRunId) { clauses.push('turn_run_id=?'); params.push(turnRunId); }
+    if (throughId !== null) { clauses.push('id<=?'); params.push(Math.max(0, Number(throughId) || 0)); }
+    params.push(safeLimit);
+    return this.db.prepare(`SELECT * FROM turn_events WHERE ${clauses.join(' AND ')} ORDER BY id LIMIT ?`)
+      .all(...params).map((row) => ({
+        id: row.id, turnRunId: row.turn_run_id, chatId: row.chat_id,
+        eventType: row.event_type, payload: json(row.payload_json), createdAt: row.created_at,
+      }));
+  }
+
+  getLatestTurnEventId(chatId) {
+    return Number(this.db.prepare('SELECT COALESCE(MAX(id),0) AS id FROM turn_events WHERE chat_id=?').get(chatId)?.id || 0);
+  }
+
+  getLatestTurnEventIdForRun(turnRunId) {
+    return Number(this.db.prepare('SELECT COALESCE(MAX(id),0) AS id FROM turn_events WHERE turn_run_id=?').get(turnRunId)?.id || 0);
   }
 
   recoverInterruptedRuntime() {
     const timestamp = now();
     this.db.exec('BEGIN IMMEDIATE');
     try {
+      const interrupted = this.db.prepare("SELECT id,chat_id FROM turn_runs WHERE status IN ('queued','starting','running')").all();
       this.db.prepare("UPDATE turn_runs SET status='interrupted',error_message='Portal restarted',completed_at=? WHERE status IN ('queued','starting','running')")
         .run(timestamp);
+      const insertEvent = this.db.prepare(`INSERT INTO turn_events
+        (turn_run_id,chat_id,event_type,payload_json,created_at) VALUES (?,?,'turn_error',?,?)`);
+      const insertMessage = this.db.prepare(`INSERT OR IGNORE INTO messages
+        (id,chat_id,turn_id,role,kind,content,metadata_json,created_at)
+        VALUES (?,?,?,'error','turn_error',?,?,?)`);
+      for (const run of interrupted) {
+        insertEvent.run(run.id, run.chat_id, JSON.stringify({
+          code: 'PORTAL_RESTARTED', message: 'Portal restarted', status: 'interrupted',
+        }), timestamp);
+        insertMessage.run(`error:${run.id}`, run.chat_id, run.id, 'Portal 重启，未完成的任务已中断。', JSON.stringify({
+          turnRunId: run.id, status: 'interrupted', code: 'PORTAL_RESTARTED',
+        }), timestamp);
+      }
       this.db.prepare("UPDATE turn_approvals SET status='cancelled',resolved_at=? WHERE status='pending'").run(timestamp);
       this.db.exec('DELETE FROM execution_leases');
-      this.db.prepare("UPDATE chats SET status='idle' WHERE status='running'").run();
+      this.db.prepare("UPDATE chats SET status='idle' WHERE status<>'idle'").run();
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
@@ -691,6 +974,10 @@ export class HarnessDatabase {
       .map((row) => this.mapTurnRun(row));
   }
 
+  getLatestTurnRunForChat(chatId) {
+    return this.mapTurnRun(this.db.prepare('SELECT * FROM turn_runs WHERE chat_id=? ORDER BY created_at DESC LIMIT 1').get(chatId));
+  }
+
   updateTurnRun(id, patch) {
     const allowed = new Map([
       ['status', 'status'], ['queuePosition', 'queue_position'], ['codexThreadId', 'codex_thread_id'],
@@ -814,6 +1101,9 @@ export class HarnessDatabase {
       if (!submission || submission.verdict !== 'pending') throw new Error('待审核提交不存在。');
       const task = this.db.prepare('SELECT * FROM tasks WHERE id=?').get(submission.task_id);
       if (!task || task.status !== 'submitted' || task.version !== submission.task_version) throw new Error('任务版本或状态已变化。');
+      const currentAccess = this.db.prepare("SELECT id FROM project_access WHERE project_id=? AND user_id=? AND status='active'")
+        .get(task.project_id, task.assignee_user_id);
+      if (!currentAccess) throw new Error('当前任务员工的项目授权已失效，不能审核或自动推进。');
       const next = verdict === 'passed' && task.roadmap_id
         ? this.db.prepare("SELECT * FROM tasks WHERE roadmap_id=? AND position>? AND status='ready' ORDER BY position LIMIT 1")
           .get(task.roadmap_id, task.position)

@@ -51,7 +51,7 @@
 
     <section id="projects" class="panel projects-panel">
       <div class="panel-title">
-        <div><p class="eyebrow">PROJECT ACCESS</p><h2>项目与授权</h2><p>老板项目可授权一名员工并创建独立 Git worktree；员工自有项目只显示元数据。</p></div>
+        <div><p class="eyebrow">PROJECT ACCESS</p><h2>项目与授权</h2><p>一个项目可授权多名员工；每名员工使用独立 Git worktree，撤权后的脏树可原样恢复。员工自有项目只显示元数据。</p></div>
         <div class="title-actions"><button id="refresh" class="secondary">刷新</button><button id="new-project" class="primary">＋ 我的项目</button></div>
       </div>
       <div class="scope-legend"><span><i class="owner-dot"></i>我的项目，可管理内容与授权</span><span><i class="locked-dot"></i>员工项目，仅元数据</span></div>
@@ -84,6 +84,15 @@
       <label>项目说明<textarea name="description" maxlength="1000" rows="4"></textarea></label>
       <p class="form-error" role="alert"></p>
       <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button value="default" class="primary">创建并初始化 Git</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog">
+    <form method="dialog" id="confirm-form">
+      <div class="dialog-title"><div><p class="eyebrow">REVOKE ACCESS</p><h2>撤销项目访问</h2></div></div>
+      <p id="confirm-message">员工将立即失去访问权；未提交的脏工作树会保留。</p>
+      <p class="form-error" role="alert"></p>
+      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button id="confirm-dialog-submit" value="default" class="primary danger">确认撤权</button></div>
     </form>
   </dialog>
 

@@ -86,5 +86,6 @@ export function sseHeaders(res, config) {
 
 export function sse(res, event, payload) {
   if (res.writableEnded || res.destroyed) return;
-  res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+  const id = Number(payload?.eventId);
+  res.write(`${Number.isSafeInteger(id) && id > 0 ? `id: ${id}\n` : ''}event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
 }

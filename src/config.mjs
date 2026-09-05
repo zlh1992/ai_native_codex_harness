@@ -40,7 +40,7 @@ export function loadConfig(env = process.env) {
     portalSkillsRoot: resolved(env.PORTAL_SKILLS_ROOT, path.join(ROOT_DIR, 'portal-skills')),
     portalAgentConfig: resolved(env.PORTAL_AGENT_CONFIG, path.join(ROOT_DIR, 'portal-agents', 'luna.toml')),
     codexBin: env.CODEX_BIN || '/Applications/ChatGPT.app/Contents/Resources/codex',
-    codexCliVersion: '0.148.0-alpha.9',
+    codexCliVersion: '0.150.0-alpha.8',
     codexModel: env.CODEX_MODEL || 'gpt-5.6-sol',
     codexModelProvider: env.CODEX_MODEL_PROVIDER || 'openai_http',
     chatgptCodexBaseUrl: env.CHATGPT_CODEX_BASE_URL || 'https://chatgpt.com/backend-api/codex',

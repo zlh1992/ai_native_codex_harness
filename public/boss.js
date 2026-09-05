@@ -1,6 +1,6 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { me: null, csrf: '', data: null };
+const state = { me: null, csrf: '', data: null, pendingRevoke: null };
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[char]);
@@ -56,8 +56,8 @@ function renderMetrics() {
     ['今日活跃', stats.todayActiveUsers, `共 ${staff.filter((user) => user.status === 'active').length} 个启用员工`],
     ['员工账号', staff.length, '账号管理不授予内容权限'],
     ['我的项目', myProjects.length, `全公司 ${stats.projects} 个项目`],
-    ['有效共享', stats.activeShares, '每个老板项目最多 1 人'],
-    ['活跃 root turn', stats.runningChats, `全局上限 ${codex.maxConcurrentTurns}`],
+    ['有效共享', stats.activeShares, '每名员工一个独立 worktree'],
+    ['活跃 root turn', stats.runningChats, `Portal 全局上限 ${codex.maxRootTurns || 11}`],
     ['执行服务', codex.ready ? '在线' : '启动中', codex.ready ? `${codex.activeTurns || 0} 个活动任务` : 'Codex app-server'],
   ];
   $('#metric-grid').innerHTML = cards.map(([label, value, note]) => `<article class="metric"><small>${label}</small><b>${escapeHtml(value)}</b><span>${escapeHtml(note)}</span></article>`).join('');
@@ -77,30 +77,36 @@ function renderEmployees() {
   $$('[data-edit-user]').forEach((button) => button.addEventListener('click', () => openUser(list.find((user) => user.id === button.dataset.editUser))));
 }
 
-function employeeOptions(selectedId = '') {
-  const list = employees().filter((user) => user.status === 'active');
-  return `<option value="">选择员工…</option>${list.map((user) => `<option value="${user.id}" ${user.id === selectedId ? 'selected' : ''}>${escapeHtml(user.displayName)} (@${escapeHtml(user.username)})</option>`).join('')}`;
+function employeeOptions(excluded = new Set()) {
+  const list = employees().filter((user) => user.status === 'active' && !excluded.has(user.id));
+  return `<option value="">选择员工…</option>${list.map((user) => `<option value="${user.id}">${escapeHtml(user.displayName)} (@${escapeHtml(user.username)})</option>`).join('')}`;
 }
 
 function renderProjects() {
   const projects = state.data.projects;
   $('#project-grid').innerHTML = projects.map((project) => {
     const mine = project.userId === state.me.id;
+    const shares = project.sharedAccesses || [];
+    const sharedUserIds = new Set(shares.map((access) => access.userId));
+    const shareRows = shares.map((access) => `<div class="share-row"><span class="share-state">${escapeHtml(access.displayName || access.username)} (@${escapeHtml(access.username)}) · 独立 worktree</span><button class="secondary danger" data-revoke="${project.id}" data-access="${access.id}">撤权</button></div>`).join('');
     let actions = '<span class="share-state">🔒 老板无内容访问权</span>';
-    if (mine && project.sharedAccessId) {
-      actions = `<span class="share-state">已授权 ${escapeHtml(project.sharedDisplayName || project.sharedUsername)}</span><button class="secondary danger" data-revoke="${project.id}" data-access="${project.sharedAccessId}">撤权</button><a class="secondary" href="/?workbench=1&project=${project.id}">打开</a>`;
-    } else if (mine) {
-      actions = `${project.repoKind === 'git' ? `<select data-share-user="${project.id}">${employeeOptions()}</select><button class="primary" data-grant="${project.id}">授权</button>` : `<button class="primary" data-init-git="${project.id}">初始化 Git</button>`}<a class="secondary" href="/?workbench=1&project=${project.id}">打开</a>`;
+    if (mine) {
+      if (project.repoKind !== 'git') {
+        actions = `<button class="primary" data-init-git="${project.id}">初始化 Git</button><a class="secondary" href="/?workbench=1&project=${project.id}">打开</a>`;
+      } else {
+        const available = employees().some((user) => user.status === 'active' && !sharedUserIds.has(user.id));
+        actions = `${shareRows}<div class="share-add">${available ? `<select data-share-user="${project.id}">${employeeOptions(sharedUserIds)}</select><button class="primary" data-grant="${project.id}">授权 / 恢复</button>` : ''}<a class="secondary" href="/?workbench=1&project=${project.id}">打开</a></div>`;
+      }
     }
     return `<article class="project-card ${mine ? 'mine' : ''}">
       <div class="project-top"><div><h3>${escapeHtml(project.name)}</h3><p>${escapeHtml(project.description || project.slug)}</p></div><span class="scope-tag">${mine ? 'OWNER' : 'METADATA ONLY'}</span></div>
-      <div class="project-meta"><div><small>所有者</small><b>${escapeHtml(project.displayName || project.username)}</b></div><div><small>工作树</small><b>${project.sharedAccessId ? '独立 worktree' : project.repoKind === 'git' ? 'Git ready' : '未初始化 Git'}</b></div></div>
+      <div class="project-meta"><div><small>所有者</small><b>${escapeHtml(project.displayName || project.username)}</b></div><div><small>授权工作树</small><b>${shares.length ? `${shares.length} 个独立 worktree` : project.repoKind === 'git' ? 'Git ready' : '未初始化 Git'}</b></div></div>
       <div class="project-actions">${actions}</div>
     </article>`;
   }).join('') || '<div class="empty">还没有项目。</div>';
 
-  $$('[data-grant]').forEach((button) => button.addEventListener('click', () => grant(button.dataset.grant)));
-  $$('[data-revoke]').forEach((button) => button.addEventListener('click', () => revoke(button.dataset.revoke, button.dataset.access)));
+  $$('[data-grant]').forEach((button) => button.addEventListener('click', () => grant(button.dataset.grant, button.dataset.grantUser)));
+  $$('[data-revoke]').forEach((button) => button.addEventListener('click', () => requestRevoke(button.dataset.revoke, button.dataset.access)));
   $$('[data-init-git]').forEach((button) => button.addEventListener('click', () => initializeGit(button.dataset.initGit)));
 }
 
@@ -145,23 +151,27 @@ function openUser(user = null) {
   $('#user-dialog').showModal();
 }
 
-async function grant(projectId) {
+async function grant(projectId, fixedUserId = '') {
   const select = $(`[data-share-user="${projectId}"]`);
-  if (!select?.value) return toast('先选择一名员工。', 'error');
+  const userId = fixedUserId || select?.value;
+  if (!userId) return toast('先选择一名员工。', 'error');
   try {
-    await api(`/api/admin/projects/${projectId}/shares`, { method: 'POST', body: { userId: select.value } });
-    toast('已创建独立 worktree 并授权。');
+    const result = await api(`/api/admin/projects/${projectId}/shares`, { method: 'POST', body: { userId } });
+    toast(result.restored ? '已恢复该员工原有 worktree 与授权。' : '已创建独立 worktree 并授权。');
     await load();
   } catch (error) { toast(error.message, 'error'); }
 }
 
+function requestRevoke(projectId, accessId) {
+  state.pendingRevoke = { projectId, accessId };
+  $('.form-error', $('#confirm-form')).textContent = '';
+  $('#confirm-dialog').showModal();
+}
+
 async function revoke(projectId, accessId) {
-  if (!confirm('立即撤销该员工的项目访问？未提交的脏工作树会保留，员工将无法再通过 Portal 访问。')) return;
-  try {
-    const result = await api(`/api/admin/projects/${projectId}/shares/${accessId}`, { method: 'DELETE' });
-    toast(result.cleanup.dirty ? '权限已撤销；检测到未提交修改，工作树已保留。' : '权限已撤销，干净工作树已移除。');
-    await load();
-  } catch (error) { toast(error.message, 'error'); }
+  const result = await api(`/api/admin/projects/${projectId}/shares/${accessId}`, { method: 'DELETE' });
+  toast(result.cleanup.dirty ? '权限已撤销；检测到未提交修改，工作树已保留。' : '权限已撤销，干净工作树已移除。');
+  await load();
 }
 
 async function initializeGit(projectId) {
@@ -177,6 +187,29 @@ $('#new-project').addEventListener('click', () => { $('#project-form').reset(); 
 $('#refresh').addEventListener('click', () => load().catch((error) => toast(error.message, 'error')));
 $('#refresh-audit').addEventListener('click', () => loadAudit().catch((error) => toast(error.message, 'error')));
 $('#logout').addEventListener('click', async () => { try { await api('/api/logout', { method: 'POST' }); } finally { location.replace('/'); } });
+
+$('#confirm-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (event.submitter?.value === 'cancel') {
+    state.pendingRevoke = null;
+    $('#confirm-dialog').close();
+    return;
+  }
+  if (!state.pendingRevoke) return;
+  const target = event.currentTarget;
+  const pending = state.pendingRevoke;
+  const submit = event.submitter || $('#confirm-dialog-submit');
+  submit.disabled = true;
+  try {
+    await revoke(pending.projectId, pending.accessId);
+    state.pendingRevoke = null;
+    $('#confirm-dialog').close();
+  } catch (error) {
+    $('.form-error', target).textContent = error.message;
+  } finally {
+    submit.disabled = false;
+  }
+});
 
 $('#user-form').addEventListener('submit', async (event) => {
   event.preventDefault();

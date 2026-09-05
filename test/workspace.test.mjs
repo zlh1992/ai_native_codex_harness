@@ -21,9 +21,13 @@ test('workspace file CRUD stays inside the project', () => {
   assert.throws(() => service.readFile(project, '../secret'), /路径不能离开工作区/);
   assert.throws(() => service.writeFile(project, '/tmp/escape', 'bad'), /相对路径/);
   assert.throws(() => service.writeFile(project, '.codex/agents/override.toml', 'model = "other"'), /内部路径/);
+  assert.throws(() => service.writeFile(project, '.CoDeX/config.toml', 'model = "other"'), /内部路径/);
+  assert.throws(() => service.readFile(project, '.GIT/config'), /内部路径/);
+  const usageBeforeTrash = service.usageForUser(project.userId, [project]);
   const deleted = service.moveToTrash(project, 'src/index.js');
   assert.equal(deleted.recoverable, true);
   assert.equal(fs.existsSync(path.join(service.projectRoot(project), 'src/index.js')), false);
+  assert.deepEqual(service.usageForUser(project.userId, [project]), usageBeforeTrash);
 });
 
 test('workspace rejects symlinks that escape the project', () => {

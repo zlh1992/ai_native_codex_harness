@@ -2,10 +2,10 @@
 
 本分支把 `work.md` 中的员工交付链路落实为四道相互独立的边界：
 
-1. `project_access` 决定员工能否看到项目；共享项目始终绑定独立 Git worktree。
+1. `project_access` 决定员工能否看到项目；一个项目可授权多名员工，每个员工始终绑定独立 Git worktree，同一 tree 的 root turn 与浏览器写操作串行。
 2. `chats.project_access_id + chats.tree_path` 固定 Codex thread 的项目树，旧页面不能在撤权后继续使用。
-3. `turn_runs` 保存 Portal 所需的运行状态和提交快照；完整对话仍由 Codex thread 持久化，页面通过 `thread/read` 重建历史。
-4. `task_submissions` 对最终 `item/completed`、turn diff 和任务版本做不可变快照，Codex goal 完成不会自动把业务任务判为通过。
+3. `turn_runs`、`turn_events` 和确定性 `messages` 保存运行终态、脱敏事件与历史兜底；完整对话优先由 Codex thread 持久化，页面通过 `thread/read` 重建历史。
+4. `task_submissions` 对最终 `item/completed`、turn diff 和任务版本做不可变快照，且不随 chat/turn 删除；Codex goal 完成不会自动把业务任务判为通过。
 
 员工项目数在配置、管理员接口和创建项目入口三层硬限制为 100；老板账号不受该员工上限影响。
 
@@ -17,6 +17,13 @@
 - EDIT 不占 EXECUTE lease，即使 EXECUTE 队列存在也可在 root 容量内继续运行。
 - 每个 root thread 的原生子代理并发上限为 3，默认模型固定为 `gpt-5.6-luna`；Portal 用同一份只读配置层覆盖原生 `default`、`worker`、`explorer` 三个角色，避免显式 spawn 改用更贵模型，并检查可见的原生 collab item，发现非 Luna 模型或超额 spawn 时中断该 turn。
 - 文件 API 隐藏并拒绝 `.codex`；开始 turn 前还会拒绝项目内的自定义 agent 或 `[agents]` 覆盖，防止员工通过项目配置绕过上述角色策略。
+- 同一 `project_access` 的 EDIT/EXECUTE 共用单写者锁；排队、停止、审批和 execution lease 全部进入确定终态后才释放。不同员工的独立 worktree 可并行。
+
+## 对话恢复
+
+- SSE 帧带持久事件 id；刷新后按 run 与 `Last-Event-ID` 重放 queued/status/approval/tool/plan/diff 元数据/final/terminal 等语义事件。
+- 逐 token assistant/reasoning、命令正文、文件内容和 raw diff 不写事件日志；终态 assistant/error 由 `messages` 确定性快照兜底。
+- 原 thread 恢复失败不会静默创建新 thread。页面会显示显式恢复卡片；新建空白 thread 必须确认上下文断裂，并保存 old/new lineage。
 
 ## 模式和批准
 
@@ -28,4 +35,4 @@
 
 ## 协议锁定
 
-`protocol/generated/` 是由本机 `codex-cli 0.148.0-alpha.9` 直接生成的 TypeScript 协议。App Server 初始化时会核对同一版本，不匹配则拒绝就绪；`test/protocol.test.mjs` 检查本项目依赖的方法、事件和字段。升级 Codex 二进制时应重新生成 schema、同步固定版本并先通过契约测试。
+`protocol/generated/` 是由本机 `codex-cli 0.150.0-alpha.8` 直接生成的 TypeScript 协议。App Server 初始化时会核对同一版本，不匹配则拒绝就绪；`test/protocol.test.mjs` 检查本项目依赖的方法、事件和字段。升级 Codex 二进制时应重新生成 schema、同步固定版本并先通过契约测试。启动脚本会区分 Web 已监听、Codex 正在启动和 Codex 启动失败，协议不匹配时会立即显示原因，不再无提示等待 60 秒。

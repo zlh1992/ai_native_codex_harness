@@ -1,0 +1,90 @@
+# 04 安全与信任边界
+
+## 威胁模型
+
+当前防护目标是阻止普通 Portal 用户：
+
+- 读取或写入其他用户/其他 access 的项目内容；
+- 猜测 project/chat/run/approval id 后越权；
+- 用路径穿越、符号链接、`.git` 或 `.codex` 访问宿主敏感数据；
+- 自选 Codex thread、cwd、sandbox policy、模型或任意 JSON-RPC method；
+- 在 EDIT 模式执行命令，或在未批准的 EXECUTE 中运行命令；
+- 从命令环境读取 Portal、隧道或 Codex 凭据；
+- 利用 SSE cursor 或 submission 引用跨 chat、跨用户读取信息。
+
+当前不防御共享 app-server、共享 OS 账号或共享上游 Codex 实现本身对敌对租户造成的侧信道与故障域问题。因此只能用于被组织授权、具有基本互信的员工。
+
+## 认证
+
+- 密码使用独立随机 salt 的 scrypt：`N=32768, r=8, p=1`。
+- 浏览器持有 256-bit 随机 session token；SQLite 只保存 token SHA-256 digest。
+- Cookie 使用 `HttpOnly`、`SameSite=Strict`，经 HTTPS 隧道时设置 `Secure`。
+- 写请求必须同时通过 session、active user、Origin 与 session-bound CSRF 校验。
+- 登录按来源 IP 做进程内滑动窗口限速，成功与失败均进入审计。
+
+登录限速目前不是跨进程持久化安全控制；可信代理必须清洗 `X-Forwarded-For` 与 `X-Forwarded-Proto`。直接把 Portal 暴露到不可信反向代理会破坏来源与 Secure Cookie 判断。
+
+## 授权
+
+授权链必须是：
+
+```text
+session user
+  -> active user
+  -> requested chat belongs to user
+  -> active project access belongs to user
+  -> chat.project_access_id equals current access.id
+  -> server-bound tree/thread/run/approval
+```
+
+管理员驾驶舱读取跨用户项目时只拿元数据。任何文件、chat 或 turn 路由仍通过 `projectFor(session, projectId)`，不能因为 `role=admin` 绕过内容 ACL。
+
+敏感异步操作在 await 后必须重新校验授权，尤其是：创建/恢复 worktree、thread resume/start、skill discovery、排队转运行、批准处理、动态工具执行、显式 thread reset，以及返回 chat history、goal 或 spreadsheet preview 等受 ACL 内容之前。复验同时检查原 session 仍存在。
+
+## 文件路径与 Git
+
+- 所有客户端路径先转成受控项目相对路径，再在服务端解析 canonical target。
+- 拒绝绝对路径、空目标的危险操作、`..`、NUL、保留目录和越界符号链接；保留目录在 Unicode 规范化和大小写折叠后比较。
+- 共享 worktree 的 `.git` 是指向 owner 仓库内部的 indirection，必须同时被文件 API 和 Seatbelt 隐藏。
+- 项目中的 `.codex` 和自定义 agent 配置不能改变 Portal 固定的工具、角色、模型或子代理策略。
+- 文件删除使用可恢复 trash；恢复必须由管理员在停服和核对 ACL 后执行。
+
+## Codex 工具面
+
+App Server 启动时关闭内置 Shell、unified exec、浏览器、插件、外部 MCP、computer use、image generation、workspace dependencies、skill search 和 web search 等不受 Portal ACL 控制的能力。
+
+允许的写入面分两类：
+
+1. `workspace_*` dynamic tools：每次调用都通过 Portal 上下文、ACL、路径和 turn mode 校验。
+2. 原生 apply-patch/file-change：Codex thread/turn 默认使用 `readOnly` sandbox，只有收到原生 approval 后才允许应用该次 patch。Portal 从 legacy `fileChanges` 或 v2 item/patch notification 得到完整目标集合，转为脱敏项目相对路径后逐项校验并展示。目标缺失、改变、越界、命中保留目录或请求持久 `grantRoot` 时 fail closed。这样普通 workspace 写入和跨请求的宽泛授权不能绕过 Portal 的文件目标校验；动态 `workspace_*` 写入仍由 Portal 自身执行。
+
+原生 subagent 只能位于当前 root tree 内，数量最多 3，模型固定 Luna。Portal 检查可见的 collab item 与 thread settings；这降低误配置风险，但不等于证明共享 app-server 对恶意跨 root 行为具有进程级隔离。
+
+## 命令沙箱
+
+- `workspace_exec` 只允许 EXECUTE turn。
+- 命令必须先有当前用户、chat、run 对应的 pending approval，并由浏览器接受。
+- 子进程环境只保留最小 `PATH/HOME/TMPDIR/LANG/TERM/CI`；不展开继承整个 `process.env`。
+- Seatbelt 只允许当前 tree 与该用户 runtime 的必要访问；默认禁网。
+- 命令具有 wall timeout、CPU、进程、文件描述符和输出字节限制。
+
+Seatbelt 不是容器。完全不可信用户需要独立 OS 用户、VM/容器、独立磁盘 quota、独立 Codex 身份和独立 worker。
+
+## 持久化与日志脱敏
+
+不得进入 `audit_log` 或 `turn_events`：
+
+- 密码、session/CSRF/tunnel/Codex token；
+- 用户 prompt 与模型逐 token 正文；
+- 命令正文、环境变量和文件内容；
+- raw diff 与完整工具参数/返回值；
+- 宿主绝对路径。
+
+允许记录 actor、资源 id、动作、状态、字节数、工具名称、审批类型、模型策略违规、final item id 和脱敏错误码。完整 final reply/diff 只作为 task submission/turn 的受 ACL 业务快照保存，不进入全局审计。
+
+## 公网边界
+
+- Portal 必须保持 loopback 监听，Cloudflare/Tailscale 只建立出站隧道。
+- Quick Tunnel 地址是临时运行事实，不是稳定身份或长期访问控制。
+- 固定部署应设置明确 `PUBLIC_ORIGIN`、受管 tunnel token 文件和正确代理信任。
+- app-server stdio 永远只对 Portal 可见；浏览器不得直接获得 app-server 凭据或 capability token。

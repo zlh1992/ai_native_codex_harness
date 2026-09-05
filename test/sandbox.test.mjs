@@ -20,7 +20,7 @@ test('macOS command sandbox can write its tenant and cannot read Codex credentia
   workspace.writeFile(sibling, 'secret.txt', 'sibling-secret');
   const siblingSecret = path.join(workspace.projectRoot(sibling), 'secret.txt');
   const result = await runSandboxedCommand({ config, workspace, project, user, command: `printf safe > generated.txt; if test -r "${outsideSecret}" || test -r "${siblingSecret}"; then echo LEAK; else echo DENIED; fi` });
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, true, result.output);
   assert.match(result.output, /DENIED/);
   assert.doesNotMatch(result.output, /LEAK/);
   assert.equal(workspace.readFile(project, 'generated.txt').content, 'safe');
@@ -37,7 +37,7 @@ test('shared-worktree sandbox hides Git indirection metadata', { skip: process.p
   fs.writeFileSync(path.join(treePath, 'visible.txt'), 'visible');
   const project = { id: 'aaaaaaaa-2222-4222-8222-aaaaaaaaaaaa', userId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', accessUserId: user.id, accessId: 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa', accessKind: 'shared', treePath, slug: 'shared', name: 'Shared' };
   const result = await runSandboxedCommand({ config, workspace, project, user, command: 'test -r visible.txt && test ! -r .git && echo SEALED' });
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, true, result.output);
   assert.match(result.output, /SEALED/);
   assert.doesNotMatch(result.output, /private\/boss/);
 });

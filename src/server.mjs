@@ -103,6 +103,12 @@ function requireSession(req) {
   return session;
 }
 
+function refreshSession(session) {
+  const current = db.getSession(session.tokenHash);
+  invariant(current && current.user.id === session.user.id, 401, 'AUTH_REQUIRED', '会话已失效，请重新登录。');
+  return current;
+}
+
 function requireMutation(req, session) {
   checkOrigin(req);
   invariant(safeEqual(req.headers['x-csrf-token'], session.csrfToken), 403, 'CSRF_REJECTED', 'CSRF 校验失败，请刷新页面后重试。');
@@ -112,7 +118,14 @@ function requireAdmin(session) {
   invariant(session.user.role === 'admin', 403, 'ADMIN_REQUIRED', '此操作仅限超级管理员。');
 }
 
+function activeUserFor(session) {
+  const user = db.getUserById(session.user.id);
+  invariant(user?.status === 'active', 403, 'USER_DISABLED', '账号已停用，请重新登录。');
+  return user;
+}
+
 function projectFor(session, id) {
+  activeUserFor(session);
   const project = db.getProjectForUser(id, session.user.id);
   invariant(project, 403, 'PROJECT_FORBIDDEN', '项目不存在或未向你授权。');
   return project;
@@ -122,8 +135,8 @@ function chatFor(session, id) {
   const chat = db.getChat(id);
   invariant(chat, 404, 'CHAT_NOT_FOUND', '对话不存在。');
   invariant(chat.userId === session.user.id, 403, 'CHAT_FORBIDDEN', '无权访问该对话。');
-  const project = db.getProjectForUser(chat.projectId, session.user.id);
-  invariant(project && project.accessId === chat.projectAccessId, 403, 'PROJECT_ACCESS_REVOKED', '该对话对应的项目授权已撤销。');
+  const project = projectFor(session, chat.projectId);
+  invariant(project.accessId === chat.projectAccessId, 403, 'PROJECT_ACCESS_REVOKED', '该对话对应的项目授权已撤销。');
   return chat;
 }
 
@@ -133,6 +146,7 @@ function ownerProject(project) {
 }
 
 function taskFor(session, id) {
+  activeUserFor(session);
   const task = db.getTaskForUser(id, session.user.id);
   invariant(task, 403, 'TASK_FORBIDDEN', '任务不存在或不属于你。');
   return task;
@@ -193,6 +207,10 @@ function userUsage(userId) {
   return workspace.usageForUser(userId, db.listProjectsForUser(userId));
 }
 
+function requireWorkspaceIdle(project) {
+  invariant(!codex.workspaceBusy(project.accessId), 409, 'WORKSPACE_BUSY', '该工作树正在被 Codex 使用，请等待任务结束或先停止任务。');
+}
+
 async function bootstrapAdmin() {
   if (db.countAdmins() > 0 || !config.adminUsername || !config.adminPassword) return;
   const username = validateUsername(config.adminUsername);
@@ -217,7 +235,9 @@ async function route(req, res) {
   const pathname = url.pathname;
 
   if (req.method === 'GET' && pathname === '/api/health') {
-    sendJson(res, 200, { ok: true, codex: codex.status().ready, initialized: db.countAdmins() > 0 }, config);
+    const codexStatus = codex.status();
+    const codexState = codexStatus.ready ? 'ready' : codexStatus.lastError ? 'failed' : 'starting';
+    sendJson(res, 200, { ok: true, codex: codexStatus.ready, codexState, initialized: db.countAdmins() > 0 }, config);
     return;
   }
   if (req.method === 'POST' && pathname === '/api/login') {
@@ -305,8 +325,9 @@ async function route(req, res) {
   }
   if (match && req.method === 'PATCH') {
     requireMutation(req, session);
-    const project = ownerProject(projectFor(session, match[1]));
+    let project = ownerProject(projectFor(session, match[1]));
     const body = await readJson(req);
+    project = ownerProject(projectFor(session, match[1]));
     const updated = db.updateProject(project.id, {
       name: body.name === undefined ? project.name : shortText(body.name, '项目名称'),
       description: body.description === undefined ? project.description : String(body.description).trim().slice(0, 1000),
@@ -319,6 +340,11 @@ async function route(req, res) {
     requireMutation(req, session);
     const project = ownerProject(projectFor(session, match[1]));
     invariant(!db.listProjectAccess(project.id, { activeOnly: true }).some((access) => access.accessKind === 'shared'), 409, 'PROJECT_SHARED', '请先撤销员工授权再删除项目。');
+    invariant(!db.runtimeForProject(project.id).busy && !codex.workspaceBusy(project.accessId),
+      409, 'PROJECT_BUSY', '项目仍有排队、运行或恢复中的任务，不能删除。');
+    const retained = db.listProjectAccess(project.id).filter((access) => access.accessKind === 'shared'
+      && access.status === 'revoked' && worktrees.isReusableShare({ treePath: access.treePath }));
+    invariant(retained.length === 0, 409, 'RETAINED_WORKTREES', '项目仍有撤权后保留的工作树；请先恢复授权并处理其中的修改。');
     const trashed = workspace.trashProject(project);
     db.deleteProject(project.id);
     audit(req, session, 'project.trash', 'project', project.id, { name: project.name, recoverable: trashed.recoverable });
@@ -368,8 +394,13 @@ async function route(req, res) {
   }
   match = pathname.match(/^\/api\/projects\/([^/]+)\/spreadsheet-preview$/);
   if (match && req.method === 'GET') {
-    const project = projectFor(session, match[1]);
-    sendJson(res, 200, await workspace.spreadsheetPreview(project, url.searchParams.get('path') || ''), config);
+    let project = projectFor(session, match[1]);
+    const expectedAccessId = project.accessId;
+    const preview = await workspace.spreadsheetPreview(project, url.searchParams.get('path') || '');
+    const currentSession = refreshSession(session);
+    project = projectFor(currentSession, project.id);
+    invariant(project.accessId === expectedAccessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已变化。');
+    sendJson(res, 200, preview, config);
     return;
   }
   match = pathname.match(/^\/api\/projects\/([^/]+)\/file$/);
@@ -380,11 +411,19 @@ async function route(req, res) {
   }
   if (match && req.method === 'PUT') {
     requireMutation(req, session);
-    const project = projectFor(session, match[1]);
-    const quotaUser = session.user;
+    let project = projectFor(session, match[1]);
+    requireWorkspaceIdle(project);
     const body = await readBody(req, config.uploadMaxBytes);
+    project = projectFor(session, match[1]);
+    requireWorkspaceIdle(project);
+    const quotaUser = activeUserFor(session);
     let previous = 0;
-    try { previous = fs.statSync(workspace.resolve(project, url.searchParams.get('path') || '', { mustExist: true }).target).size; } catch { /* new file */ }
+    let exists = false;
+    try {
+      previous = fs.statSync(workspace.resolve(project, url.searchParams.get('path') || '', { mustExist: true }).target).size;
+      exists = true;
+    } catch { /* new file */ }
+    invariant(!exists || url.searchParams.get('overwrite') === '1', 409, 'FILE_EXISTS', '文件已存在；请明确允许覆盖。');
     const usage = userUsage(quotaUser.id);
     invariant(usage.bytes - previous + body.length <= quotaUser.maxStorageBytes, 413, 'STORAGE_QUOTA', '写入将超过用户存储配额。');
     const file = workspace.writeFile(project, url.searchParams.get('path') || '', body);
@@ -396,6 +435,7 @@ async function route(req, res) {
   if (match && req.method === 'DELETE') {
     requireMutation(req, session);
     const project = projectFor(session, match[1]);
+    requireWorkspaceIdle(project);
     const result = workspace.moveToTrash(project, url.searchParams.get('path') || '');
     db.touchProject(project.id);
     audit(req, session, 'file.trash', 'project', project.id, { path: result.path });
@@ -405,8 +445,11 @@ async function route(req, res) {
   match = pathname.match(/^\/api\/projects\/([^/]+)\/directory$/);
   if (match && req.method === 'POST') {
     requireMutation(req, session);
-    const project = projectFor(session, match[1]);
+    let project = projectFor(session, match[1]);
+    requireWorkspaceIdle(project);
     const body = await readJson(req);
+    project = projectFor(session, match[1]);
+    requireWorkspaceIdle(project);
     const result = workspace.makeDirectory(project, body.path);
     db.touchProject(project.id);
     audit(req, session, 'directory.create', 'project', project.id, { path: result.path });
@@ -422,8 +465,9 @@ async function route(req, res) {
   }
   if (match && req.method === 'POST') {
     requireMutation(req, session);
-    const project = projectFor(session, match[1]);
+    let project = projectFor(session, match[1]);
     const body = await readJson(req);
+    project = projectFor(session, match[1]);
     const chat = db.createChat({
       projectId: project.id,
       userId: session.user.id,
@@ -439,14 +483,27 @@ async function route(req, res) {
   match = pathname.match(/^\/api\/chats\/([^/]+)$/);
   if (match && req.method === 'GET') {
     const chat = chatFor(session, match[1]);
-    const task = chat.taskId ? taskFor(session, chat.taskId) : null;
-    sendJson(res, 200, { chat: chatPayload(chat), task, messages: await codex.historyForChat(chat) }, config);
+    const expectedThreadId = chat.codexThreadId;
+    const authorize = () => {
+      const currentSession = refreshSession(session);
+      const currentChat = chatFor(currentSession, chat.id);
+      invariant(currentChat.codexThreadId === expectedThreadId, 409, 'THREAD_MAPPING_CHANGED', '对话线程已变化，请刷新后重试。');
+      return { currentSession, currentChat };
+    };
+    const messages = await codex.historyForChat(chat, authorize);
+    const { currentSession, currentChat } = authorize();
+    const task = currentChat.taskId ? taskFor(currentSession, currentChat.taskId) : null;
+    sendJson(res, 200, {
+      chat: chatPayload(currentChat), task, messages,
+      latestTurnRun: db.getLatestTurnRunForChat(currentChat.id), latestEventId: db.getLatestTurnEventId(currentChat.id),
+    }, config);
     return;
   }
   if (match && req.method === 'PATCH') {
     requireMutation(req, session);
-    const chat = chatFor(session, match[1]);
+    let chat = chatFor(session, match[1]);
     const body = await readJson(req);
+    chat = chatFor(session, match[1]);
     const updated = db.updateChat(chat.id, { title: shortText(body.title, '对话标题', 120) });
     audit(req, session, 'chat.update', 'chat', chat.id);
     sendJson(res, 200, { chat: chatPayload(updated) }, config);
@@ -455,8 +512,9 @@ async function route(req, res) {
   if (match && req.method === 'DELETE') {
     requireMutation(req, session);
     const chat = chatFor(session, match[1]);
-    invariant(chat.status !== 'running', 409, 'CHAT_RUNNING', '请先停止正在运行的任务。');
-    db.deleteChat(chat.id);
+    invariant(!codex.chatBusy(chat.id), 409, 'CHAT_RUNNING', '请先停止正在运行、排队或恢复中的任务。');
+    invariant(!db.chatHasSubmission(chat.id), 409, 'CHAT_HAS_SUBMISSION', '该对话包含不可变的任务提交证据，不能删除。');
+    try { db.deleteChat(chat.id); } catch (error) { throw new HttpError(409, 'CHAT_DELETE_REJECTED', error.message); }
     audit(req, session, 'chat.delete', 'chat', chat.id);
     sendJson(res, 200, { ok: true }, config);
     return;
@@ -465,10 +523,13 @@ async function route(req, res) {
   match = pathname.match(/^\/api\/chats\/([^/]+)\/turns$/);
   if (match && req.method === 'POST') {
     requireMutation(req, session);
-    const chat = chatFor(session, match[1]);
-    const project = projectFor(session, chat.projectId);
+    let chat = chatFor(session, match[1]);
+    let project = projectFor(session, chat.projectId);
     invariant(project.accessId === chat.projectAccessId, 403, 'PROJECT_ACCESS_REVOKED', '该对话对应的项目授权已撤销。');
     const body = await readJson(req, 256 * 1024);
+    chat = chatFor(session, match[1]);
+    project = projectFor(session, chat.projectId);
+    invariant(project.accessId === chat.projectAccessId, 403, 'PROJECT_ACCESS_REVOKED', '该对话对应的项目授权已撤销。');
     sseHeaders(res, config);
     const heartbeat = setInterval(() => sse(res, 'ping', { at: Date.now() }), 15_000);
     const mode = String(body.mode || 'edit').toLowerCase();
@@ -481,6 +542,94 @@ async function route(req, res) {
       clearInterval(heartbeat);
       if (!res.writableEnded) res.end();
     }
+    return;
+  }
+  match = pathname.match(/^\/api\/chats\/([^/]+)\/events$/);
+  if (match && req.method === 'GET') {
+    const chat = chatFor(session, match[1]);
+    const afterId = Math.max(0, Number(url.searchParams.get('after')) || 0);
+    sendJson(res, 200, {
+      events: db.listTurnEvents(chat.id, { afterId, limit: Number(url.searchParams.get('limit')) || 1000 }),
+      latestTurnRun: db.getLatestTurnRunForChat(chat.id), latestEventId: db.getLatestTurnEventId(chat.id),
+    }, config);
+    return;
+  }
+  match = pathname.match(/^\/api\/chats\/([^/]+)\/turn-runs\/([^/]+)\/events$/);
+  if (match && req.method === 'GET') {
+    const chat = chatFor(session, match[1]);
+    const run = db.getTurnRun(match[2]);
+    invariant(run && run.chatId === chat.id && run.userId === session.user.id, 403, 'TURN_FORBIDDEN', '运行记录不存在或不属于你。');
+    const headerCursor = Number(req.headers['last-event-id']);
+    const queryCursor = Number(url.searchParams.get('after'));
+    let lastSent = Math.max(0, Number.isSafeInteger(headerCursor) ? headerCursor : Number.isSafeInteger(queryCursor) ? queryCursor : 0);
+    const buffered = [];
+    let replaying = true;
+    let closed = false;
+    let heartbeat;
+    const terminal = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      if (heartbeat) clearInterval(heartbeat);
+      codex.off('turnEvent', onEvent);
+    };
+    const sendEvent = (event) => {
+      if (closed || event.id <= lastSent || event.turnRunId !== run.id) return;
+      const currentUser = db.getUserById(session.user.id);
+      const currentChat = db.getChat(chat.id);
+      const currentAccess = currentUser?.status === 'active' && currentChat
+        ? db.getProjectForUser(currentChat.projectId, currentUser.id) : null;
+      if (!currentUser || currentUser.status !== 'active' || !currentChat || !currentAccess
+        || currentAccess.accessId !== currentChat.projectAccessId) {
+        cleanup(); if (!res.writableEnded) res.end(); return;
+      }
+      lastSent = event.id;
+      sse(res, event.eventType, { ...event.payload, turnRunId: event.turnRunId, eventId: event.id });
+      const currentRun = db.getTurnRun(run.id);
+      if (currentRun && terminal.has(currentRun.status) && ['turn_completed', 'turn_error'].includes(event.eventType)) {
+        cleanup(); if (!res.writableEnded) res.end();
+      }
+    };
+    const onEvent = (event) => {
+      if (event.turnRunId !== run.id) return;
+      if (replaying) buffered.push(event);
+      else sendEvent(event);
+    };
+    codex.on('turnEvent', onEvent);
+    sseHeaders(res, config);
+    const waterline = db.getLatestTurnEventIdForRun(run.id);
+    while (!closed && lastSent < waterline) {
+      const page = db.listTurnEvents(chat.id, { afterId: lastSent, turnRunId: run.id, throughId: waterline, limit: 1000 });
+      if (!page.length) break;
+      page.forEach(sendEvent);
+    }
+    replaying = false;
+    buffered.sort((a, b) => a.id - b.id).forEach(sendEvent);
+    if (!closed && terminal.has(db.getTurnRun(run.id)?.status)) {
+      cleanup(); if (!res.writableEnded) res.end();
+    } else if (!closed) {
+      heartbeat = setInterval(() => sse(res, 'ping', { at: Date.now() }), 15_000);
+      req.on('close', cleanup);
+    }
+    return;
+  }
+  match = pathname.match(/^\/api\/chats\/([^/]+)\/(?:thread-recovery|thread\/recover)$/);
+  if (match && req.method === 'POST') {
+    requireMutation(req, session);
+    let chat = chatFor(session, match[1]);
+    let project = projectFor(session, chat.projectId);
+    const body = await readJson(req, 16 * 1024);
+    chat = chatFor(session, match[1]);
+    project = projectFor(session, chat.projectId);
+    const recovered = await codex.recoverChatThread({
+      chat, project, user: session.user, action: String(body.action || ''),
+      acknowledgeHistoryBreak: body.acknowledgeHistoryBreak === true || body.acknowledgeContextReset === true,
+    });
+    audit(req, session, 'chat.thread_recovered', 'chat', chat.id, {
+      strategy: body.action === 'reset' ? 'explicit_reset' : 'resume_retry',
+      mappingChanged: (chat.codexThreadId || null) !== (recovered.codexThreadId || null),
+    });
+    sendJson(res, 200, { chat: chatPayload(recovered), recoveries: db.listChatThreadRecoveries(chat.id) }, config);
     return;
   }
   match = pathname.match(/^\/api\/chats\/([^/]+)\/interrupt$/);
@@ -496,7 +645,15 @@ async function route(req, res) {
   match = pathname.match(/^\/api\/chats\/([^/]+)\/goal$/);
   if (match && req.method === 'GET') {
     const chat = chatFor(session, match[1]);
-    sendJson(res, 200, { goal: await codex.getGoal(chat) }, config);
+    const expectedThreadId = chat.codexThreadId;
+    const authorize = () => {
+      const currentSession = refreshSession(session);
+      const currentChat = chatFor(currentSession, chat.id);
+      invariant(currentChat.codexThreadId === expectedThreadId, 409, 'THREAD_MAPPING_CHANGED', '对话线程已变化，请刷新后重试。');
+    };
+    const goal = await codex.getGoal(chat, authorize);
+    authorize();
+    sendJson(res, 200, { goal }, config);
     return;
   }
   match = pathname.match(/^\/api\/chats\/([^/]+)\/approvals$/);
@@ -508,8 +665,9 @@ async function route(req, res) {
   match = pathname.match(/^\/api\/chats\/([^/]+)\/approvals\/([^/]+)$/);
   if (match && req.method === 'POST') {
     requireMutation(req, session);
-    const chat = chatFor(session, match[1]);
+    let chat = chatFor(session, match[1]);
     const body = await readJson(req, 16 * 1024);
+    chat = chatFor(session, match[1]);
     const approval = codex.resolveApproval({
       chatId: chat.id, userId: session.user.id, approvalId: decodeURIComponent(match[2]), decision: String(body.decision || ''),
     });
@@ -535,7 +693,8 @@ async function route(req, res) {
     invariant(['active', 'rework'].includes(task.status), 409, 'TASK_NOT_ACTIVE', '任务尚未激活、正在审核或已经通过。');
     const project = projectFor(session, task.projectId);
     let chat = db.listChats({ projectId: project.id, userId: session.user.id })
-      .find((candidate) => candidate.taskId === task.id && candidate.taskVersion === task.version);
+      .find((candidate) => candidate.taskId === task.id && candidate.taskVersion === task.version
+        && candidate.projectAccessId === project.accessId);
     if (!chat) chat = db.createChat({
       projectId: project.id, userId: session.user.id, projectAccessId: project.accessId, treePath: project.treePath,
       title: `任务 · ${task.title}`.slice(0, 120), taskId: task.id, taskVersion: task.version,
@@ -547,8 +706,9 @@ async function route(req, res) {
   match = pathname.match(/^\/api\/tasks\/([^/]+)\/submissions$/);
   if (match && req.method === 'POST') {
     requireMutation(req, session);
-    const task = taskFor(session, match[1]);
+    let task = taskFor(session, match[1]);
     const body = await readJson(req, 32 * 1024);
+    task = taskFor(session, match[1]);
     const note = String(body.note || '').trim();
     invariant(note.length <= 4000, 400, 'INVALID_NOTE', '提交说明不能超过 4000 个字符。');
     const run = db.getTurnRun(String(body.turnRunId || ''));
@@ -653,22 +813,51 @@ async function route(req, res) {
   match = pathname.match(/^\/api\/admin\/projects\/([^/]+)\/shares$/);
   if (match && req.method === 'POST') {
     requireMutation(req, session);
-    const project = ownerProject(projectFor(session, match[1]));
+    let project = ownerProject(projectFor(session, match[1]));
     const body = await readJson(req, 32 * 1024);
+    project = ownerProject(projectFor(session, match[1]));
     const target = db.getUserById(String(body.userId || ''));
     invariant(target && target.role === 'user' && target.status === 'active', 404, 'EMPLOYEE_NOT_FOUND', '员工不存在或账号未启用。');
-    invariant(!db.listProjectAccess(project.id, { activeOnly: true }).some((access) => access.accessKind === 'shared'), 409, 'SHARE_LIMIT', '每个老板项目最多同时授权给一名员工。');
+    invariant(!db.listProjectAccess(project.id, { activeOnly: true }).some((access) => access.userId === target.id),
+      409, 'SHARE_EXISTS', '该员工已经拥有此项目的有效授权。');
+    const revoked = db.latestRevokedProjectAccess(project.id, target.id);
+    if (revoked && worktrees.isReusableShare({ treePath: revoked.treePath })) {
+      const currentUsage = userUsage(target.id);
+      const retainedUsage = workspace.projectUsage({
+        ...project, accessKind: 'shared', accessUserId: target.id,
+        accessId: revoked.id, treePath: revoked.treePath,
+      });
+      invariant(currentUsage.bytes + retainedUsage.bytes <= target.maxStorageBytes,
+        413, 'STORAGE_QUOTA', '恢复授权工作树将超过员工存储配额。');
+      const restored = db.restoreProjectAccess(revoked.id);
+      audit(req, session, 'project.share_restore', 'project_access', restored.id, { projectId: project.id, employeeId: target.id });
+      sendJson(res, 200, { access: accessPayload(restored), restored: true }, config);
+      return;
+    }
     const accessId = randomUUID();
     const tree = worktrees.createShare({ projectRoot: workspace.projectRoot(project), projectId: project.id, accessId });
     let access;
     try {
-      access = db.grantProjectAccess({ id: accessId, projectId: project.id, userId: target.id, treePath: tree.treePath, branchName: tree.branchName });
+      const currentUsage = userUsage(target.id);
+      const snapshotUsage = workspace.projectUsage({ ...project, accessKind: 'shared', accessUserId: target.id, accessId, treePath: tree.treePath });
+      invariant(currentUsage.bytes + snapshotUsage.bytes <= target.maxStorageBytes, 413, 'STORAGE_QUOTA', '授权工作树将超过员工存储配额。');
+      access = db.grantProjectAccess({
+        id: accessId, projectId: project.id, userId: target.id, treePath: tree.treePath,
+        branchName: tree.branchName, baseSha: tree.baseSha,
+      });
     } catch (error) {
-      try { worktrees.removeShare({ projectRoot: workspace.projectRoot(project), treePath: tree.treePath }); } catch { /* best-effort rollback */ }
+      try {
+        worktrees.discardUnboundShare({
+          projectRoot: workspace.projectRoot(project), treePath: tree.treePath, branchName: tree.branchName,
+        });
+      } catch { /* best-effort rollback */ }
       throw error;
     }
-    audit(req, session, 'project.share_grant', 'project_access', access.id, { projectId: project.id, employeeId: target.id });
-    sendJson(res, 201, { access: accessPayload(access) }, config);
+    audit(req, session, 'project.share_grant', 'project_access', access.id, {
+      projectId: project.id, employeeId: target.id, baseSha: tree.baseSha,
+      includedLocalChanges: tree.includedLocalChanges, untrackedFiles: tree.untrackedFiles,
+    });
+    sendJson(res, 201, { access: accessPayload(access), restored: false, includedLocalChanges: tree.includedLocalChanges }, config);
     return;
   }
   match = pathname.match(/^\/api\/admin\/projects\/([^/]+)\/shares\/([^/]+)$/);
@@ -676,10 +865,15 @@ async function route(req, res) {
     requireMutation(req, session);
     const project = ownerProject(projectFor(session, match[1]));
     const access = db.getProjectAccessById(match[2]);
-    invariant(access && access.projectId === project.id && access.accessKind === 'shared' && access.status === 'active', 404, 'SHARE_NOT_FOUND', '有效授权不存在。');
-    db.revokeProjectAccess(access.id);
-    const chats = db.listChats({ projectId: project.id, userId: access.userId });
-    await Promise.allSettled(chats.map((chat) => codex.interrupt(chat.id)));
+    invariant(access && access.projectId === project.id && access.accessKind === 'shared'
+      && ['active', 'revoked'].includes(access.status), 404, 'SHARE_NOT_FOUND', '授权不存在。');
+    if (access.status === 'active') db.revokeProjectAccess(access.id);
+    try { await codex.interruptAccessAndWait(access.id); }
+    catch (error) {
+      if (error.code === 'TURN_DRAIN_TIMEOUT') throw new HttpError(409, 'SHARE_DRAIN_TIMEOUT', '撤权已生效，但运行尚未完全排空；工作树已保留，可稍后重试清理。');
+      throw error;
+    }
+    invariant(!db.runtimeForAccess(access.id).busy, 409, 'ACCESS_BUSY', '授权仍有未排空的运行时状态，工作树已保留。');
     let cleanup;
     try {
       cleanup = worktrees.removeShare({ projectRoot: workspace.projectRoot(project), treePath: access.treePath });
@@ -741,9 +935,23 @@ async function route(req, res) {
     const updated = db.updateUser(target.id, patch);
     if (patch.status === 'disabled' || patch.passwordHash) db.deleteUserSessions(target.id);
     if (patch.status === 'disabled' || patch.passwordHash || (patch.networkAccess !== undefined && patch.networkAccess !== target.networkAccess)) {
-      await codex.interruptUser(target.id);
+      try {
+        await codex.interruptUserAndWait(target.id);
+      } catch (error) {
+        audit(req, session, 'user.update', 'user', target.id, {
+          fields: Object.keys(patch).filter((key) => key !== 'passwordHash'),
+          passwordReset: Boolean(patch.passwordHash), drainComplete: false,
+        });
+        if (error.code === 'USER_DRAIN_TIMEOUT') {
+          throw new HttpError(409, 'USER_DRAIN_TIMEOUT', '账号策略已更新并已阻止新请求，但既有运行尚未完全排空。');
+        }
+        throw error;
+      }
     }
-    audit(req, session, 'user.update', 'user', target.id, { fields: Object.keys(patch).filter((key) => key !== 'passwordHash'), passwordReset: Boolean(patch.passwordHash) });
+    audit(req, session, 'user.update', 'user', target.id, {
+      fields: Object.keys(patch).filter((key) => key !== 'passwordHash'),
+      passwordReset: Boolean(patch.passwordHash), drainComplete: true,
+    });
     sendJson(res, 200, { user: updated }, config);
     return;
   }

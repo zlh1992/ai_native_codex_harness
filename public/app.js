@@ -5,7 +5,9 @@ const state = {
   me: null, csrf: '', projects: [], chats: [], selectedProject: null, selectedChat: null,
   selectedFile: null, selectedFileInfo: null, fileEntries: [], fileContent: null, viewerMode: 'preview',
   runningTurns: new Map(), maxConcurrentTurns: 11, tasks: [], selectedTask: null,
-  codexCapacity: null, pendingSubmission: null,
+  codexCapacity: null, pendingSubmission: null, pendingUpload: null,
+  pendingTextAction: null, pendingConfirmAction: null,
+  eventCursors: new Map(),
 };
 
 function formatBytes(value) {
@@ -53,6 +55,48 @@ function toast(message, kind = '') {
   setTimeout(() => element.remove(), 4200);
 }
 
+function openTextDialog({ eyebrow, title, label, value, submitLabel, onSubmit }) {
+  const form = $('#text-form');
+  form.reset();
+  $('.form-error', form).textContent = '';
+  $('#text-dialog-eyebrow').textContent = eyebrow;
+  $('#text-dialog-title').textContent = title;
+  $('#text-dialog-label').textContent = label;
+  $('#text-dialog-input').value = value;
+  $('#text-dialog-submit').textContent = submitLabel;
+  state.pendingTextAction = onSubmit;
+  $('#text-dialog').showModal();
+  $('#text-dialog-input').focus();
+  $('#text-dialog-input').select();
+}
+
+function openConfirmDialog({ eyebrow, title, message, submitLabel, onConfirm }) {
+  const form = $('#confirm-form');
+  $('.form-error', form).textContent = '';
+  $('#confirm-dialog-eyebrow').textContent = eyebrow;
+  $('#confirm-dialog-title').textContent = title;
+  $('#confirm-dialog-message').textContent = message;
+  $('#confirm-dialog-submit').textContent = submitLabel;
+  state.pendingConfirmAction = onConfirm;
+  $('#confirm-dialog').showModal();
+}
+
+async function recoverThread(recovery, action) {
+  recovery.disabled = true;
+  try {
+    const data = await api(`/api/chats/${state.selectedChat.id}/thread/recover`, {
+      method: 'POST', body: { action, acknowledgeHistoryBreak: action === 'reset' },
+    });
+    state.selectedChat = data.chat;
+    const local = state.chats.find((chat) => chat.id === data.chat.id); if (local) Object.assign(local, data.chat);
+    toast(action === 'retry' ? '原线程已恢复。' : '已建立新线程，原映射已记录。');
+    await selectChat(state.selectedChat);
+  } catch (error) {
+    recovery.disabled = false;
+    throw error;
+  }
+}
+
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (options.body && !(options.body instanceof ArrayBuffer) && !(options.body instanceof Blob) && typeof options.body !== 'string') {
@@ -66,6 +110,7 @@ async function api(path, options = {}) {
     if (response.status === 401) showLogin();
     const error = new Error(payload?.error?.message || `请求失败 (${response.status})`);
     error.code = payload?.error?.code;
+    error.status = response.status;
     throw error;
   }
   return payload;
@@ -93,31 +138,46 @@ async function health() {
 }
 
 async function bootstrap() {
+  let data;
   try {
-    const data = await api('/api/me');
-    state.me = data.user;
-    state.csrf = data.csrfToken;
-    if (data.user.role === 'admin' && new URLSearchParams(location.search).get('workbench') !== '1') {
-      location.replace('/boss.html');
-      return;
-    }
-    showApp();
-    $('#user-chip').textContent = `${data.user.displayName} · ${data.user.role === 'admin' ? '超级管理员' : data.user.username}`;
-    $('#model-badge').textContent = data.model;
-    $('#codex-status').classList.toggle('online', data.codex.ready);
-    $('#boss-nav').classList.toggle('hidden', data.user.role !== 'admin');
-    state.codexCapacity = data.codex;
-    state.maxConcurrentTurns = data.codex.maxRootTurns || 11;
-    updateConcurrencyIndicator();
-    updateCapacity(data.codex);
-    $('#effort-select').innerHTML = data.efforts.map((value) => `<option value="${value}" ${value === data.defaultEffort ? 'selected' : ''}>${value}</option>`).join('');
-    updateUsage(data.usage, data.user.maxStorageBytes);
+    data = await api('/api/me');
+  } catch (error) {
+    showLogin();
+    if (error.status !== 401) $('#login-error').textContent = `无法验证登录状态：${error.message}`;
+    return;
+  }
+
+  state.me = data.user;
+  state.csrf = data.csrfToken;
+  if (data.user.role === 'admin' && new URLSearchParams(location.search).get('workbench') !== '1') {
+    location.replace('/boss.html');
+    return;
+  }
+  showApp();
+  $('#user-chip').textContent = `${data.user.displayName} · ${data.user.role === 'admin' ? '超级管理员' : data.user.username}`;
+  $('#model-badge').textContent = data.model;
+  $('#codex-status').classList.toggle('online', data.codex.ready);
+  $('#boss-nav').classList.toggle('hidden', data.user.role !== 'admin');
+  state.codexCapacity = data.codex;
+  state.maxConcurrentTurns = data.codex.maxRootTurns || 11;
+  updateConcurrencyIndicator();
+  updateCapacity(data.codex);
+  $('#effort-select').innerHTML = data.efforts.map((value) => `<option value="${value}" ${value === data.defaultEffort ? 'selected' : ''}>${value}</option>`).join('');
+  updateUsage(data.usage, data.user.maxStorageBytes);
+
+  const requestedProject = new URLSearchParams(location.search).get('project');
+  try {
     await Promise.all([loadProjects(), loadTasks()]);
-    const requestedProject = new URLSearchParams(location.search).get('project');
     const selected = requestedProject && state.projects.find((project) => project.id === requestedProject);
     if (selected) { await selectProject(selected); switchView('workbench'); }
     else switchView('tasks');
-  } catch { showLogin(); }
+  } catch (error) {
+    // api() already handles an actual expired session. Other failures must not
+    // masquerade as a login failure and discard the authenticated UI state.
+    if (error.status === 401) return;
+    if (requestedProject) switchView('workbench');
+    toast(`工作台加载失败：${error.message}`, 'error');
+  }
 }
 
 function updateUsage(usage, quota) {
@@ -248,8 +308,12 @@ async function selectChat(chat) {
   const data = await api(`/api/chats/${chat.id}`);
   state.selectedChat = data.chat;
   state.selectedTask = data.task || null;
+  state.eventCursors.set(chat.id, Number(data.latestEventId || 0));
   renderMessages(data.messages);
-  const running = state.runningTurns.get(chat.id);
+  let running = state.runningTurns.get(chat.id);
+  if (!running && ['queued', 'starting', 'running'].includes(data.latestTurnRun?.status)) {
+    running = await resumePersistedTurn(data);
+  }
   if (running) renderLiveTurn(running, !data.messages.some((message) => message.role === 'user' && message.content === running.prompt));
   renderActivity(running);
   await refreshTurnInsights();
@@ -260,11 +324,14 @@ function renderMessages(messages) {
   const root = $('#message-list');
   if (!messages.length) {
     root.innerHTML = `<div class="welcome-message"><span class="mark">C</span><h3>${state.selectedProject ? '准备开始构建。' : '从一个项目开始。'}</h3><p>${state.selectedProject ? '描述目标、错误或想修改的功能，Codex 会直接在这个隔离项目中工作。' : '创建或选择项目，再新建对话。Codex 会在隔离的本机目录中读取、编写和验证代码。'}</p></div>`;
-    return;
+  } else {
+    root.innerHTML = messages.map(messageHtml).join('');
+    const snapshot = [...messages].reverse().find((message) => message.role === 'assistant' && message.metadata);
+    renderPlanDiff(snapshot?.metadata?.plan || [], snapshot?.metadata?.diffSnapshot || '');
   }
-  root.innerHTML = messages.map(messageHtml).join('');
-  const snapshot = [...messages].reverse().find((message) => message.role === 'assistant' && message.metadata);
-  renderPlanDiff(snapshot?.metadata?.plan || [], snapshot?.metadata?.diffSnapshot || '');
+  if (state.selectedChat?.threadState === 'resume_failed') {
+    root.insertAdjacentHTML('afterbegin', `<article class="message error thread-recovery"><div class="message-label">THREAD RECOVERY</div><div class="message-body"><p>原 Codex 线程暂时无法恢复，映射和本地历史均已保留。</p><small>${escapeHtml(state.selectedChat.threadError || '')}</small><div class="message-actions"><button class="secondary" data-thread-recovery="retry">重试原线程</button><button class="danger-button" data-thread-recovery="reset">确认并新建空白线程</button></div></div></article>`);
+  }
   root.scrollTop = root.scrollHeight;
 }
 
@@ -302,7 +369,8 @@ function selectedChatRunning() {
 }
 
 function setComposer(enabled) {
-  const usable = enabled && !selectedChatRunning() && Boolean(state.selectedChat);
+  const usable = enabled && !selectedChatRunning() && Boolean(state.selectedChat)
+    && state.selectedChat.threadState !== 'resume_failed';
   $('#prompt-input').disabled = !usable;
   $('#send-button').disabled = !usable;
   $('#stop-turn').classList.toggle('hidden', !selectedChatRunning());
@@ -356,6 +424,7 @@ function renderApprovals(approvals = []) {
     return `<article class="approval-card" data-id="${escapeHtml(approval.id || approval.approvalId)}">
       <div><span class="status-tag rework">等待批准</span><b>${approval.kind === 'file' ? '文件修改' : '命令执行'}</b></div>
       ${request.reason ? `<p>${escapeHtml(request.reason)}</p>` : ''}
+      ${Array.isArray(request.files) && request.files.length ? `<small>目标文件</small><pre>${escapeHtml(request.files.join('\n'))}</pre>` : ''}
       ${request.command ? `<pre>${escapeHtml(request.command)}</pre>` : ''}
       ${request.cwd ? `<small>cwd · ${escapeHtml(request.cwd)}</small>` : ''}
       <div class="approval-actions"><button data-decision="decline" class="secondary">拒绝</button><button data-decision="accept" class="primary">批准一次</button></div>
@@ -383,11 +452,155 @@ async function refreshTurnInsights() {
   } catch (error) { toast(error.message, 'error'); }
 }
 
+function applyJournalEvent(entry, event) {
+  const data = event.payload || {};
+  if (event.eventType === 'assistant_delta') entry.text += data.delta || '';
+  else if (event.eventType === 'plan_updated') entry.plan = data.plan || [];
+  else if (event.eventType === 'turn_queued') entry.statusText = `${data.mode || entry.mode.toUpperCase()} 正在排队 · 前方 ${Math.max(0, Number(data.position || 1) - 1)} 个任务`;
+  else if (event.eventType === 'turn_status') entry.statusText = data.status === 'running' ? `Codex 正在执行 · ${entry.mode.toUpperCase()}` : 'Codex 正在启动…';
+  else if (event.eventType === 'tool_started') {
+    if (!entry.events.some((item) => item.callId === data.callId)) entry.events.push({ callId: data.callId, name: data.name || '工具调用', done: false });
+  } else if (event.eventType === 'tool_completed') {
+    const tool = entry.events.find((item) => item.callId === data.callId);
+    if (tool) tool.done = true;
+    else entry.events.push({ callId: data.callId, name: data.name || '工具调用', done: true });
+  } else if (event.eventType === 'approval_required') {
+    entry.statusText = '等待你批准操作…';
+  } else if (event.eventType === 'approval_resolved') {
+    entry.statusText = 'Codex 继续执行…';
+  } else if (event.eventType === 'subagent_updated') {
+    const callId = data.item?.id || `subagent:${event.id}`;
+    const existing = entry.events.find((item) => item.callId === callId);
+    const value = { callId, name: `子代理 ${data.count || 0}/${data.limit || 3} · ${data.model || 'gpt-5.6-luna'}`, done: data.phase === 'completed' };
+    if (existing) Object.assign(existing, value); else entry.events.push(value);
+  } else if (event.eventType === 'native_item') {
+    const callId = data.item?.id || `native:${event.id}`;
+    const existing = entry.events.find((item) => item.callId === callId);
+    const value = { callId, name: data.item?.type || '原生操作', done: data.phase === 'completed' };
+    if (existing) Object.assign(existing, value); else entry.events.push(value);
+  } else if (event.eventType === 'turn_error') {
+    entry.statusText = data.message || 'Codex 任务已中断';
+    entry.terminalStatus = data.status || 'failed';
+  } else if (event.eventType === 'turn_completed') {
+    entry.statusText = 'Codex 已完成';
+    entry.terminalStatus = data.status || 'completed';
+  }
+}
+
+async function recoverTurnJournal(entry, { fullRun = false } = {}) {
+  let cursor = fullRun ? 0 : Number(entry.lastEventId || 0);
+  let latestEventId = cursor;
+  let data = null;
+  do {
+    data = await api(`/api/chats/${entry.chatId}/events?after=${cursor}&limit=5000`);
+    const page = data.events || [];
+    latestEventId = Math.max(latestEventId, Number(data.latestEventId || 0));
+    for (const event of page) {
+      cursor = Math.max(cursor, Number(event.id || 0));
+      if (entry.turnRunId && event.turnRunId !== entry.turnRunId) continue;
+      if (!entry.turnRunId) entry.turnRunId = event.turnRunId;
+      applyJournalEvent(entry, event);
+    }
+    if (!page.length) break;
+  } while (cursor < latestEventId);
+  entry.lastEventId = Math.max(Number(entry.lastEventId || 0), cursor);
+  if (data.latestTurnRun && (!entry.turnRunId || data.latestTurnRun.id === entry.turnRunId)) {
+    entry.turnRunId = data.latestTurnRun.id;
+    entry.plan = data.latestTurnRun.plan || entry.plan;
+    entry.diff = data.latestTurnRun.diffSnapshot || '';
+    if (['completed', 'failed', 'cancelled', 'interrupted'].includes(data.latestTurnRun.status)) entry.terminalStatus = data.latestTurnRun.status;
+  }
+  state.eventCursors.set(entry.chatId, Math.max(latestEventId, Number(entry.lastEventId || 0)));
+  if (state.selectedChat?.id === entry.chatId) {
+    renderLiveTurn(entry);
+    renderActivity(entry);
+    renderPlanDiff(entry.plan, entry.diff);
+  }
+  return data;
+}
+
+async function resumePersistedTurn(chatData) {
+  const run = chatData.latestTurnRun;
+  if (!run || state.runningTurns.has(chatData.chat.id)) return state.runningTurns.get(chatData.chat.id) || null;
+  const entry = {
+    chatId: chatData.chat.id, projectId: chatData.chat.projectId, prompt: '', mode: run.mode || 'edit', text: '',
+    events: [], approvals: [], plan: [], diff: '', statusText: '正在恢复任务事件…', lastEventId: 0,
+    turnRunId: run.id, recovered: true,
+  };
+  state.runningTurns.set(entry.chatId, entry);
+  await recoverTurnJournal(entry, { fullRun: true });
+  void (async () => {
+    try {
+      const backoff = [1000, 2000, 5000];
+      let attempt = 0;
+      while (state.runningTurns.get(entry.chatId) === entry && !entry.terminalStatus) {
+        try {
+          const response = await fetch(`/api/chats/${entry.chatId}/turn-runs/${entry.turnRunId}/events?after=${entry.lastEventId}`, {
+            credentials: 'same-origin', headers: { 'last-event-id': String(entry.lastEventId || 0) },
+          });
+          if (!response.ok || !response.body) {
+            const payload = response.headers.get('content-type')?.includes('json') ? await response.json() : null;
+            const error = new Error(payload?.error?.message || `事件恢复失败 (${response.status})`);
+            error.status = response.status; throw error;
+          }
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+          while (!entry.terminalStatus) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const frames = buffer.split('\n\n'); buffer = frames.pop() || '';
+            for (const frame of frames) {
+              let id = null; let eventType = 'message'; let payload = null;
+              for (const line of frame.split('\n')) {
+                if (line.startsWith('id:')) id = Number(line.slice(3).trim());
+                if (line.startsWith('event:')) eventType = line.slice(6).trim();
+                if (line.startsWith('data:')) { try { payload = JSON.parse(line.slice(5)); } catch { payload = {}; } }
+              }
+              if (!payload || eventType === 'ping') continue;
+              applyJournalEvent(entry, { id, eventType, payload });
+              entry.lastEventId = Math.max(Number(entry.lastEventId || 0), Number(id || payload.eventId || 0));
+              state.eventCursors.set(entry.chatId, entry.lastEventId);
+              if (state.selectedChat?.id === entry.chatId) {
+                renderLiveTurn(entry); renderActivity(entry); renderPlanDiff(entry.plan, entry.diff);
+              }
+            }
+          }
+          await recoverTurnJournal(entry);
+          attempt = 0;
+        } catch (error) {
+          if ([401, 403, 404].includes(error.status)) throw error;
+          await new Promise((resolve) => setTimeout(resolve, backoff[Math.min(attempt, backoff.length - 1)]));
+          attempt += 1;
+        }
+      }
+    } catch (error) {
+      if (state.selectedChat?.id === entry.chatId) toast(`事件恢复已暂停：${error.message}`, 'error');
+    } finally {
+      if (state.runningTurns.get(entry.chatId) === entry) state.runningTurns.delete(entry.chatId);
+      if (state.selectedChat?.id === entry.chatId) {
+        try {
+          const fresh = await api(`/api/chats/${entry.chatId}`);
+          state.selectedChat = fresh.chat; state.selectedTask = fresh.task || null;
+          state.eventCursors.set(entry.chatId, Number(fresh.latestEventId || entry.lastEventId || 0));
+          renderMessages(fresh.messages); renderActivity(); setComposer(true); await refreshTurnInsights();
+        } catch { /* access may have been revoked while the turn drained */ }
+      }
+      updateConcurrencyIndicator();
+    }
+  })();
+  return entry;
+}
+
 async function sendTurn(prompt) {
   const chat = { ...state.selectedChat, status: 'running' };
   const project = { ...state.selectedProject };
   const mode = $('#mode-select').value;
-  const entry = { chatId: chat.id, projectId: project.id, prompt, mode, text: '', events: [], approvals: [], plan: [], diff: '', statusText: 'Codex 正在思考…' };
+  const entry = {
+    chatId: chat.id, projectId: project.id, prompt, mode, text: '', events: [], approvals: [], plan: [], diff: '',
+    statusText: 'Codex 正在思考…', lastEventId: Number(state.eventCursors.get(chat.id) || 0), turnRunId: null,
+  };
   state.runningTurns.set(chat.id, entry);
   state.selectedChat = chat;
   const localChat = state.chats.find((item) => item.id === chat.id); if (localChat) localChat.status = 'running';
@@ -413,12 +626,16 @@ async function sendTurn(prompt) {
       buffer += decoder.decode(value, { stream: true });
       const frames = buffer.split('\n\n'); buffer = frames.pop() || '';
       for (const frame of frames) {
-        let event = 'message'; let data = null;
+        let event = 'message'; let data = null; let eventId = null;
         for (const line of frame.split('\n')) {
+          if (line.startsWith('id:')) eventId = Number(line.slice(3).trim());
           if (line.startsWith('event:')) event = line.slice(6).trim();
           if (line.startsWith('data:')) { try { data = JSON.parse(line.slice(5)); } catch { data = {}; } }
         }
         if (!data) continue;
+        entry.lastEventId = Math.max(entry.lastEventId, Number(eventId || data.eventId || 0));
+        state.eventCursors.set(chat.id, entry.lastEventId);
+        if (data.turnRunId) entry.turnRunId = data.turnRunId;
         if (event === 'assistant_delta') {
           entry.text += data.delta || ''; renderLiveTurn(entry);
         } else if (event === 'tool_started') {
@@ -462,6 +679,7 @@ async function sendTurn(prompt) {
       }
     }
   } catch (error) {
+    try { await recoverTurnJournal(entry); } catch { /* the normal history refresh below is the second fallback */ }
     if (state.selectedChat?.id === chat.id) appendMessage('error', error.message);
     toast(`${chat.title}: ${error.message}`, 'error');
   } finally {
@@ -473,7 +691,10 @@ async function sendTurn(prompt) {
     if (visibleChat) {
       const data = await api(`/api/chats/${chat.id}`);
       state.selectedChat = data.chat; state.selectedTask = data.task || null;
-      renderMessages(data.messages); setComposer(true); await refreshTurnInsights();
+      renderMessages(data.messages);
+      if (['queued', 'starting', 'running'].includes(data.latestTurnRun?.status)) await resumePersistedTurn(data);
+      updateConcurrencyIndicator(); renderActivity(state.runningTurns.get(chat.id)); setComposer(true);
+      await refreshTurnInsights();
     }
     await loadTasks();
     if (state.selectedProject?.id === project.id) await Promise.all([loadFiles(), refreshUsage()]);
@@ -648,14 +869,14 @@ async function openFile(filePath) {
   } catch (error) { toast(error.message, 'error'); }
 }
 
-async function writeFile(filePath, content) {
-  await api(`/api/projects/${state.selectedProject.id}/file?path=${encodeURIComponent(filePath)}`, {
+async function writeFile(filePath, content, successMessage = '', { overwrite = true } = {}) {
+  await api(`/api/projects/${state.selectedProject.id}/file?path=${encodeURIComponent(filePath)}&overwrite=${overwrite ? '1' : '0'}`, {
     method: 'PUT', headers: { 'content-type': 'application/octet-stream' }, body: content,
   });
   if (state.selectedFile === filePath && typeof content === 'string') state.fileContent = content;
   await loadFiles();
   if (state.selectedFile === filePath && state.viewerMode === 'preview') await renderFilePreview();
-  toast(`已保存 ${filePath}`);
+  toast(successMessage || `已保存 ${filePath}`);
 }
 
 function switchView(view) {
@@ -760,6 +981,20 @@ $('#approval-list').addEventListener('click', async (event) => {
 });
 
 $('#message-list').addEventListener('click', (event) => {
+  const recovery = event.target.closest('[data-thread-recovery]');
+  if (recovery && state.selectedChat) {
+    const action = recovery.dataset.threadRecovery;
+    if (action === 'reset') {
+      openConfirmDialog({
+        eyebrow: 'RESET CODEX THREAD', title: '建立空白线程',
+        message: '原线程标识和恢复谱系会保留，但新线程没有原生上下文。仅在确认接受上下文断点时继续。',
+        submitLabel: '确认建立', onConfirm: () => recoverThread(recovery, action),
+      });
+    } else {
+      void recoverThread(recovery, action).catch((error) => toast(error.message, 'error'));
+    }
+    return;
+  }
   const button = event.target.closest('.submit-task-button');
   if (!button || !state.selectedTask || !state.selectedChat) return;
   state.pendingSubmission = {
@@ -804,10 +1039,63 @@ $('#project-form').addEventListener('submit', async (event) => {
   } catch (error) { $('.form-error', target).textContent = error.message; }
 });
 
-$('#new-chat').addEventListener('click', async () => {
+$('#text-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (event.submitter?.value === 'cancel') {
+    state.pendingTextAction = null;
+    $('#text-dialog').close();
+    return;
+  }
+  const target = event.currentTarget;
+  const value = new FormData(target).get('value')?.toString().trim();
+  if (!value || !state.pendingTextAction) return;
+  const submit = event.submitter || $('#text-dialog-submit');
+  submit.disabled = true;
+  try {
+    await state.pendingTextAction(value);
+    state.pendingTextAction = null;
+    $('#text-dialog').close();
+  } catch (error) {
+    $('.form-error', target).textContent = error.message;
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+$('#confirm-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (event.submitter?.value === 'cancel') {
+    state.pendingConfirmAction = null;
+    $('#confirm-dialog').close();
+    return;
+  }
+  if (!state.pendingConfirmAction) return;
+  const target = event.currentTarget;
+  const action = state.pendingConfirmAction;
+  const submit = event.submitter || $('#confirm-dialog-submit');
+  submit.disabled = true;
+  try {
+    await action();
+    state.pendingConfirmAction = null;
+    $('#confirm-dialog').close();
+  } catch (error) {
+    $('.form-error', target).textContent = error.message;
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+$('#new-chat').addEventListener('click', () => {
   if (!state.selectedProject) return toast('请先选择项目', 'error');
-  const title = window.prompt('对话标题', '新任务'); if (!title) return;
-  try { const data = await api(`/api/projects/${state.selectedProject.id}/chats`, { method: 'POST', body: { title } }); await loadChats(); await selectChat(data.chat); } catch (error) { toast(error.message, 'error'); }
+  const projectId = state.selectedProject.id;
+  openTextDialog({
+    eyebrow: 'NEW THREAD', title: '新建对话', label: '对话标题', value: '新任务', submitLabel: '创建对话',
+    onSubmit: async (title) => {
+      const data = await api(`/api/projects/${projectId}/chats`, { method: 'POST', body: { title } });
+      await loadChats();
+      await selectChat(data.chat);
+    },
+  });
 });
 
 $('#composer').addEventListener('submit', async (event) => {
@@ -822,24 +1110,66 @@ $('#refresh-files').addEventListener('click', () => state.selectedProject && loa
 $('#preview-tab').addEventListener('click', () => setViewerMode('preview').catch((error) => toast(error.message, 'error')));
 $('#source-tab').addEventListener('click', () => setViewerMode('source').catch((error) => toast(error.message, 'error')));
 $('#save-file').addEventListener('click', () => state.selectedFile && writeFile(state.selectedFile, $('#file-editor').value).catch((error) => toast(error.message, 'error')));
-$('#new-file').addEventListener('click', async () => {
+$('#new-file').addEventListener('click', () => {
   if (!state.selectedProject) return toast('请先选择项目', 'error');
-  const filePath = window.prompt('项目内文件路径', 'src/index.js'); if (!filePath) return;
-  try { await writeFile(filePath, ''); await openFile(filePath); } catch (error) { toast(error.message, 'error'); }
+  openTextDialog({
+    eyebrow: 'NEW FILE', title: '新建项目文件', label: '项目内文件路径', value: 'src/index.js', submitLabel: '创建文件',
+    onSubmit: async (filePath) => { await writeFile(filePath, ''); await openFile(filePath); },
+  });
 });
-$('#new-folder').addEventListener('click', async () => {
+$('#new-folder').addEventListener('click', () => {
   if (!state.selectedProject) return toast('请先选择项目', 'error');
-  const folder = window.prompt('项目内目录路径', 'src'); if (!folder) return;
-  try { await api(`/api/projects/${state.selectedProject.id}/directory`, { method: 'POST', body: { path: folder } }); await loadFiles(); } catch (error) { toast(error.message, 'error'); }
+  const projectId = state.selectedProject.id;
+  openTextDialog({
+    eyebrow: 'NEW FOLDER', title: '新建项目目录', label: '项目内目录路径', value: 'src', submitLabel: '创建目录',
+    onSubmit: async (folder) => { await api(`/api/projects/${projectId}/directory`, { method: 'POST', body: { path: folder } }); await loadFiles(); },
+  });
 });
 $('#upload-file').addEventListener('change', async (event) => {
-  const file = event.target.files?.[0]; if (!file || !state.selectedProject) return;
-  const destination = window.prompt('上传到项目路径', file.name); if (!destination) return;
-  try { await writeFile(destination, await file.arrayBuffer()); } catch (error) { toast(error.message, 'error'); } finally { event.target.value = ''; }
+  const file = event.target.files?.[0];
+  event.target.value = '';
+  if (!file) return;
+  if (!state.selectedProject) return toast('请先选择项目', 'error');
+  state.pendingUpload = { file, projectId: state.selectedProject.id };
+  const form = $('#upload-form'); form.reset(); $('.form-error', form).textContent = '';
+  $('#upload-source-name').value = file.name;
+  $('#upload-destination').value = file.name;
+  $('#upload-file-meta').textContent = `${formatBytes(file.size)}${file.type ? ` · ${file.type}` : ''}`;
+  $('#upload-dialog').showModal();
 });
-$('#delete-file').addEventListener('click', async () => {
-  if (!state.selectedFile || !window.confirm(`将 ${state.selectedFile} 移到可恢复的废纸篓？`)) return;
-  try { await api(`/api/projects/${state.selectedProject.id}/file?path=${encodeURIComponent(state.selectedFile)}`, { method: 'DELETE' }); closeViewer(); await loadFiles(); toast('已移到废纸篓'); } catch (error) { toast(error.message, 'error'); }
+$('#upload-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (event.submitter?.value === 'cancel') { state.pendingUpload = null; $('#upload-dialog').close(); return; }
+  const target = event.currentTarget;
+  const pending = state.pendingUpload;
+  const destination = String(new FormData(target).get('destination') || '').trim();
+  const errorRoot = $('.form-error', target);
+  errorRoot.textContent = '';
+  if (!pending || pending.projectId !== state.selectedProject?.id) {
+    errorRoot.textContent = '项目已经切换，请重新选择要上传的文件。'; return;
+  }
+  const exists = state.fileEntries.some((entry) => entry.type === 'file' && entry.path === destination);
+  if (exists && !target.elements.overwrite.checked) {
+    errorRoot.textContent = '项目中已有同名文件；如需替换，请勾选允许覆盖。'; return;
+  }
+  const submit = event.submitter || $('.primary', target); submit.disabled = true;
+  try {
+    await writeFile(destination, await pending.file.arrayBuffer(), `已上传 ${destination}`, { overwrite: target.elements.overwrite.checked });
+    state.pendingUpload = null; $('#upload-dialog').close(); await openFile(destination);
+  } catch (error) { errorRoot.textContent = error.message; }
+  finally { submit.disabled = false; }
+});
+$('#delete-file').addEventListener('click', () => {
+  if (!state.selectedFile) return;
+  const projectId = state.selectedProject.id;
+  const filePath = state.selectedFile;
+  openConfirmDialog({
+    eyebrow: 'MOVE TO TRASH', title: '移到可恢复的废纸篓', message: `确认移动 ${filePath}？`, submitLabel: '移到废纸篓',
+    onConfirm: async () => {
+      await api(`/api/projects/${projectId}/file?path=${encodeURIComponent(filePath)}`, { method: 'DELETE' });
+      closeViewer(); await loadFiles(); toast('已移到废纸篓');
+    },
+  });
 });
 
 setupResizers(); health(); bootstrap();

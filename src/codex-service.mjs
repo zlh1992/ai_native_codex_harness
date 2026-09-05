@@ -86,9 +86,12 @@ export class CodexService extends EventEmitter {
     this.activeByThread = new Map();
     this.parentBySubagent = new Map();
     this.pendingChats = new Set();
+    this.recoveringChats = new Set();
+    this.interruptedPendingChats = new Set();
     this.pendingByUser = new Map();
     this.pendingApprovals = new Map();
     this.skillsReady = false;
+    this.startError = null;
     this.globalPending = 0;
     this.globalActive = 0;
     this.client.on('notification', (message) => this.#onNotification(message));
@@ -107,14 +110,32 @@ export class CodexService extends EventEmitter {
   }
 
   async start() {
-    await this.client.start();
-    await this.#ensurePortalSkills();
+    try {
+      await this.client.start();
+      await this.#ensurePortalSkills();
+      this.startError = null;
+    } catch (error) {
+      this.skillsReady = false;
+      this.startError = error;
+      throw error;
+    }
   }
   stop() { this.client.stop(); }
 
+  workspaceBusy(projectAccessId) {
+    const recovering = [...this.recoveringChats].some((chatId) => this.db.getChat(chatId)?.projectAccessId === projectAccessId);
+    return recovering || this.capacity.hasWorkspace(projectAccessId) || this.db.runtimeForAccess(projectAccessId).busy;
+  }
+
+  chatBusy(chatId) {
+    return this.recoveringChats.has(chatId) || this.activeByChat.has(chatId) || this.pendingChats.has(chatId)
+      || this.capacity.hasChat(chatId) || this.db.runtimeForChat(chatId).busy;
+  }
+
   status() {
+    const ready = this.client.started && this.skillsReady && !this.startError;
     return {
-      ready: this.client.started,
+      ready,
       model: this.config.codexModel,
       activeTurns: this.globalActive,
       pendingTurns: this.globalPending,
@@ -122,7 +143,7 @@ export class CodexService extends EventEmitter {
       ...this.capacity.status(),
       maxSubagentsPerRoot: this.config.maxSubagentsPerRoot,
       subagentModel: this.config.subagentModel,
-      lastError: this.client.lastError?.message || null,
+      lastError: this.startError?.message || this.client.lastError?.message || null,
     };
   }
 
@@ -155,56 +176,140 @@ export class CodexService extends EventEmitter {
     invariant(!/^\s*(?:\[\s*agents(?:\s*[.\]])|agents\s*=)/m.test(source), 409, 'PROJECT_AGENT_POLICY', '项目不能覆盖 Portal 的子代理策略。');
   }
 
+  #threadOptions(context) {
+    return {
+      model: this.config.codexModel,
+      modelProvider: this.config.codexModelProvider,
+      cwd: this.workspace.projectRoot(context.project),
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user',
+      sandbox: 'read-only',
+      baseInstructions: this.#instructions(context),
+      dynamicTools: DYNAMIC_TOOLS,
+    };
+  }
+
+  #safeThreadError(error) {
+    let value = String(error?.message || error || 'thread/resume failed');
+    const roots = [
+      this.config.workspacesRoot, this.config.treesRoot, this.config.runtimeRoot,
+      this.config.dataDir, this.config.rootDir, process.env.CODEX_HOME, process.env.HOME,
+    ].filter(Boolean).map((root) => path.resolve(root)).sort((a, b) => b.length - a.length);
+    for (const root of roots) value = value.split(root).join('[受控路径]');
+    return value.slice(0, 2000);
+  }
+
+  async #resumeThread(threadId, context) {
+    const resumed = await this.client.request('thread/resume', { threadId, ...this.#threadOptions(context) }, this.#controlTimeoutMs());
+    invariant(resumed.thread?.modelProvider === this.config.codexModelProvider, 409, 'CODEX_PROVIDER_MISMATCH', '旧会话使用了不同的 Codex provider。');
+    this.loadedThreads.add(threadId);
+    this.contextByThread.set(threadId, context);
+    return threadId;
+  }
+
+  async #startThread(context) {
+    const result = await this.client.request('thread/start', {
+      ephemeral: false,
+      serviceName: 'codex-harness-remote',
+      ...this.#threadOptions(context),
+    }, this.#controlTimeoutMs());
+    const threadId = result.thread.id;
+    this.loadedThreads.add(threadId);
+    this.contextByThread.set(threadId, context);
+    this.client.request('thread/name/set', { threadId, name: context.chat.title }, 10_000).catch(() => {});
+    await this.#syncTaskGoal(threadId, context);
+    return threadId;
+  }
+
   async #ensureThread(context) {
     await this.client.start();
     await this.#ensurePortalSkills();
     const existing = context.chat.codexThreadId;
+    invariant(context.chat.threadState !== 'resume_failed', 409, 'THREAD_RECOVERY_REQUIRED', '该对话的 Codex 线程需要显式恢复；请先重试恢复，或确认后新建空白线程。');
     if (existing && !this.loadedThreads.has(existing)) {
       try {
-        const resumed = await this.client.request('thread/resume', {
-          threadId: existing,
-          model: this.config.codexModel,
-          modelProvider: this.config.codexModelProvider,
-          cwd: this.workspace.projectRoot(context.project),
-          approvalPolicy: 'on-request',
-          approvalsReviewer: 'user',
-          sandbox: 'workspace-write',
-          baseInstructions: this.#instructions(context),
-          dynamicTools: DYNAMIC_TOOLS,
-        });
-        invariant(resumed.thread?.modelProvider === this.config.codexModelProvider, 409, 'CODEX_PROVIDER_MISMATCH', '旧会话使用了不同的 Codex provider。');
-        this.loadedThreads.add(existing);
-        this.contextByThread.set(existing, context);
-        await this.#syncTaskGoal(existing, context);
-        return existing;
+        await this.#resumeThread(existing, context);
       } catch (error) {
-        this.emit('log', { level: 'warn', message: `恢复 Codex thread 失败，将创建新 thread: ${error.message}` });
+        const safeError = this.#safeThreadError(error);
+        this.db.markChatThreadError(context.chat.id, safeError);
+        this.emit('log', { level: 'warn', message: `恢复 Codex thread 失败，已保留原映射并等待显式恢复: ${safeError}` });
+        throw new HttpError(409, 'CODEX_THREAD_RESUME_FAILED', '旧对话暂时无法恢复，Portal 已保留原线程标识。请重试恢复，或明确确认后新建空白线程。', safeError);
       }
+      await this.#syncTaskGoal(existing, context);
+      return existing;
     }
     if (existing && this.loadedThreads.has(existing)) {
       this.contextByThread.set(existing, context);
       await this.#syncTaskGoal(existing, context);
       return existing;
     }
-    const result = await this.client.request('thread/start', {
-      ephemeral: false,
-      model: this.config.codexModel,
-      modelProvider: this.config.codexModelProvider,
-      cwd: this.workspace.projectRoot(context.project),
-      approvalPolicy: 'on-request',
-      approvalsReviewer: 'user',
-      sandbox: 'workspace-write',
-      serviceName: 'codex-harness-remote',
-      baseInstructions: this.#instructions(context),
-      dynamicTools: DYNAMIC_TOOLS,
-    });
-    const threadId = result.thread.id;
-    this.loadedThreads.add(threadId);
-    this.contextByThread.set(threadId, context);
-    this.db.updateChat(context.chat.id, { codexThreadId: threadId });
-    this.client.request('thread/name/set', { threadId, name: context.chat.title }, 10_000).catch(() => {});
-    await this.#syncTaskGoal(threadId, context);
+    const threadId = await this.#startThread(context);
+    this.db.updateChat(context.chat.id, { codexThreadId: threadId, threadState: 'ready', threadError: null });
     return threadId;
+  }
+
+  #controlTimeoutMs() {
+    return Math.min(30_000, Math.max(1_000, Number(this.config.codexRequestTimeoutMs) || 30_000));
+  }
+
+  async recoverChatThread({ chat, project, user, action, acknowledgeHistoryBreak = false }) {
+    invariant(!this.recoveringChats.has(chat.id), 409, 'THREAD_RECOVERY_RUNNING', '该对话正在恢复线程，请等待当前操作完成。');
+    this.recoveringChats.add(chat.id);
+    try {
+      const expectedChatId = chat.id;
+      const expectedProjectId = project.id;
+      const expectedAccessId = project.accessId;
+      const refreshRecoveryPolicy = () => {
+        const refreshedUser = this.db.getUserById(user.id);
+        invariant(refreshedUser?.status === 'active', 403, 'USER_DISABLED', '该用户已停用。');
+        const refreshedChat = this.db.getChat(expectedChatId);
+        invariant(refreshedChat?.userId === refreshedUser.id, 403, 'CHAT_FORBIDDEN', '无权访问该对话。');
+        const refreshedProject = this.db.getProjectForUser(expectedProjectId, refreshedUser.id);
+        invariant(refreshedProject && refreshedProject.accessId === expectedAccessId
+          && refreshedProject.accessId === refreshedChat.projectAccessId,
+        403, 'PROJECT_ACCESS_REVOKED', '该对话对应的项目授权已撤销。');
+        return { refreshedUser, refreshedChat, refreshedProject };
+      };
+      let { refreshedUser, refreshedChat, refreshedProject } = refreshRecoveryPolicy();
+      chat = refreshedChat;
+      project = refreshedProject;
+      user = refreshedUser;
+      invariant(chat.threadState === 'resume_failed', 409, 'THREAD_RECOVERY_NOT_REQUIRED', '该对话不需要线程恢复。');
+      invariant(!this.activeByChat.has(chat.id) && !this.pendingChats.has(chat.id) && !this.capacity.hasChat(chat.id),
+        409, 'TURN_ALREADY_RUNNING', '该对话仍有任务在运行或排队，不能恢复线程。');
+      invariant(!this.db.runtimeForChat(chat.id).busy, 409, 'CHAT_BUSY', '该对话仍有未结束的运行、批准或租约，不能恢复线程。');
+      const context = { chat, project, user, mode: 'edit', turnRunId: null };
+      await this.client.start();
+      await this.#ensurePortalSkills();
+      if (action === 'retry') {
+        invariant(chat.codexThreadId, 409, 'THREAD_NOT_STARTED', '该对话尚未创建 Codex 线程。');
+        try {
+          await this.#resumeThread(chat.codexThreadId, context);
+        } catch (error) {
+          const safeError = this.#safeThreadError(error);
+          this.db.markChatThreadError(chat.id, safeError);
+          throw new HttpError(409, 'CODEX_THREAD_RESUME_FAILED', '原 Codex 线程仍无法恢复，映射保持不变。', safeError);
+        }
+        await this.#syncTaskGoal(chat.codexThreadId, context);
+        ({ refreshedUser, refreshedChat, refreshedProject } = refreshRecoveryPolicy());
+        invariant(refreshedChat.codexThreadId === chat.codexThreadId && refreshedChat.threadState === 'resume_failed',
+          409, 'THREAD_RECOVERY_CHANGED', '对话线程状态已变化，请刷新后重试。');
+        return this.db.updateChat(chat.id, { threadState: 'ready', threadError: null });
+      }
+      invariant(action === 'reset', 400, 'INVALID_RECOVERY_ACTION', '恢复动作无效。');
+      invariant(acknowledgeHistoryBreak === true, 409, 'HISTORY_BREAK_ACK_REQUIRED', '新建空白线程会中断原生 Codex 上下文，请先明确确认。');
+      const oldThreadId = chat.codexThreadId || null;
+      const newThreadId = await this.#startThread(context);
+      ({ refreshedUser, refreshedChat, refreshedProject } = refreshRecoveryPolicy());
+      invariant(refreshedChat.codexThreadId === oldThreadId && refreshedChat.threadState === 'resume_failed',
+        409, 'THREAD_RECOVERY_CHANGED', '对话线程状态已变化，请刷新后重试。');
+      return this.db.recoverChatThread({
+        chatId: chat.id, expectedThreadId: oldThreadId, newThreadId,
+        reason: chat.threadError || 'User explicitly reset an unavailable Codex thread',
+      });
+    } finally {
+      this.recoveringChats.delete(chat.id);
+    }
   }
 
   async #syncTaskGoal(threadId, context) {
@@ -219,8 +324,15 @@ export class CodexService extends EventEmitter {
 
   async #ensurePortalSkills() {
     if (this.skillsReady) return;
-    await this.client.request('skills/extraRoots/set', { extraRoots: [this.config.portalSkillsRoot] }, 15_000);
-    this.skillsReady = true;
+    try {
+      await this.client.request('skills/extraRoots/set', { extraRoots: [this.config.portalSkillsRoot] }, 15_000);
+      this.skillsReady = true;
+      this.startError = null;
+    } catch (error) {
+      this.skillsReady = false;
+      this.startError = error;
+      throw error;
+    }
   }
 
   async #taskSkillInput(context) {
@@ -234,11 +346,108 @@ export class CodexService extends EventEmitter {
     return [{ type: 'skill', name: discovered.name, path: discovered.path }];
   }
 
+  #persistedEventPayload(event, data = {}) {
+    if (event === 'assistant_delta' || event === 'reasoning_delta') {
+      return { byteLength: Buffer.byteLength(String(data.delta || '')), omittedFromReplay: true };
+    }
+    if (event === 'plan_delta') return { delta: String(data.delta || '') };
+    if (event === 'plan_updated') return { explanation: String(data.explanation || ''), plan: Array.isArray(data.plan) ? data.plan : [] };
+    if (event === 'diff_updated') return { hasDiff: Boolean(data.diff), byteLength: Buffer.byteLength(String(data.diff || '')) };
+    if (event === 'command_output') {
+      return { itemId: data.itemId || null, byteLength: Buffer.byteLength(String(data.delta || '')), omittedFromReplay: true };
+    }
+    if (event === 'tool_started' || event === 'tool_completed') {
+      return { callId: data.callId || null, name: data.name || null, success: data.success !== false };
+    }
+    if (event === 'native_item' || event === 'subagent_updated') {
+      return {
+        phase: data.phase || null, count: data.count ?? null, limit: data.limit ?? null, model: data.model || null,
+        item: data.item ? { id: data.item.id || null, type: data.item.type || null, status: data.item.status || null } : null,
+      };
+    }
+    if (event === 'approval_required') return { approvalId: data.approvalId || null, kind: data.kind || null };
+    if (event === 'approval_resolved') return { approvalId: data.approvalId || null, requestId: data.requestId || null, decision: data.decision || null };
+    if (event === 'goal_updated') return { present: Boolean(data.goal), status: data.goal?.status || null };
+    if (event === 'usage') return { tokenUsage: data.tokenUsage || null };
+    if (event === 'turn_queued') return {
+      turnRunId: data.turnRunId || null, position: data.position || null, mode: data.mode || null,
+      executeLeases: data.executeLeases ?? null, maxExecuteLeases: data.maxExecuteLeases ?? null,
+    };
+    if (event === 'turn_status') return {
+      turnRunId: data.turnRunId || null, status: data.status || null, mode: data.mode || null,
+      threadId: data.threadId || null, turnId: data.turnId || null,
+    };
+    if (event === 'final_item') return {
+      turnRunId: data.turnRunId || null, turnId: data.turnId || null, itemId: data.itemId || null,
+      taskId: data.taskId || null, taskVersion: data.taskVersion || null,
+    };
+    if (event === 'turn_completed') return {
+      turnRunId: data.turnRunId || null, turnId: data.turnId || null, status: data.status || 'completed',
+      finalItemId: data.finalItemId || null, taskId: data.taskId || null, taskVersion: data.taskVersion || null,
+    };
+    if (event === 'turn_error' || event === 'codex_error') return {
+      code: data.code || null, status: data.status || 'failed',
+      message: '任务失败或已中断，请打开对话查看终态。',
+    };
+    if (event === 'security_warning') return { warning: true };
+    return {};
+  }
+
+  #emitPersistent({ turnRunId, chatId, emit }, event, data = {}) {
+    if (['assistant_delta', 'reasoning_delta', 'command_output'].includes(event)) {
+      try { emit(event, data); } catch { /* disconnected browser; terminal snapshot still persists */ }
+      return null;
+    }
+    const payload = this.#persistedEventPayload(event, data);
+    const persisted = this.db.appendTurnEvent({
+      turnRunId, chatId, eventType: event, payload,
+    });
+    const run = this.db.getTurnRun(turnRunId);
+    if (run && event === 'tool_completed') this.db.audit({
+      actorUserId: run.userId, action: 'turn.tool_completed', targetType: 'turn_run', targetId: turnRunId,
+      detail: { chatId, tool: payload.name || null, success: payload.success !== false },
+    });
+    if (run && event === 'subagent_updated') this.db.audit({
+      actorUserId: run.userId, action: 'turn.subagent_updated', targetType: 'turn_run', targetId: turnRunId,
+      detail: { chatId, phase: payload.phase, count: payload.count, model: payload.model },
+    });
+    if (run && event === 'native_item' && payload.phase === 'completed') this.db.audit({
+      actorUserId: run.userId, action: 'turn.native_item_completed', targetType: 'turn_run', targetId: turnRunId,
+      detail: { chatId, itemId: payload.item?.id || null, itemType: payload.item?.type || null },
+    });
+    if (run && event === 'approval_required') this.db.audit({
+      actorUserId: run.userId, action: 'turn.approval_required', targetType: 'turn_run', targetId: turnRunId,
+      detail: { chatId, approvalId: payload.approvalId, kind: payload.kind },
+    });
+    if (run && (event === 'turn_completed' || event === 'turn_error')) this.db.audit({
+      actorUserId: run.userId, action: event === 'turn_completed' ? 'turn.completed' : 'turn.failed',
+      targetType: 'turn_run', targetId: turnRunId,
+      detail: { chatId, status: data.status || (event === 'turn_completed' ? 'completed' : 'failed'), code: data.code || null },
+    });
+    this.emit('turnEvent', persisted);
+    try { emit(event, { ...data, eventId: persisted.id }); } catch { /* disconnected browser; persistence continues */ }
+    return persisted.id;
+  }
+
   async runTurn({ chat, project, user, prompt, effort, mode = 'edit', emit }) {
     const text = messageText(prompt);
     invariant(text.length > 0 && text.length <= 100_000, 400, 'INVALID_PROMPT', '消息长度必须为 1–100000 个字符。');
     invariant(TURN_MODES.has(mode), 400, 'INVALID_TURN_MODE', '任务模式必须是 EDIT 或 EXECUTE。');
+    const expectedAccessId = project.accessId;
+    const expectedNetworkAccess = user.networkAccess;
+    const refreshExecutionPolicy = () => {
+      const refreshedUser = this.db.getUserById(user.id);
+      invariant(refreshedUser?.status === 'active', 403, 'USER_DISABLED', '该用户已停用。');
+      invariant(refreshedUser.networkAccess === expectedNetworkAccess, 409, 'USER_POLICY_CHANGED', '用户网络策略已变化，请重新提交任务。');
+      const refreshedProject = this.db.getProjectForUser(project.id, refreshedUser.id);
+      invariant(refreshedProject && refreshedProject.accessId === expectedAccessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已撤销。');
+      const refreshedActive = [...this.activeByChat.values()].filter((entry) => entry.user.id === refreshedUser.id).length;
+      invariant(refreshedActive < refreshedUser.maxConcurrentTurns, 429, 'USER_CONCURRENCY_LIMIT', '已达到该用户的并发任务上限。');
+      return { refreshedUser, refreshedProject };
+    };
+    ({ refreshedUser: user, refreshedProject: project } = refreshExecutionPolicy());
     invariant(!this.activeByChat.has(chat.id) && !this.pendingChats.has(chat.id), 409, 'TURN_ALREADY_RUNNING', '该对话已有任务在运行。');
+    invariant(!this.recoveringChats.has(chat.id), 409, 'THREAD_RECOVERY_RUNNING', '该对话正在恢复线程，请等待当前操作完成。');
     invariant(this.globalActive + this.globalPending < this.config.codexMaxConcurrentTurns, 429, 'CODEX_BUSY', '本机 Codex 并发已满，请稍后重试。');
     const userActive = [...this.activeByChat.values()].filter((entry) => entry.user.id === user.id).length;
     const userPending = this.pendingByUser.get(user.id) || 0;
@@ -251,12 +460,18 @@ export class CodexService extends EventEmitter {
     }
     this.#assertProjectAgentPolicy(project);
     const turnRun = this.db.createTurnRun({ chat, project, userId: user.id, mode });
+    this.db.addMessage({
+      id: `user:${turnRun.id}`, chatId: chat.id, turnId: turnRun.id, role: 'user', content: text,
+      metadata: { turnRunId: turnRun.id, mode, taskId: chat.taskId || null, taskVersion: chat.taskVersion || null },
+    });
+    const persistentEmit = (event, data) => this.#emitPersistent({ turnRunId: turnRun.id, chatId: chat.id, emit }, event, data);
     const context = { chat, project, user, mode, turnRunId: turnRun.id };
     this.pendingChats.add(chat.id);
     this.globalPending += 1;
     this.pendingByUser.set(user.id, userPending + 1);
     const clearPending = () => {
       this.pendingChats.delete(chat.id);
+      this.interruptedPendingChats.delete(chat.id);
       this.globalPending = Math.max(0, this.globalPending - 1);
       const remaining = Math.max(0, (this.pendingByUser.get(user.id) || 1) - 1);
       if (remaining) this.pendingByUser.set(user.id, remaining);
@@ -266,48 +481,57 @@ export class CodexService extends EventEmitter {
     let capacityToken;
     try {
       capacityToken = await this.capacity.acquire({
-        turnRunId: turnRun.id, chatId: chat.id, userId: user.id, mode,
-        onQueue: (position) => emit('turn_queued', {
+        turnRunId: turnRun.id, chatId: chat.id, userId: user.id, mode, workspaceKey: project.accessId,
+        onQueue: (position) => persistentEmit('turn_queued', {
           turnRunId: turnRun.id, position, mode: mode.toUpperCase(),
           executeLeases: this.capacity.status().activeExecuteLeases,
           maxExecuteLeases: this.capacity.status().maxExecuteLeases,
         }),
       });
+      if (this.interruptedPendingChats.has(chat.id)) {
+        const interrupted = new HttpError(409, 'TURN_INTERRUPTED', '任务已在启动期间取消。');
+        interrupted.turnStatus = 'interrupted';
+        throw interrupted;
+      }
+      ({ refreshedUser: user, refreshedProject: project } = refreshExecutionPolicy());
+      context.user = user;
+      context.project = project;
       threadId = await this.#ensureThread(context);
+      if (this.interruptedPendingChats.has(chat.id)) {
+        const interrupted = new HttpError(409, 'TURN_INTERRUPTED', '任务已在启动期间取消。');
+        interrupted.turnStatus = 'interrupted';
+        throw interrupted;
+      }
+      ({ refreshedUser: user, refreshedProject: project } = refreshExecutionPolicy());
+      context.user = user;
+      context.project = project;
     } catch (error) {
-      capacityToken?.release();
       const latest = this.db.getTurnRun(turnRun.id);
-      if (!['cancelled', 'interrupted'].includes(latest?.status)) this.db.updateTurnRun(turnRun.id, {
-        status: 'failed', errorMessage: error.message, completedAt: new Date().toISOString(),
+      const requestedStatus = ['cancelled', 'interrupted'].includes(error.turnStatus) ? error.turnStatus : null;
+      const terminalStatus = ['cancelled', 'interrupted'].includes(latest?.status) ? latest.status : requestedStatus || 'failed';
+      if (!['cancelled', 'interrupted', 'failed'].includes(latest?.status)) this.db.updateTurnRun(turnRun.id, {
+        status: terminalStatus, errorMessage: error.message, completedAt: new Date().toISOString(),
       });
+      persistentEmit('turn_error', { message: error.message, code: error.code || 'TURN_START_FAILED', status: terminalStatus });
+      this.db.addMessage({
+        id: `error:${turnRun.id}`, chatId: chat.id, turnId: turnRun.id, role: 'error', kind: 'turn_error',
+        content: error.message, metadata: { turnRunId: turnRun.id, code: error.code || 'TURN_START_FAILED' },
+      });
+      capacityToken?.release();
+      error.turnEventEmitted = true;
       throw error;
     } finally {
       clearPending();
     }
-    let refreshedUser;
-    let refreshedProject;
-    try {
-      refreshedUser = this.db.getUserById(user.id);
-      invariant(refreshedUser?.status === 'active', 403, 'USER_DISABLED', '该用户已停用。');
-      invariant(refreshedUser.networkAccess === user.networkAccess, 409, 'USER_POLICY_CHANGED', '用户网络策略已变化，请重新提交任务。');
-      refreshedProject = this.db.getProjectForUser(project.id, refreshedUser.id);
-      invariant(refreshedProject && refreshedProject.accessId === project.accessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已撤销。');
-      const refreshedActive = [...this.activeByChat.values()].filter((entry) => entry.user.id === refreshedUser.id).length;
-      invariant(refreshedActive < refreshedUser.maxConcurrentTurns, 429, 'USER_CONCURRENCY_LIMIT', '已达到该用户的并发任务上限。');
-    } catch (error) {
-      capacityToken.release();
-      this.db.updateTurnRun(turnRun.id, { status: 'failed', errorMessage: error.message, completedAt: new Date().toISOString() });
-      throw error;
-    }
-    context.user = refreshedUser;
-    context.project = refreshedProject;
     this.contextByThread.set(threadId, context);
     const active = {
-      chat, project: refreshedProject, user: refreshedUser, threadId, turnId: null, emit,
+      chat, project, user, threadId, turnId: null, emit: persistentEmit,
       turnRunId: turnRun.id, mode, capacityToken,
       assistantText: '', agentItemsWithDelta: new Set(), completed: false,
       finalItemId: null, diff: '', plan: [], subagentThreadIds: new Set(),
-      commandControllers: new Set(), turnTimer: null,
+      fileChangePathsByItem: new Map(),
+      interruptRequested: false,
+      commandControllers: new Set(), turnTimer: null, interruptFallbackTimer: null,
       resolve: null, reject: null,
     };
     const completion = new Promise((resolve, reject) => { active.resolve = resolve; active.reject = reject; });
@@ -320,30 +544,61 @@ export class CodexService extends EventEmitter {
     active.emit('turn_status', { status: 'starting', threadId, turnRunId: turnRun.id, mode: mode.toUpperCase() });
     try {
       const skillInput = await this.#taskSkillInput(context);
+      if (active.interruptRequested) {
+        const interrupted = new HttpError(409, 'TURN_INTERRUPTED', '任务已在启动期间取消。');
+        interrupted.turnStatus = 'interrupted';
+        throw interrupted;
+      }
+      ({ refreshedUser: user, refreshedProject: project } = refreshExecutionPolicy());
+      context.user = user;
+      context.project = project;
+      active.user = user;
+      active.project = project;
       const result = await this.client.request('turn/start', {
         threadId,
         input: [
           { type: 'text', text: `<!-- portal-mode:${mode.toUpperCase()} -->\n${chat.taskId ? '$task-execution\n' : ''}${text}`, text_elements: [] },
           ...skillInput,
         ],
-        cwd: this.workspace.projectRoot(refreshedProject),
+        cwd: this.workspace.projectRoot(project),
         model: this.config.codexModel,
         effort: reasoningEffort,
         approvalPolicy: 'on-request',
         approvalsReviewer: 'user',
-        sandboxPolicy: {
-          type: 'workspaceWrite', writableRoots: [this.workspace.projectRoot(refreshedProject)],
-          networkAccess: Boolean(refreshedUser.networkAccess), excludeTmpdirEnvVar: true, excludeSlashTmp: true,
-        },
-      });
+        sandboxPolicy: { type: 'readOnly', networkAccess: false },
+      }, this.#controlTimeoutMs());
       active.turnId = result.turn.id;
+      this.db.updateTurnRun(turnRun.id, { codexTurnId: active.turnId });
+      if (active.completed) return completion;
+      let startBoundaryError = null;
+      try {
+        const startUser = this.db.getUserById(user.id);
+        invariant(startUser?.status === 'active', 403, 'USER_DISABLED', '该用户已停用。');
+        invariant(startUser.networkAccess === expectedNetworkAccess, 409, 'USER_POLICY_CHANGED', '用户网络策略已变化，请重新提交任务。');
+        const startProject = this.db.getProjectForUser(project.id, startUser.id);
+        invariant(startProject && startProject.accessId === expectedAccessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已撤销。');
+      } catch (error) {
+        startBoundaryError = error;
+      }
+      if (active.interruptRequested || startBoundaryError) {
+        await this.client.request('turn/interrupt', { threadId: active.threadId, turnId: active.turnId }, 15_000).catch(() => {});
+        if (startBoundaryError) throw startBoundaryError;
+        const interrupted = new HttpError(409, 'TURN_INTERRUPTED', '任务已在启动期间取消。');
+        interrupted.turnStatus = 'interrupted';
+        throw interrupted;
+      }
       this.db.updateTurnRun(turnRun.id, { status: 'running', codexTurnId: active.turnId });
       active.emit('turn_status', { status: 'running', turnId: active.turnId, threadId, turnRunId: turnRun.id, mode: mode.toUpperCase() });
       if (!active.completed) {
-        active.turnTimer = setTimeout(() => {
+        active.turnTimer = setTimeout(async () => {
           const error = new HttpError(408, 'TURN_TIMEOUT', 'Codex 任务超过允许时长，已停止并释放容量。');
-          this.client.request('turn/interrupt', { threadId: active.threadId, turnId: active.turnId }, 15_000).catch(() => {});
-          this.#finish(active, error);
+          try {
+            await this.client.request('turn/interrupt', { threadId: active.threadId, turnId: active.turnId }, 15_000);
+            active.interruptFallbackTimer = setTimeout(() => this.#finish(active, error), 15_000);
+            active.interruptFallbackTimer.unref?.();
+          } catch (interruptError) {
+            this.#finish(active, interruptError);
+          }
         }, this.config.codexRequestTimeoutMs);
         active.turnTimer.unref?.();
       }
@@ -356,7 +611,12 @@ export class CodexService extends EventEmitter {
   async interrupt(chatId) {
     if (this.capacity.cancelChat(chatId)) return true;
     const active = this.activeByChat.get(chatId);
-    if (!active) return false;
+    if (!active) {
+      if (!this.pendingChats.has(chatId)) return false;
+      this.interruptedPendingChats.add(chatId);
+      return true;
+    }
+    active.interruptRequested = true;
     for (const controller of active.commandControllers) controller.abort();
     this.#cancelApprovalsForActive(active);
     if (active.turnId) await this.client.request('turn/interrupt', { threadId: active.threadId, turnId: active.turnId }, 15_000);
@@ -364,16 +624,73 @@ export class CodexService extends EventEmitter {
   }
 
   async interruptUser(userId) {
+    const pendingChatIds = [...this.pendingChats].filter((chatId) => this.db.getChat(chatId)?.userId === userId);
+    for (const chatId of pendingChatIds) this.interruptedPendingChats.add(chatId);
     const queued = this.capacity.cancelUser(userId);
     const targets = [...this.activeByChat.values()].filter((active) => active.user.id === userId);
     for (const active of targets) {
+      active.interruptRequested = true;
       for (const controller of active.commandControllers) controller.abort();
       this.#cancelApprovalsForActive(active);
     }
     await Promise.allSettled(targets.map((active) => active.turnId
       ? this.client.request('turn/interrupt', { threadId: active.threadId, turnId: active.turnId }, 15_000)
       : Promise.resolve()));
-    return targets.length + queued;
+    return Math.max(queued, new Set([...pendingChatIds, ...targets.map((active) => active.chat.id)]).size);
+  }
+
+  userBusy(userId) {
+    const chats = this.db.listChats({ userId });
+    const chatIds = new Set(chats.map((chat) => chat.id));
+    return [...this.pendingChats].some((chatId) => chatIds.has(chatId))
+      || [...this.recoveringChats].some((chatId) => chatIds.has(chatId))
+      || [...this.activeByChat.values()].some((active) => active.user.id === userId)
+      || this.capacity.hasUser(userId)
+      || chats.some((chat) => this.db.runtimeForChat(chat.id).busy);
+  }
+
+  async waitForUserIdle(userId, timeoutMs = 45_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!this.userBusy(userId)) return true;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new HttpError(409, 'USER_DRAIN_TIMEOUT', 'Codex 已收到用户级停止请求，但运行尚未完全排空。');
+  }
+
+  async interruptUserAndWait(userId, timeoutMs = 45_000) {
+    try { await this.interruptUser(userId); }
+    catch (error) { this.emit('log', { level: 'warn', message: `Codex 用户级中断请求失败，继续等待终态: ${error.message}` }); }
+    return this.waitForUserIdle(userId, timeoutMs);
+  }
+
+  async waitForChatIdle(chatId, timeoutMs = 45_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!this.chatBusy(chatId)) return true;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new HttpError(409, 'TURN_DRAIN_TIMEOUT', 'Codex 已收到停止请求，但任务尚未完成排空；未执行撤权或删除。');
+  }
+
+  async interruptAndWait(chatId, timeoutMs = 45_000) {
+    try { await this.interrupt(chatId); }
+    catch (error) { this.emit('log', { level: 'warn', message: `Codex 中断请求失败，继续等待终态: ${error.message}` }); }
+    return this.waitForChatIdle(chatId, timeoutMs);
+  }
+
+  async interruptAccessAndWait(accessId, timeoutMs = 45_000) {
+    const chats = this.db.listChats().filter((chat) => chat.projectAccessId === accessId);
+    await Promise.allSettled(chats.map((chat) => this.interrupt(chat.id)));
+    await Promise.all(chats.map((chat) => this.waitForChatIdle(chat.id, timeoutMs)));
+    return chats.length;
+  }
+
+  async interruptProjectAndWait(projectId, timeoutMs = 45_000) {
+    const chats = this.db.listChats({ projectId });
+    await Promise.allSettled(chats.map((chat) => this.interrupt(chat.id)));
+    await Promise.all(chats.map((chat) => this.waitForChatIdle(chat.id, timeoutMs)));
+    return chats.length;
   }
 
   pendingApprovalsForChat(chatId, userId) {
@@ -392,8 +709,25 @@ export class CodexService extends EventEmitter {
     invariant(pending, 409, 'APPROVAL_EXPIRED', '批准请求已失效，请刷新对话。');
     const active = this.activeByChat.get(chatId);
     invariant(active && active.turnRunId === approval.turnRunId, 409, 'TURN_NOT_RUNNING', '对应任务已不在运行。');
-    if (decision === 'accept' && approval.kind === 'command') {
-      invariant(active.mode === 'execute', 403, 'EXECUTE_MODE_REQUIRED', 'EDIT 模式不能批准命令执行。');
+    if (decision === 'accept') {
+      const currentUser = this.db.getUserById(userId);
+      invariant(currentUser?.status === 'active', 403, 'USER_DISABLED', '该用户已停用。');
+      invariant(currentUser.networkAccess === active.user.networkAccess, 409, 'USER_POLICY_CHANGED', '用户网络策略已变化。');
+      const currentProject = this.db.getProjectForUser(active.project.id, userId);
+      invariant(currentProject && currentProject.accessId === active.project.accessId,
+        403, 'PROJECT_ACCESS_REVOKED', '项目授权已撤销。');
+      if (approval.kind === 'command') {
+        invariant(active.mode === 'execute', 403, 'EXECUTE_MODE_REQUIRED', 'EDIT 模式不能批准命令执行。');
+      } else {
+        invariant(Array.isArray(pending.fileTargets) && pending.fileTargets.length > 0,
+          409, 'FILE_APPROVAL_TARGETS_MISSING', '文件批准目标缺失，已拒绝该请求。');
+        const cached = active.fileChangePathsByItem.get(approval.itemId);
+        if (cached?.length) {
+          const currentTargets = this.#normalizeFileTargets(active, cached);
+          invariant(currentTargets && this.#sameTargets(currentTargets, pending.fileTargets),
+            409, 'FILE_APPROVAL_TARGETS_CHANGED', '文件修改目标已变化，请重新批准。');
+        }
+      }
     }
     this.pendingApprovals.delete(approvalId);
     const status = decision === 'accept' ? 'accepted' : decision === 'decline' ? 'declined' : 'cancelled';
@@ -404,18 +738,30 @@ export class CodexService extends EventEmitter {
     return { ...resolved, request: this.#publicApprovalRequest(resolved.request) };
   }
 
-  async getGoal(chat) {
-    if (!chat.codexThreadId) return null;
-    await this.client.start();
-    const result = await this.client.request('thread/goal/get', { threadId: chat.codexThreadId }, 15_000);
-    return result.goal || null;
-  }
-
-  async historyForChat(chat) {
-    if (!chat.codexThreadId) return this.db.listMessages(chat.id);
+  async getGoal(chat, authorize = () => {}) {
+    if (!chat.codexThreadId || chat.threadState === 'resume_failed') return null;
     try {
       await this.client.start();
+      authorize();
+      const result = await this.client.request('thread/goal/get', { threadId: chat.codexThreadId }, 15_000);
+      authorize();
+      return result.goal || null;
+    } catch (error) {
+      authorize();
+      throw error;
+    }
+  }
+
+  async historyForChat(chat, authorize = () => {}) {
+    if (!chat.codexThreadId) {
+      authorize();
+      return this.db.listMessages(chat.id);
+    }
+    try {
+      await this.client.start();
+      authorize();
       const result = await this.client.request('thread/read', { threadId: chat.codexThreadId, includeTurns: true }, 30_000);
+      authorize();
       const messages = [];
       const runs = this.db.listTurnRunsForChat(chat.id, 500).reverse();
       const usedRuns = new Set();
@@ -448,8 +794,19 @@ export class CodexService extends EventEmitter {
           }
         }
       }
-      return messages;
+      for (const message of messages) {
+        const runId = message.metadata?.turnRunId;
+        const persistedId = runId && message.role === 'user' ? `user:${runId}`
+          : runId && message.role === 'assistant' ? `assistant:${runId}`
+            : `native:${chat.id}:${message.id}`;
+        this.db.addMessage({
+          id: persistedId, chatId: chat.id, turnId: message.turnId, role: message.role,
+          kind: message.kind, content: message.content, metadata: message.metadata, createdAt: message.createdAt,
+        });
+      }
+      return this.db.listMessages(chat.id, null);
     } catch (error) {
+      authorize();
       this.emit('log', { level: 'warn', message: `读取 Codex thread 历史失败，回退旧缓存: ${error.message}` });
       return this.db.listMessages(chat.id);
     }
@@ -573,12 +930,17 @@ export class CodexService extends EventEmitter {
     }
     if (message.method === 'item/started') {
       const item = params.item || {};
+      if (item.type === 'fileChange') this.#rememberFileChanges(active, item.id, item.changes);
       if (item.type === 'commandExecution' || item.type === 'fileChange' || item.type === 'dynamicToolCall') {
         this.#emit(active, 'native_item', { phase: 'started', item });
       }
       if (item.type === 'collabAgentToolCall') {
         this.#trackSubagentItem(active, item, 'started');
       }
+      return;
+    }
+    if (message.method === 'item/fileChange/patchUpdated') {
+      this.#rememberFileChanges(active, params.itemId, params.changes);
       return;
     }
     if (message.method === 'item/completed' && params.item?.type === 'agentMessage') {
@@ -643,32 +1005,37 @@ export class CodexService extends EventEmitter {
       });
       return;
     }
-    if (message.method.includes('requestApproval') || message.method === 'applyPatchApproval' || message.method === 'execCommandApproval') {
-      const active = await this.#activeForTenantThread(message.params?.threadId);
+    const fileApproval = message.method === 'item/fileChange/requestApproval' || message.method === 'applyPatchApproval';
+    const commandApproval = message.method === 'item/commandExecution/requestApproval' || message.method === 'execCommandApproval';
+    if (fileApproval || commandApproval) {
+      const threadId = message.params?.threadId || message.params?.conversationId;
+      const active = await this.#activeForTenantThread(threadId);
       if (!active) {
         this.client.respond(message.id, { decision: 'decline' });
         return;
       }
-      const kind = message.method.toLowerCase().includes('file') || message.method === 'applyPatchApproval' ? 'file' : 'command';
-      if (!this.#approvalPathAllowed(active, kind, message.params || {}) || (kind === 'command' && active.mode !== 'execute')) {
+      const kind = fileApproval ? 'file' : 'command';
+      const fileTargets = kind === 'file' ? this.#fileApprovalTargets(active, message.params || {}) : [];
+      if (!this.#approvalPathAllowed(active, kind, message.params || {}, fileTargets)
+        || (kind === 'command' && active.mode !== 'execute')) {
         this.client.respond(message.id, { decision: 'decline' });
         this.#emit(active, 'security_warning', { message: 'Portal 已拒绝越界路径或错误模式的批准请求。' });
         return;
       }
       const approvalId = `rpc:${message.id}`;
-      const request = this.#publicApprovalRequest(message.params || {});
+      const request = this.#publicApprovalRequest(message.params || {}, fileTargets);
       this.db.createApproval({
         id: approvalId, turnRunId: active.turnRunId, chatId: active.chat.id, userId: active.user.id,
         kind, itemId: message.params?.itemId || null, request,
       });
-      this.pendingApprovals.set(approvalId, { rpcId: message.id, active, kind });
+      this.pendingApprovals.set(approvalId, { rpcId: message.id, active, kind, fileTargets });
       this.#emit(active, 'approval_required', { approvalId, kind, request });
       return;
     }
     this.client.respondError(message.id, -32601, `Codex Harness 不支持服务端请求: ${message.method}`);
   }
 
-  #publicApprovalRequest(request) {
+  #publicApprovalRequest(request, fileTargets = null) {
     return {
       itemId: request.itemId || null,
       reason: String(request.reason || '').slice(0, 2000),
@@ -676,16 +1043,78 @@ export class CodexService extends EventEmitter {
       cwd: request.cwd ? String(request.cwd) : null,
       commandActions: Array.isArray(request.commandActions) ? request.commandActions.slice(0, 50) : null,
       grantRoot: request.grantRoot ? String(request.grantRoot) : null,
+      files: (fileTargets || (Array.isArray(request.files) ? request.files : []))
+        .map((value) => String(value)).slice(0, 1000),
       networkApprovalContext: request.networkApprovalContext || null,
     };
   }
 
-  #approvalPathAllowed(active, kind, request) {
+  #rememberFileChanges(active, itemId, changes) {
+    if (!itemId || !Array.isArray(changes)) return;
+    const paths = [];
+    for (const change of changes) {
+      if (change?.path) paths.push(String(change.path));
+      if (change?.move_path) paths.push(String(change.move_path));
+    }
+    if (paths.length) active.fileChangePathsByItem.set(itemId, paths);
+  }
+
+  #normalizeFileTargets(active, candidates) {
     const root = path.resolve(this.workspace.projectRoot(active.project));
+    const targets = [];
+    try {
+      for (const candidate of candidates) {
+        invariant(typeof candidate === 'string' && candidate.length > 0, 400, 'INVALID_PATH', '文件批准目标无效。');
+        const relative = path.isAbsolute(candidate) ? path.relative(root, path.resolve(candidate)) : candidate;
+        const resolved = this.workspace.resolve(active.project, relative);
+        invariant(resolved.relative, 400, 'INVALID_PATH', '文件批准目标不能是项目根目录。');
+        targets.push(resolved.relative);
+      }
+    } catch {
+      return null;
+    }
+    return [...new Set(targets)].sort();
+  }
+
+  #fileApprovalTargets(active, request) {
+    const candidates = [];
+    if (request.fileChanges && typeof request.fileChanges === 'object' && !Array.isArray(request.fileChanges)) {
+      for (const [filePath, change] of Object.entries(request.fileChanges)) {
+        candidates.push(filePath);
+        if (change?.move_path) candidates.push(String(change.move_path));
+      }
+    }
+    if (Array.isArray(request.changes)) {
+      for (const change of request.changes) {
+        if (change?.path) candidates.push(String(change.path));
+        if (change?.move_path) candidates.push(String(change.move_path));
+      }
+    }
+    const cached = active.fileChangePathsByItem.get(request.itemId);
+    if (cached?.length) candidates.push(...cached);
+    if (!candidates.length) return null;
+    return this.#normalizeFileTargets(active, candidates);
+  }
+
+  #sameTargets(left, right) {
+    return left.length === right.length && left.every((value, index) => value === right[index]);
+  }
+
+  #approvalPathAllowed(active, kind, request, fileTargets = []) {
+    const root = path.resolve(this.workspace.projectRoot(active.project));
+    if (kind === 'file' && (!Array.isArray(fileTargets) || fileTargets.length === 0)) return false;
+    if (kind === 'file' && request.grantRoot) return false;
     const candidate = kind === 'file' ? request.grantRoot : request.cwd;
     if (!candidate) return true;
-    const resolved = path.resolve(String(candidate));
-    return resolved === root || resolved.startsWith(`${root}${path.sep}`);
+    const resolved = path.isAbsolute(String(candidate))
+      ? path.resolve(String(candidate)) : path.resolve(root, String(candidate));
+    if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) return false;
+    try {
+      this.workspace.resolve(active.project, path.relative(root, resolved));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   #requestPortalApproval(active, kind, request) {
@@ -731,13 +1160,16 @@ export class CodexService extends EventEmitter {
     }
   }
 
-  #assertQuota(active, nextBytes, previousBytes = 0) {
-    const usage = this.workspace.usageForUser(active.user.id, this.db.listProjectsForUser(active.user.id));
-    invariant(usage.bytes - previousBytes + nextBytes <= active.user.maxStorageBytes, 413, 'STORAGE_QUOTA', '写入将超过用户存储配额。');
+  #assertQuota(user, nextBytes, previousBytes = 0) {
+    const usage = this.workspace.usageForUser(user.id, this.db.listProjectsForUser(user.id));
+    invariant(usage.bytes - previousBytes + nextBytes <= user.maxStorageBytes, 413, 'STORAGE_QUOTA', '写入将超过用户存储配额。');
   }
 
   async #callTool(active, name, args) {
     const { user } = active;
+    const currentUser = this.db.getUserById(user.id);
+    invariant(currentUser?.status === 'active', 403, 'USER_DISABLED', '该用户已停用。');
+    invariant(currentUser.networkAccess === user.networkAccess, 409, 'USER_POLICY_CHANGED', '用户网络策略已变化。');
     const project = this.db.getProjectForUser(active.project.id, user.id);
     invariant(project && project.accessId === active.project.accessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已撤销。');
     if (name === 'workspace_list') {
@@ -747,7 +1179,7 @@ export class CodexService extends EventEmitter {
     if (name === 'workspace_write_file') {
       let previous = 0;
       try { previous = fs.statSync(this.workspace.resolve(project, args.path, { mustExist: true }).target).size; } catch { /* new file */ }
-      this.#assertQuota(active, Buffer.byteLength(String(args.content)), previous);
+      this.#assertQuota(currentUser, Buffer.byteLength(String(args.content)), previous);
       return this.workspace.writeFile(project, args.path, args.content);
     }
     if (name === 'workspace_replace_in_file') {
@@ -755,7 +1187,7 @@ export class CodexService extends EventEmitter {
       const occurrences = countOccurrences(file.content, String(args.old_text));
       invariant(occurrences === 1, 409, 'REPLACE_AMBIGUOUS', `old_text 出现 ${occurrences} 次，必须恰好出现一次。`);
       const content = file.content.replace(String(args.old_text), String(args.new_text));
-      this.#assertQuota(active, Buffer.byteLength(content), file.size);
+      this.#assertQuota(currentUser, Buffer.byteLength(content), file.size);
       return this.workspace.writeFile(project, args.path, content);
     }
     if (name === 'workspace_make_directory') return this.workspace.makeDirectory(project, args.path);
@@ -785,18 +1217,25 @@ export class CodexService extends EventEmitter {
         reason: 'Codex 请求在当前项目的 Seatbelt 沙箱中执行命令。',
       });
       invariant(decision === 'accept', 403, 'COMMAND_DECLINED', decision === 'cancel' ? '命令已取消。' : '命令未获批准。');
+      const approvedUser = this.db.getUserById(user.id);
+      invariant(approvedUser?.status === 'active', 403, 'USER_DISABLED', '该用户已停用。');
+      invariant(approvedUser.networkAccess === user.networkAccess, 409, 'USER_POLICY_CHANGED', '用户网络策略已变化。');
+      const approvedProject = this.db.getProjectForUser(active.project.id, user.id);
+      invariant(approvedProject && approvedProject.accessId === active.project.accessId,
+        403, 'PROJECT_ACCESS_REVOKED', '项目授权已撤销。');
       const controller = new AbortController();
       active.commandControllers.add(controller);
       let result;
       try {
         result = await runSandboxedCommand({
-          config: this.config, workspace: this.workspace, project, user, command, cwd: args.cwd || '', signal: controller.signal,
+          config: this.config, workspace: this.workspace, project: approvedProject, user: approvedUser,
+          command, cwd: args.cwd || '', signal: controller.signal,
         });
       } finally {
         active.commandControllers.delete(controller);
       }
-      const usage = this.workspace.usageForUser(user.id, this.db.listProjectsForUser(user.id));
-      return { ...result, storageBytes: usage.bytes, storageQuotaBytes: user.maxStorageBytes };
+      const usage = this.workspace.usageForUser(approvedUser.id, this.db.listProjectsForUser(approvedUser.id));
+      return { ...result, storageBytes: usage.bytes, storageQuotaBytes: approvedUser.maxStorageBytes };
     }
     throw new HttpError(400, 'UNKNOWN_TOOL', `未知工作区工具: ${name}`);
   }
@@ -805,8 +1244,40 @@ export class CodexService extends EventEmitter {
     if (active.completed) return;
     active.completed = true;
     if (active.turnTimer) clearTimeout(active.turnTimer);
+    if (active.interruptFallbackTimer) clearTimeout(active.interruptFallbackTimer);
     for (const controller of active.commandControllers) controller.abort();
     this.#cancelApprovalsForActive(active);
+    const rawStatus = turn?.status || error?.turnStatus || (error ? 'failed' : 'completed');
+    const status = ['completed', 'failed', 'cancelled', 'interrupted'].includes(rawStatus) ? rawStatus : error ? 'failed' : 'completed';
+    this.db.updateChat(active.chat.id, { status: 'idle' });
+    this.db.updateTurnRun(active.turnRunId, {
+      status, completedAt: new Date().toISOString(), errorMessage: error?.message || null,
+      finalItemId: active.finalItemId, finalReplySnapshot: active.finalReply || active.assistantText || null,
+      diffSnapshot: active.diff, plan: active.plan, subagentCount: active.subagentThreadIds.size,
+    });
+    const finalText = active.finalReply || active.assistantText || '';
+    if (finalText) this.db.addMessage({
+      id: `assistant:${active.turnRunId}`, chatId: active.chat.id, turnId: active.turnId || active.turnRunId,
+      role: 'assistant', content: finalText,
+      metadata: {
+        turnRunId: active.turnRunId, finalItemId: active.finalItemId, taskId: active.chat.taskId || null,
+        taskVersion: active.chat.taskVersion || null, diffSnapshot: active.diff, plan: active.plan, status,
+      },
+    });
+    if (error) {
+      this.#emit(active, 'turn_error', { message: error.message, status, code: error.code || null });
+      if (!finalText) this.db.addMessage({
+        id: `error:${active.turnRunId}`, chatId: active.chat.id, turnId: active.turnId || active.turnRunId,
+        role: 'error', kind: 'turn_error', content: error.message,
+        metadata: { turnRunId: active.turnRunId, status },
+      });
+    } else {
+      this.#emit(active, 'turn_completed', {
+        turnId: active.turnId, turnRunId: active.turnRunId, status,
+        finalItemId: active.finalItemId, taskId: active.chat.taskId || null,
+        taskVersion: active.chat.taskVersion || null,
+      });
+    }
     this.activeByChat.delete(active.chat.id);
     this.activeByThread.delete(active.threadId);
     for (const [threadId, parent] of this.parentBySubagent) {
@@ -814,26 +1285,10 @@ export class CodexService extends EventEmitter {
     }
     this.globalActive = Math.max(0, this.globalActive - 1);
     active.capacityToken?.release();
-    this.db.updateChat(active.chat.id, { status: 'idle' });
-    const rawStatus = turn?.status || (error ? 'failed' : 'completed');
-    const status = ['completed', 'failed', 'cancelled', 'interrupted'].includes(rawStatus) ? rawStatus : error ? 'failed' : 'completed';
-    this.db.updateTurnRun(active.turnRunId, {
-      status, completedAt: new Date().toISOString(), errorMessage: error?.message || null,
-      finalItemId: active.finalItemId, finalReplySnapshot: active.finalReply || active.assistantText || null,
-      diffSnapshot: active.diff, plan: active.plan, subagentCount: active.subagentThreadIds.size,
-    });
     if (error) {
-      this.#emit(active, 'turn_error', { message: error.message });
       error.turnEventEmitted = true;
       active.reject(error);
-    } else {
-      this.#emit(active, 'turn_completed', {
-        turnId: active.turnId, turnRunId: active.turnRunId, status,
-        finalItemId: active.finalItemId, taskId: active.chat.taskId || null,
-        taskVersion: active.chat.taskVersion || null,
-      });
-      active.resolve({ text: active.assistantText, turn });
-    }
+    } else active.resolve({ text: active.assistantText, turn });
   }
 
   #onExit(error) {
@@ -841,6 +1296,7 @@ export class CodexService extends EventEmitter {
     this.contextByThread.clear();
     this.parentBySubagent.clear();
     this.skillsReady = false;
+    this.startError = error;
     for (const active of [...this.activeByChat.values()]) this.#finish(active, error);
   }
 }

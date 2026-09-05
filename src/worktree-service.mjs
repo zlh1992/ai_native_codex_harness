@@ -22,9 +22,10 @@ export class WorktreeService {
     fs.mkdirSync(path.join(this.runtimeRoot, 'git'), { recursive: true, mode: 0o700 });
   }
 
-  #git(cwd, args, { allowFailure = false } = {}) {
+  #git(cwd, args, { allowFailure = false, input = undefined, trim = true, maxBuffer = 64 * 1024 * 1024 } = {}) {
     const result = spawnSync('/usr/bin/git', ['-C', cwd, ...args], {
       encoding: 'utf8',
+      input,
       env: {
         PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
         HOME: path.join(this.runtimeRoot, 'git'),
@@ -33,13 +34,15 @@ export class WorktreeService {
         GIT_CONFIG_NOSYSTEM: '1',
       },
       timeout: 30_000,
-      maxBuffer: 2 * 1024 * 1024,
+      maxBuffer,
     });
     if (result.error) throw new HttpError(500, 'GIT_FAILED', 'Git 操作失败。', result.error.message);
     if (result.status !== 0 && !allowFailure) {
       throw new HttpError(409, 'GIT_FAILED', 'Git 操作失败。', String(result.stderr || result.stdout || '').trim());
     }
-    return { ok: result.status === 0, stdout: String(result.stdout || '').trim(), stderr: String(result.stderr || '').trim() };
+    const stdout = String(result.stdout || '');
+    const stderr = String(result.stderr || '');
+    return { ok: result.status === 0, stdout: trim ? stdout.trim() : stdout, stderr: trim ? stderr.trim() : stderr };
   }
 
   isReady(projectRoot) {
@@ -80,8 +83,45 @@ export class WorktreeService {
     const compactProject = String(projectId).replaceAll('-', '').slice(0, 8);
     const compactAccess = String(accessId).replaceAll('-', '').slice(0, 8);
     const branchName = `portal/share/${compactProject}/${compactAccess}`;
-    this.#git(projectRoot, ['worktree', 'add', '-b', branchName, treePath, 'HEAD']);
-    return { treePath, branchName };
+    const baseSha = this.#git(projectRoot, ['rev-parse', 'HEAD']).stdout;
+    const patch = this.#git(projectRoot, ['diff', '--binary', '--full-index', 'HEAD', '--', '.'], { trim: false }).stdout;
+    const untracked = this.#git(projectRoot, ['ls-files', '--others', '--exclude-standard', '-z'], { trim: false }).stdout
+      .split('\0').filter(Boolean);
+    this.#git(projectRoot, ['worktree', 'add', '-b', branchName, treePath, baseSha]);
+    try {
+      if (patch) this.#git(treePath, ['apply', '--whitespace=nowarn', '-'], { input: patch });
+      for (const relative of untracked) {
+        const source = path.resolve(projectRoot, relative);
+        const destination = path.resolve(treePath, relative);
+        invariant(inside(projectRoot, source) && inside(treePath, destination), 409, 'SHARE_SNAPSHOT_INVALID', '共享快照包含越界路径。');
+        const stat = fs.lstatSync(source);
+        invariant(stat.isFile() && !stat.isSymbolicLink(), 409, 'SHARE_SNAPSHOT_INVALID', `共享快照不支持符号链接: ${relative}`);
+        fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+        fs.copyFileSync(source, destination);
+        fs.chmodSync(destination, stat.mode & 0o777);
+      }
+      return { treePath, branchName, baseSha, includedLocalChanges: Boolean(patch || untracked.length), untrackedFiles: untracked.length };
+    } catch (error) {
+      this.#git(projectRoot, ['worktree', 'remove', '--force', treePath], { allowFailure: true });
+      this.#git(projectRoot, ['branch', '-D', branchName], { allowFailure: true });
+      throw error;
+    }
+  }
+
+  isReusableShare({ treePath }) {
+    const target = path.resolve(treePath);
+    if (!inside(this.treesRoot, target) || !fs.existsSync(target)) return false;
+    const top = this.#git(target, ['rev-parse', '--show-toplevel'], { allowFailure: true });
+    return top.ok && canonical(top.stdout) === canonical(target);
+  }
+
+  discardUnboundShare({ projectRoot, treePath, branchName }) {
+    const target = path.resolve(treePath);
+    invariant(inside(this.treesRoot, target), 500, 'TREE_PATH_INVALID', '授权工作树路径配置无效。');
+    if (fs.existsSync(target)) this.#git(projectRoot, ['worktree', 'remove', '--force', target]);
+    this.#git(projectRoot, ['worktree', 'prune'], { allowFailure: true });
+    if (branchName) this.#git(projectRoot, ['branch', '-D', branchName], { allowFailure: true });
+    return { removed: true };
   }
 
   removeShare({ projectRoot, treePath }) {

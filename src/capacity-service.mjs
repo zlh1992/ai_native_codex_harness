@@ -24,13 +24,15 @@ export class CapacityService extends EventEmitter {
       activeExecuteLeases: executeActive,
       maxExecuteLeases: this.maxExecuteLeases,
       queuedTurns: this.queue.length,
+      activeWorkspaces: new Set([...this.active.values()].map((entry) => entry.workspaceKey).filter(Boolean)).size,
     };
   }
 
-  acquire({ turnRunId, chatId, userId, mode, onQueue = () => {} }) {
-    if (this.#canStart(mode) && this.queue.length === 0) return Promise.resolve(this.#grant({ turnRunId, chatId, userId, mode }));
+  acquire({ turnRunId, chatId, userId, mode, workspaceKey, onQueue = () => {} }) {
+    const candidate = { turnRunId, chatId, userId, mode, workspaceKey };
+    if (this.#canStart(candidate) && this.queue.length === 0) return Promise.resolve(this.#grant(candidate));
     return new Promise((resolve, reject) => {
-      this.queue.push({ turnRunId, chatId, userId, mode, onQueue, resolve, reject });
+      this.queue.push({ ...candidate, onQueue, resolve, reject });
       this.#updatePositions();
       this.#drain();
     });
@@ -55,9 +57,25 @@ export class CapacityService extends EventEmitter {
     return chatIds.length;
   }
 
-  #canStart(mode) {
+  hasChat(chatId) {
+    return this.queue.some((entry) => entry.chatId === chatId)
+      || [...this.active.values()].some((entry) => entry.chatId === chatId);
+  }
+
+  hasWorkspace(workspaceKey) {
+    return this.queue.some((entry) => entry.workspaceKey === workspaceKey)
+      || [...this.active.values()].some((entry) => entry.workspaceKey === workspaceKey);
+  }
+
+  hasUser(userId) {
+    return this.queue.some((entry) => entry.userId === userId)
+      || [...this.active.values()].some((entry) => entry.userId === userId);
+  }
+
+  #canStart(entry) {
     if (this.active.size >= this.maxRootTurns) return false;
-    if (mode !== 'execute') return true;
+    if (entry.workspaceKey && [...this.active.values()].some((active) => active.workspaceKey === entry.workspaceKey)) return false;
+    if (entry.mode !== 'execute') return true;
     return [...this.active.values()].filter((entry) => entry.mode === 'execute').length < this.maxExecuteLeases;
   }
 
@@ -95,7 +113,7 @@ export class CapacityService extends EventEmitter {
 
   #drain() {
     while (this.active.size < this.maxRootTurns) {
-      const index = this.queue.findIndex((entry) => this.#canStart(entry.mode));
+      const index = this.queue.findIndex((entry) => this.#canStart(entry));
       if (index < 0) break;
       const [entry] = this.queue.splice(index, 1);
       try { entry.resolve(this.#grant(entry)); } catch (error) { entry.reject(error); }

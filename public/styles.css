@@ -28,6 +28,7 @@ body.resizing-row{cursor:row-resize!important;user-select:none!important}
 .viewer-tab.active{background:#30372b;color:var(--accent)}
 .text-link{color:#aeb8b0;text-decoration:none;font-size:9px;padding:6px 4px}
 .text-link:hover{color:var(--accent)}
+.dialog-form .upload-overwrite{display:flex;align-items:center;gap:8px;margin-top:14px}.dialog-form .upload-overwrite input{width:auto;margin:0}
 .file-preview{overflow:auto;background:#0b0e0c;color:#d9e2db;padding:18px}
 .preview-empty{height:100%;min-height:180px;display:grid;place-items:center;text-align:center;color:var(--muted);line-height:1.7}
 .preview-empty b{display:block;color:var(--text);font-size:14px;margin-bottom:6px}

@@ -13,6 +13,13 @@ node -e 'const [major,minor]=process.versions.node.split(".").map(Number);if(maj
   exit 2
 }
 
+if ! command -v npm >/dev/null 2>&1; then
+  echo "未找到 npm；请安装包含 npm 的 Node.js 22.13 或更高版本。" >&2
+  exit 2
+fi
+echo "安装锁定的 Node.js 运行依赖……"
+npm ci --omit=dev --ignore-scripts
+
 CODEX_CANDIDATE="${CODEX_BIN:-/Applications/ChatGPT.app/Contents/Resources/codex}"
 if [[ ! -x "$CODEX_CANDIDATE" ]]; then
   if command -v codex >/dev/null 2>&1; then CODEX_CANDIDATE="$(command -v codex)";

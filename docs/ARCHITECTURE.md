@@ -1,5 +1,7 @@
 # 架构与安全边界
 
+> 本文保留为操作侧简版说明。长期有效的完整架构、不变量、项目约束和发布契约以 [架构规格索引](../spec/architecture/index.md) 为准；每次实现的计划与结论见 [实施报告](../spec/report/index.md)。
+
 ## 1. 目标
 
 本项目让多个受控用户共享这台 Mac 的 Codex 计算与登录。唯一超级账户可管理账号和查看项目元数据，但项目内容权限仍只由 OWNER/SHARED ACL 决定。
@@ -57,10 +59,12 @@ Browser ─HTTPS─> Tunnel ─HTTP loopback─> Harness HTTP Server
 - 写请求：同时校验会话、Origin 和 session-bound CSRF token。
 - 登录：按来源 IP 的滑动窗口限速；成功/失败均写审计。
 - RBAC：`user` 与唯一 `admin` 两种不可由 Web 提权的账号角色；内容访问另由 OWNER/SHARED ACL 控制。
+- 项目成员：同一老板项目可有多条有效 SHARED 记录；数据库只限制同一项目、同一员工最多一条有效授权。每条授权绑定自己的 branch、base SHA 和 worktree；撤权后若脏树仍在，为同一员工恢复时复用原 access 与 tree。
+- 对话是用户私有的 thread 映射，不因同项目而互读 transcript。`thread/resume` 失败会保留旧 id 并进入 `resume_failed`，只有重试成功或用户明确确认 context reset 后才改变状态；reset 会记录 lineage。
 
 ## 7. 资源和滥用边界
 
-- App Server 全局 turn 硬上限 40，Portal active root turn 硬上限 11，EXECUTE lease 硬上限 2；同一对话串行，不同对话、项目和用户可并发。
+- App Server 全局 turn 硬上限 40，Portal active root turn 硬上限 11，EXECUTE lease 硬上限 2；同一 project access/worktree 的全部 root turn 串行，不同 access 可并发。浏览器文件修改也必须取得该 worktree 的空闲状态。
 - 每用户项目数和逻辑存储配额。
 - Shell 的 wall timeout、CPU ulimit、进程数、文件描述符和输出字节上限。
 - 项目命令的网络访问按用户关闭/开启。
@@ -72,6 +76,8 @@ Browser ─HTTPS─> Tunnel ─HTTP loopback─> Harness HTTP Server
 
 停止服务后备份 `.data/harness.sqlite*`、`.data/workspaces/`、`.data/trees/` 和 `.data/trash/`。SQLite 使用 WAL，在线备份应使用 SQLite backup API 或同时复制主文件、`-wal` 和 `-shm`。恢复文件前必须核对对应项目 ACL 与 tree 绑定。
 
+`task_submissions` 的 chat/run 外键使用 `ON DELETE SET NULL`，不可变 final reply、diff 与原生标识仍独立保留；应用层同时拒绝删除含提交证据的 chat。`turn_events` 使用单调 id 保存脱敏语义事件，SSE 支持 `Last-Event-ID`；逐 token 文本、reasoning、命令正文、文件内容和 raw diff 不进入事件日志。
+
 ## 9. 信任与账号边界
 
-所有用户消耗同一台 Mac 当前 Codex 登录对应的配额。超级管理员应只给获授权的人开账号，并确认这种内部共享方式符合所用 ChatGPT/Codex 套餐、组织政策与数据规则。公网输入会发送给该 Codex 登录对应的 OpenAI 服务，不是纯本地推理。
+所有用户仍共享一个 app-server 进程、一个本机 `CODEX_HOME` 与同一 Codex 登录对应的配额。Portal 对 HTTP、动态工具、cwd、sandbox 和 active root 做业务 ACL，但这不构成敌对租户级的上游身份或进程隔离；当前产品只能定位为内部互信 Pilot。若面向互不信任组织，必须拆成 per-user/per-tenant worker 与独立上游身份。公网输入会发送给该 Codex 登录对应的 OpenAI 服务，不是纯本地推理。

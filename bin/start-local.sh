@@ -28,13 +28,17 @@ if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; t
   exit 1
 fi
 
+touch "$SERVER_LOG"
+chmod 600 "$SERVER_LOG"
+START_LOG_LINE="$(( $(wc -l < "$SERVER_LOG") + 1 ))"
 printf '\n[%s] starting local server\n' "$(date -u +%FT%TZ)" >> "$SERVER_LOG"
 NODE_BIN="$(command -v node)"
 launchctl submit -l "$SERVER_LABEL" -o "$SERVER_LOG" -e "$SERVER_LOG" -- "$NODE_BIN" "$SERVER_MARKER"
 
-for _ in {1..60}; do
+WEB_READY=0
+for SECOND in {1..60}; do
   if ! launch_job_exists "$SERVER_LABEL"; then
-    tail -n 40 "$SERVER_LOG" >&2
+    sed -n "${START_LOG_LINE},\$p" "$SERVER_LOG" | tail -n 40 >&2
     exit 1
   fi
   if local_health; then
@@ -44,11 +48,24 @@ for _ in {1..60}; do
     echo "本地服务已启动：http://127.0.0.1:${PORT}（PID ${SERVER_PID}）"
     exit 0
   fi
+  if local_codex_failed; then
+    echo "Web 服务已启动，但 Codex app-server 启动失败。" >&2
+    remove_launch_job "$SERVER_LABEL" || true
+    rm -f "$SERVER_PID_FILE"
+    sed -n "${START_LOG_LINE},\$p" "$SERVER_LOG" | tail -n 40 >&2
+    exit 1
+  fi
+  if [[ "$WEB_READY" -eq 0 ]] && local_web_health; then
+    WEB_READY=1
+    echo "Web 服务已启动，正在等待 Codex app-server…"
+  elif [[ "$WEB_READY" -eq 1 ]] && (( SECOND % 10 == 0 )); then
+    echo "仍在等待 Codex app-server（${SECOND}/60 秒）…"
+  fi
   sleep 1
 done
 
 echo "本地服务未在 60 秒内就绪。" >&2
 remove_launch_job "$SERVER_LABEL" || true
 rm -f "$SERVER_PID_FILE"
-tail -n 40 "$SERVER_LOG" >&2
+sed -n "${START_LOG_LINE},\$p" "$SERVER_LOG" | tail -n 40 >&2
 exit 1

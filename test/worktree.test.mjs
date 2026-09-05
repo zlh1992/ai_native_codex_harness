@@ -27,10 +27,16 @@ test('a shared project uses its own worktree and preserves dirty data on revoke'
   ownerProject.accessUserId = ownerProject.userId;
   workspace.createProject(ownerProject);
   worktrees.initialize(workspace.projectRoot(ownerProject));
+  workspace.writeFile(ownerProject, 'README.md', '# Owner\n\nUncommitted tracked change.\n');
+  workspace.writeFile(ownerProject, 'owner-untracked.txt', 'uncommitted source snapshot');
 
   const accessId = randomUUID();
   const shared = worktrees.createShare({ projectRoot: workspace.projectRoot(ownerProject), projectId: ownerProject.id, accessId });
   const employeeProject = { ...ownerProject, accessId, accessUserId: randomUUID(), accessKind: 'shared', treePath: shared.treePath };
+  assert.equal(shared.includedLocalChanges, true);
+  assert.equal(shared.baseSha.length, 40);
+  assert.match(workspace.readFile(employeeProject, 'README.md').content, /Uncommitted tracked change/);
+  assert.equal(workspace.readFile(employeeProject, 'owner-untracked.txt').content, 'uncommitted source snapshot');
   assert.throws(() => workspace.readFile(employeeProject, '.git'), /内部路径/);
   workspace.writeFile(employeeProject, 'employee-only.txt', 'private work in progress');
   assert.equal(workspace.readFile(employeeProject, 'employee-only.txt').content, 'private work in progress');

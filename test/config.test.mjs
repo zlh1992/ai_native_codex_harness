@@ -9,7 +9,7 @@ test('concurrency defaults to 40 and is hard-capped at 40', () => {
   assert.equal(config.portalMaxExecuteLeases, 2);
   assert.equal(config.maxSubagentsPerRoot, 3);
   assert.equal(config.subagentModel, 'gpt-5.6-luna');
-  assert.equal(config.codexCliVersion, '0.148.0-alpha.9');
+  assert.equal(config.codexCliVersion, '0.150.0-alpha.8');
   assert.match(config.portalAgentConfig, /portal-agents\/luna\.toml$/);
   assert.equal(config.defaultMaxProjects, 100);
   assert.match(config.treesRoot, /\.data\/trees$/);

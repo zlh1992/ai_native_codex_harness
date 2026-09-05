@@ -67,6 +67,31 @@ test('root turn capacity never exceeds eleven', async () => {
   second.release(); third.release(); db.close();
 });
 
+test('turns sharing one project access serialize while another worktree can run', async () => {
+  const { db, user, project, chats, run } = fixture();
+  const capacity = new CapacityService({ db, maxRootTurns: 3, maxExecuteLeases: 3 });
+  const firstRun = run(chats[0], 'edit');
+  const secondRun = run(chats[1], 'edit');
+  const otherRun = run(chats[2], 'edit');
+  const first = await capacity.acquire({
+    turnRunId: firstRun.id, chatId: chats[0].id, userId: user.id, mode: 'edit', workspaceKey: project.accessId,
+  });
+  let secondGranted = false;
+  const secondPromise = capacity.acquire({
+    turnRunId: secondRun.id, chatId: chats[1].id, userId: user.id, mode: 'edit', workspaceKey: project.accessId,
+  }).then((token) => { secondGranted = true; return token; });
+  const other = await capacity.acquire({
+    turnRunId: otherRun.id, chatId: chats[2].id, userId: user.id, mode: 'edit', workspaceKey: 'another-access',
+  });
+  assert.equal(secondGranted, false);
+  assert.equal(capacity.status().activeRootTurns, 2);
+  assert.equal(capacity.status().queuedTurns, 1);
+  first.release();
+  const second = await secondPromise;
+  assert.equal(secondGranted, true);
+  second.release(); other.release(); db.close();
+});
+
 test('restart interrupts running work and cancels stale approvals and leases', () => {
   const { config, db, user, project, chats, run } = fixture();
   const turn = run(chats[0], 'execute');
@@ -94,5 +119,7 @@ test('restart interrupts running work and cancels stale approvals and leases', (
   assert.equal(recovered.countExecutionLeases(), 0);
   assert.equal(recovered.getChat(chats[0].id).status, 'idle');
   assert.equal(recovered.getProjectForUser(project.id, user.id).id, project.id);
+  assert.equal(recovered.listTurnEvents(chats[0].id).at(-1).eventType, 'turn_error');
+  assert.equal(recovered.listMessages(chats[0].id).at(-1).metadata.code, 'PORTAL_RESTARTED');
   recovered.close();
 });

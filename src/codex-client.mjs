@@ -25,7 +25,12 @@ export class CodexAppServerClient extends EventEmitter {
   async start() {
     if (this.started) return;
     if (this.startPromise) return this.startPromise;
-    this.startPromise = this.#start().finally(() => { this.startPromise = null; });
+    this.startPromise = this.#start()
+      .catch((error) => {
+        this.lastError = error;
+        throw error;
+      })
+      .finally(() => { this.startPromise = null; });
     return this.startPromise;
   }
 
@@ -72,7 +77,7 @@ export class CodexAppServerClient extends EventEmitter {
       if (value) this.emit('log', { level: 'warn', message: value.slice(0, 4000) });
     });
     this.process.on('exit', (code, signal) => {
-      const error = new Error(`Codex app-server 已退出 (code=${code}, signal=${signal})`);
+      const error = this.lastError || new Error(`Codex app-server 已退出 (code=${code}, signal=${signal})`);
       this.lastError = error;
       this.started = false;
       for (const pending of this.pending.values()) pending.reject(error);
@@ -87,8 +92,11 @@ export class CodexAppServerClient extends EventEmitter {
     const versionMarker = `/${this.config.codexCliVersion} `;
     if (!String(initialized.userAgent || '').includes(versionMarker)) {
       const actual = String(initialized.userAgent || 'unknown');
+      const error = new Error(`Codex 协议版本不匹配：需要 ${this.config.codexCliVersion}，实际 ${actual}`);
+      error.code = 'CODEX_PROTOCOL_VERSION_MISMATCH';
+      this.lastError = error;
       try { this.process?.kill('SIGTERM'); } catch { /* already stopped */ }
-      throw new Error(`Codex 协议版本不匹配：需要 ${this.config.codexCliVersion}，实际 ${actual}`);
+      throw error;
     }
     this.notify('initialized', {});
     this.started = true;

@@ -71,6 +71,16 @@ local_health() {
     | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{try{const x=JSON.parse(s);process.exit(x.ok&&x.codex?0:1)}catch{process.exit(1)}})'
 }
 
+local_web_health() {
+  curl -fsS --max-time 5 "http://127.0.0.1:$PORT/api/health" 2>/dev/null \
+    | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{try{const x=JSON.parse(s);process.exit(x.ok?0:1)}catch{process.exit(1)}})'
+}
+
+local_codex_failed() {
+  curl -fsS --max-time 5 "http://127.0.0.1:$PORT/api/health" 2>/dev/null \
+    | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{try{const x=JSON.parse(s);process.exit(x.ok&&x.codexState==="failed"?0:1)}catch{process.exit(1)}})'
+}
+
 stop_owned_pid() {
   local file="$1" marker="$2" label="$3" pid=""
   if ! pid="$(read_pid "$file")"; then

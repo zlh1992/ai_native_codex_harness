@@ -4,9 +4,17 @@ source "$(cd "$(dirname "$0")" && pwd)/_common.sh"
 ensure_runtime_dirs
 
 SERVER_PID="$(launch_job_pid "$SERVER_LABEL")"
-if launch_job_exists "$SERVER_LABEL" && [[ -n "$SERVER_PID" ]] && local_health; then
-  echo "本地服务：运行中（PID ${SERVER_PID}）"
-  echo "本地地址：http://127.0.0.1:$PORT"
+if launch_job_exists "$SERVER_LABEL" && [[ -n "$SERVER_PID" ]]; then
+  if local_health; then
+    echo "本地服务：运行中（PID ${SERVER_PID}）"
+    echo "本地地址：http://127.0.0.1:$PORT"
+  elif local_codex_failed; then
+    echo "本地服务：Web 进程运行中，但 Codex app-server 启动失败（PID ${SERVER_PID}）"
+  elif local_web_health; then
+    echo "本地服务：Web 进程运行中，Codex app-server 正在启动（PID ${SERVER_PID}）"
+  else
+    echo "本地服务：进程存在但健康检查未就绪（PID ${SERVER_PID}）"
+  fi
 else
   echo "本地服务：已停止"
 fi

@@ -7,6 +7,14 @@ import { HttpError, invariant } from './errors.mjs';
 const HIDDEN_ROOT_ENTRIES = new Set(['.git', '.codex', '.trash', '.home', '.tmp']);
 const RESERVED_PATH_PARTS = new Set(['.git', '.codex', '.trash', '.home', '.tmp']);
 
+function reservedPathPart(value) {
+  return RESERVED_PATH_PARTS.has(String(value).normalize('NFKC').toLowerCase());
+}
+
+function hiddenRootEntry(value) {
+  return HIDDEN_ROOT_ENTRIES.has(String(value).normalize('NFKC').toLowerCase());
+}
+
 export function slugify(value) {
   const base = String(value || 'project').normalize('NFKC').toLowerCase()
     .replace(/[^a-z0-9\u3400-\u9fff]+/g, '-')
@@ -25,7 +33,7 @@ function normalizedRelative(value = '') {
   invariant(!path.posix.isAbsolute(raw), 400, 'INVALID_PATH', '只允许工作区相对路径。');
   const parts = raw.split('/').filter((part) => part && part !== '.');
   invariant(!parts.some((part) => part === '..'), 400, 'INVALID_PATH', '路径不能离开工作区。');
-  invariant(!parts.some((part) => RESERVED_PATH_PARTS.has(part)), 403, 'RESERVED_PATH', '该内部路径不允许通过文件接口访问。');
+  invariant(!parts.some(reservedPathPart), 403, 'RESERVED_PATH', '该内部路径不允许通过文件接口访问。');
   return parts.join('/');
 }
 
@@ -140,7 +148,7 @@ export class WorkspaceService {
     const visit = (directoryPath, base, depth) => {
       if (depth > maxDepth || entries.length >= maxEntries) return;
       const children = fs.readdirSync(directoryPath, { withFileTypes: true })
-        .filter((entry) => !(base === '' && HIDDEN_ROOT_ENTRIES.has(entry.name)))
+        .filter((entry) => !(base === '' && hiddenRootEntry(entry.name)))
         .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
       for (const entry of children) {
         if (entries.length >= maxEntries) break;
@@ -267,7 +275,7 @@ export class WorkspaceService {
     let files = 0;
     const visit = (dir) => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        if (HIDDEN_ROOT_ENTRIES.has(entry.name)) continue;
+        if (hiddenRootEntry(entry.name)) continue;
         const full = path.join(dir, entry.name);
         const stat = fs.lstatSync(full);
         if (stat.isSymbolicLink()) continue;
@@ -287,7 +295,7 @@ export class WorkspaceService {
     let files = 0;
     const visit = (directory) => {
       for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-        if (entry.name === '.git') continue;
+        if (hiddenRootEntry(entry.name)) continue;
         const full = path.join(directory, entry.name);
         const stat = fs.lstatSync(full);
         if (stat.isSymbolicLink()) continue;
@@ -306,6 +314,21 @@ export class WorkspaceService {
       const shared = this.projectUsage(project);
       total.bytes += shared.bytes;
       total.files += shared.files;
+    }
+    const trashRoot = path.join(this.config.trashRoot, userId);
+    const visitTrash = (directory) => {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const full = path.join(directory, entry.name);
+        const stat = fs.lstatSync(full);
+        if (stat.isSymbolicLink()) continue;
+        if (stat.isDirectory()) visitTrash(full);
+        else { total.bytes += stat.size; total.files += 1; }
+      }
+    };
+    if (fs.existsSync(trashRoot)) {
+      try { visitTrash(trashRoot); } catch (error) {
+        throw new HttpError(500, 'USAGE_SCAN_FAILED', '无法统计回收站用量。', error.message);
+      }
     }
     return total;
   }

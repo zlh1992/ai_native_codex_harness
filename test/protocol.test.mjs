@@ -7,7 +7,7 @@ const read = (file) => fs.readFileSync(new URL(file, import.meta.url), 'utf8');
 
 test('generated app-server schema contains every native employee workflow contract', () => {
   const version = JSON.parse(read('../protocol/version.json'));
-  assert.equal(version.codexCli, '0.148.0-alpha.9');
+  assert.equal(version.codexCli, '0.150.0-alpha.8');
   assert.equal(loadConfig({}).codexCliVersion, version.codexCli);
   assert.ok(read('../src/codex-client.mjs').includes('Codex 协议版本不匹配'));
   const client = read('../protocol/generated/ClientRequest.ts');
@@ -19,12 +19,26 @@ test('generated app-server schema contains every native employee workflow contra
     assert.ok(requests.includes(`"method": "${method}"`));
   }
   const notifications = read('../protocol/generated/ServerNotification.ts');
-  for (const method of ['turn/diff/updated', 'turn/plan/updated', 'item/completed', 'serverRequest/resolved']) {
+  for (const method of ['turn/diff/updated', 'turn/plan/updated', 'item/fileChange/patchUpdated', 'item/completed', 'serverRequest/resolved']) {
     assert.ok(notifications.includes(`"method": "${method}"`));
   }
   const item = read('../protocol/generated/v2/ThreadItem.ts');
   assert.ok(item.includes('"type": "collabAgentToolCall"'));
   assert.ok(item.includes('model: string | null'));
+});
+
+test('local launcher surfaces Codex startup failure instead of appearing hung', () => {
+  const server = read('../src/server.mjs');
+  const common = read('../bin/_common.sh');
+  const start = read('../bin/start-local.sh');
+  const status = read('../bin/status.sh');
+  assert.ok(server.includes("codexStatus.lastError ? 'failed' : 'starting'"));
+  assert.ok(common.includes('local_codex_failed()'));
+  assert.ok(start.includes('Web 服务已启动，但 Codex app-server 启动失败。'));
+  assert.ok(start.includes('仍在等待 Codex app-server'));
+  assert.ok(status.includes('Codex app-server 启动失败'));
+  assert.ok(start.indexOf('touch "$SERVER_LOG"') < start.indexOf('wc -l < "$SERVER_LOG"'));
+  assert.ok(read('../bin/install-mac.sh').includes('npm ci --omit=dev --ignore-scripts'));
 });
 
 test('app-server launch policy fixes the native subagent limit and Luna model', () => {
@@ -60,4 +74,6 @@ test('employee quota and turn timeout remain hard server boundaries', () => {
   assert.ok(service.includes("'thread/read', { threadId: cursor, includeTurns: false }"));
   assert.ok(service.includes('this.parentBySubagent.get(message.params?.threadId)') === false);
   assert.ok(server.includes("patch.status === 'disabled' || patch.passwordHash"));
+  assert.ok(service.includes("sandbox: 'read-only'"));
+  assert.ok(service.includes("sandboxPolicy: { type: 'readOnly', networkAccess: false }"));
 });
