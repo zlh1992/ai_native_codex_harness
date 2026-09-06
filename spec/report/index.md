@@ -24,6 +24,15 @@
 
 | 日期 | 报告 | 状态 | 范围 |
 | --- | --- | --- | --- |
+| 2026-09-06 | [移动端项目与对话选择区扩容](2026-09-06-mobile-workbench-selection.md) | 完成 | 手机端老板/员工工作台选择区高度、触控目标、回归与发布验证 |
+| 2026-09-06 | [运行中输入、消息队列与调整方向](2026-09-06-running-input-queue.md) | 完成 | 持久队列、编辑/取消、原生 steer、FIFO 与恢复/权限验证 |
+| 2026-09-06 | [老板工作台模型选择](2026-09-06-boss-model-selection.md) | 完成 | 按对话保存老板 root 模型，白名单与权限校验，实际 thread/turn 参数和门控验证 |
+| 2026-09-06 | [角色入口分离与共享对话分叉](2026-09-06-role-portals-share-chat-forks.md) | 完成 | 独立老板/员工入口、文件与历史一次性 fork、隔离续聊、版本固定与发布验证 |
+| 2026-09-06 | [HTML 产物内嵌预览](2026-09-06-html-artifact-preview.md) | 完成 | 老板/员工 HTML 默认渲染、主动内容 sandbox 与 HTTP/前端契约 |
+| 2026-09-06 | [运行中对话空白用户气泡修复](2026-09-06-running-turn-empty-user-bubble.md) | 完成 | 运行中对话恢复、用户消息补绘与前端回归测试 |
+| 2026-09-06 | [对话独立模式、项目内自动放行与并发执行](2026-09-06-chat-mode-auto-access-concurrency.md) | 完成 | chat 模式持久化、项目内免确认、同 access 多对话并发与 EXECUTE 默认容量 |
+| 2026-09-06 | [文件系统、运行时与代码交付加固](2026-09-06-filesystem-runtime-delivery-hardening.md) | 完成 | 文件 TOCTOU 防护、异步授权复验、access 级 runtime 与 Git 快照交付 |
+| 2026-09-06 | [超级管理员账号接管边界澄清](2026-09-06-admin-account-takeover-boundary.md) | 完成 | 明确管理员直接内容 ACL、账号接管恢复权与宿主机访问的边界 |
 | 2026-09-05 | [Spec Review 八项问题修复](2026-09-05-spec-review-remediation.md) | 完成 | 文件边界、原生 approval、生命周期、ACL、运行终态、任务推进、trash 配额与启动 ready 加固 |
 | 2026-09-05 | [当前实现基线：P0/P1 加固、协作语义与发布门控](2026-09-05-current-implementation-baseline.md) | 完成 | 对当前工作树实现、审计问题处置、协议升级和验证证据的完整快照 |
 | 2026-09-05 | [Spec 治理初始化](2026-09-05-spec-governance-bootstrap.md) | 完成 | 新建架构/报告体系并固化后续修改规则 |

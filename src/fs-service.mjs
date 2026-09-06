@@ -1,8 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import ExcelJS from 'exceljs';
 import { HttpError, invariant } from './errors.mjs';
+import { buildSeatbeltProfile } from './sandbox.mjs';
+
+const SOURCE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const FILE_OPERATION_WORKER = path.join(SOURCE_DIR, 'fs-operation-worker.mjs');
 
 const HIDDEN_ROOT_ENTRIES = new Set(['.git', '.codex', '.trash', '.home', '.tmp']);
 const RESERVED_PATH_PARTS = new Set(['.git', '.codex', '.trash', '.home', '.tmp']);
@@ -13,6 +19,16 @@ function reservedPathPart(value) {
 
 function hiddenRootEntry(value) {
   return HIDDEN_ROOT_ENTRIES.has(String(value).normalize('NFKC').toLowerCase());
+}
+
+function ancestors(value) {
+  const entries = [];
+  let current = path.resolve(value);
+  while (current !== path.parse(current).root) {
+    current = path.dirname(current);
+    entries.push(current);
+  }
+  return entries;
 }
 
 export function slugify(value) {
@@ -63,6 +79,42 @@ export class WorkspaceService {
     }
   }
 
+  #fileOperation(project, payload, { write = false, extraWritableRoots = [] } = {}) {
+    invariant(process.platform === 'darwin', 501, 'FILE_SANDBOX_UNAVAILABLE', '当前安全文件操作器仅支持 macOS Seatbelt。');
+    const root = fs.realpathSync(this.projectRoot(project));
+    const canonicalExtraRoots = extraWritableRoots.map((entry) => fs.realpathSync(entry));
+    const writableRoots = write ? [root, ...canonicalExtraRoots] : [];
+    const profile = buildSeatbeltProfile({
+      readableRoots: [root, SOURCE_DIR, ...canonicalExtraRoots],
+      readableMetadataPaths: ancestors(FILE_OPERATION_WORKER),
+      writableRoots,
+      deniedPaths: [...RESERVED_PATH_PARTS].map((entry) => path.join(root, entry)),
+      networkAccess: false,
+    });
+    const input = JSON.stringify({ ...payload, root });
+    const maxBuffer = Math.max(1024 * 1024, Math.ceil(input.length * 1.5), (payload.maxBytes || 0) * 2);
+    const result = spawnSync('/usr/bin/sandbox-exec', ['-p', profile, process.execPath, FILE_OPERATION_WORKER], {
+      input,
+      encoding: 'utf8',
+      env: {
+        PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+        HOME: root,
+        TMPDIR: `${root}${path.sep}`,
+        LANG: 'en_US.UTF-8',
+        LC_ALL: 'en_US.UTF-8',
+      },
+      timeout: 30_000,
+      maxBuffer,
+    });
+    invariant(!result.error, 500, 'FILE_SANDBOX_FAILED', '无法启动项目文件沙箱。');
+    invariant(result.status === 0, 500, 'FILE_SANDBOX_FAILED', '项目文件沙箱异常退出。');
+    let response;
+    try { response = JSON.parse(String(result.stdout || '')); }
+    catch { throw new HttpError(500, 'FILE_SANDBOX_FAILED', '项目文件沙箱返回无效结果。'); }
+    if (!response.ok) throw new HttpError(response.status || 500, response.code || 'FILE_OPERATION_FAILED', response.message || '项目文件操作失败。');
+    return response.value;
+  }
+
   userRoot(userId) {
     invariant(/^[a-f0-9-]{36}$/i.test(String(userId)), 400, 'INVALID_USER', '用户标识无效。');
     return path.join(this.config.workspacesRoot, userId);
@@ -74,9 +126,10 @@ export class WorkspaceService {
     return root;
   }
 
-  ensureRuntimeRoot(userId) {
+  ensureAccessRuntimeRoot(userId, accessId) {
     invariant(/^[a-f0-9-]{36}$/i.test(String(userId)), 400, 'INVALID_USER', '用户标识无效。');
-    const root = path.join(this.config.runtimeRoot, userId);
+    invariant(/^[a-f0-9-]{36}$/i.test(String(accessId)), 400, 'INVALID_ACCESS_ID', '授权标识无效。');
+    const root = path.join(this.config.runtimeRoot, userId, accessId);
     fs.mkdirSync(path.join(root, 'home'), { recursive: true, mode: 0o700 });
     fs.mkdirSync(path.join(root, 'tmp'), { recursive: true, mode: 0o700 });
     return root;
@@ -143,49 +196,32 @@ export class WorkspaceService {
   }
 
   tree(project, relativePath = '', maxDepth = 5, maxEntries = 2000) {
-    const { target, relative } = this.resolve(project, relativePath, { mustExist: true, directory: true });
-    const entries = [];
-    const visit = (directoryPath, base, depth) => {
-      if (depth > maxDepth || entries.length >= maxEntries) return;
-      const children = fs.readdirSync(directoryPath, { withFileTypes: true })
-        .filter((entry) => !(base === '' && hiddenRootEntry(entry.name)))
-        .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
-      for (const entry of children) {
-        if (entries.length >= maxEntries) break;
-        const entryRelative = [base, entry.name].filter(Boolean).join('/');
-        const fullPath = path.join(directoryPath, entry.name);
-        const stat = fs.lstatSync(fullPath);
-        const item = {
-          path: entryRelative,
-          name: entry.name,
-          type: stat.isSymbolicLink() ? 'symlink' : stat.isDirectory() ? 'directory' : 'file',
-          size: stat.isFile() ? stat.size : 0,
-          modifiedAt: stat.mtime.toISOString(),
-        };
-        entries.push(item);
-        if (stat.isDirectory() && !stat.isSymbolicLink()) visit(fullPath, entryRelative, depth + 1);
-      }
-    };
-    visit(target, relative, 1);
-    return { path: relative, entries, truncated: entries.length >= maxEntries };
+    const { relative } = this.resolve(project, relativePath, { mustExist: true, directory: true });
+    const result = this.#fileOperation(project, {
+      operation: 'tree', relative, maxDepth, maxEntries, hiddenNames: [...HIDDEN_ROOT_ENTRIES],
+    });
+    return { path: relative, entries: result.entries, truncated: result.truncated };
   }
 
   readFile(project, relativePath) {
-    const { target, relative } = this.resolve(project, relativePath, { mustExist: true });
-    const stat = fs.statSync(target);
-    invariant(stat.isFile(), 400, 'NOT_A_FILE', '目标不是文件。');
-    invariant(stat.size <= this.config.fileMaxBytes, 413, 'FILE_TOO_LARGE', `文件超过 ${this.config.fileMaxBytes} 字节的在线读取上限。`);
-    const buffer = fs.readFileSync(target);
+    const { relative } = this.resolve(project, relativePath, { mustExist: true });
+    const result = this.#fileOperation(project, { operation: 'read', relative, maxBytes: this.config.fileMaxBytes });
+    const buffer = Buffer.from(result.buffer, 'base64');
     invariant(!buffer.subarray(0, Math.min(buffer.length, 8192)).includes(0), 415, 'BINARY_FILE', '二进制文件不能在编辑器中打开。');
-    return { path: relative, content: buffer.toString('utf8'), size: stat.size, modifiedAt: stat.mtime.toISOString() };
+    return { path: relative, content: buffer.toString('utf8'), size: result.size, modifiedAt: result.modifiedAt, version: result.version };
   }
 
   readBuffer(project, relativePath, maxBytes = this.config.uploadMaxBytes) {
-    const { target, relative } = this.resolve(project, relativePath, { mustExist: true });
-    const stat = fs.statSync(target);
-    invariant(stat.isFile(), 400, 'NOT_A_FILE', '目标不是文件。');
-    invariant(stat.size <= maxBytes, 413, 'FILE_TOO_LARGE', `文件超过 ${maxBytes} 字节的在线预览上限。`);
-    return { path: relative, buffer: fs.readFileSync(target), size: stat.size, modifiedAt: stat.mtime.toISOString() };
+    const { relative } = this.resolve(project, relativePath, { mustExist: true });
+    const result = this.#fileOperation(project, { operation: 'read', relative, maxBytes });
+    return { path: relative, buffer: Buffer.from(result.buffer, 'base64'), size: result.size, modifiedAt: result.modifiedAt, version: result.version };
+  }
+
+  fileMetadata(project, relativePath) {
+    const { relative } = this.resolve(project, relativePath, { mustExist: true });
+    const result = this.#fileOperation(project, { operation: 'stat', relative });
+    invariant(result.type === 'file', 400, 'NOT_A_FILE', '目标不是文件。');
+    return { path: relative, size: result.size, modifiedAt: result.modifiedAt, version: result.version };
   }
 
   async spreadsheetPreview(project, relativePath) {
@@ -227,35 +263,38 @@ export class WorkspaceService {
     };
   }
 
-  writeFile(project, relativePath, content) {
-    const { target, relative } = this.resolve(project, relativePath);
+  writeFile(project, relativePath, content, { expectedVersion = null } = {}) {
+    const { relative } = this.resolve(project, relativePath);
     invariant(relative, 400, 'INVALID_PATH', '必须指定文件路径。');
     const buffer = Buffer.isBuffer(content) ? content : Buffer.from(String(content));
     invariant(buffer.length <= this.config.uploadMaxBytes, 413, 'FILE_TOO_LARGE', '文件超过写入上限。');
-    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-    this.resolve(project, path.posix.dirname(relative) === '.' ? '' : path.posix.dirname(relative), { mustExist: true, directory: true });
-    if (fs.existsSync(target)) invariant(fs.statSync(target).isFile(), 400, 'NOT_A_FILE', '目标不是文件。');
-    fs.writeFileSync(target, buffer, { mode: 0o600 });
-    return { path: relative, size: buffer.length, modifiedAt: fs.statSync(target).mtime.toISOString() };
+    invariant(expectedVersion === null || /^[0-9a-f]{64}$/i.test(String(expectedVersion)),
+      400, 'INVALID_FILE_VERSION', '文件版本标识无效。');
+    const result = this.#fileOperation(project, {
+      operation: 'write', relative, buffer: buffer.toString('base64'), expectedVersion,
+    }, { write: true });
+    return { path: relative, size: result.size, modifiedAt: result.modifiedAt, version: result.version };
   }
 
   makeDirectory(project, relativePath) {
-    const { target, relative } = this.resolve(project, relativePath);
+    const { relative } = this.resolve(project, relativePath);
     invariant(relative, 400, 'INVALID_PATH', '必须指定目录路径。');
-    fs.mkdirSync(target, { recursive: true, mode: 0o700 });
-    this.resolve(project, relative, { mustExist: true, directory: true });
+    this.#fileOperation(project, { operation: 'makeDirectory', relative }, { write: true });
     return { path: relative };
   }
 
   moveToTrash(project, relativePath) {
-    const { target, relative } = this.resolve(project, relativePath, { mustExist: true });
+    const { relative } = this.resolve(project, relativePath, { mustExist: true });
     invariant(relative, 400, 'INVALID_PATH', '不能删除项目根目录。');
     const actorId = project.accessUserId || project.userId;
     const trashRoot = path.join(this.config.trashRoot, actorId, 'files', project.accessId || project.id);
     fs.mkdirSync(trashRoot, { recursive: true, mode: 0o700 });
+    const canonicalTrashRoot = fs.realpathSync(trashRoot);
     const safeName = path.basename(relative).replace(/[^a-zA-Z0-9._\u3400-\u9fff-]/g, '_');
-    const destination = path.join(trashRoot, `${Date.now()}-${randomBytes(3).toString('hex')}-${safeName}`);
-    fs.renameSync(target, destination);
+    const destinationName = `${Date.now()}-${randomBytes(3).toString('hex')}-${safeName}`;
+    this.#fileOperation(project, {
+      operation: 'moveToTrash', relative, destinationRoot: canonicalTrashRoot, destinationName,
+    }, { write: true, extraWritableRoots: [canonicalTrashRoot] });
     return { path: relative, recoverable: true };
   }
 

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>老板登录 · Codex Harness</title><link rel="stylesheet" href="/styles.css"></head><body class="boss-login">
+  <main id="login-view" class="login-shell">
+    <section class="login-copy">
+      <div class="wordmark"><span class="mark">C</span> CODEX / HARNESS</div>
+      <p class="eyebrow">LOCAL MAC · REMOTE WORKBENCH</p>
+      <h1>管理团队与项目，<br><em>掌握每次交付。</em></h1>
+      <p class="lede">员工管理、项目共享、任务验收与资源配额，集中管理。</p>
+      <div class="trust-row">
+        <span>独立工作区</span><span>受控命令沙箱</span><span>全量审计</span>
+      </div>
+    </section>
+    <section class="login-card">
+      <div class="status-pill"><i></i><span id="login-health">正在连接本机服务</span></div>
+      <h2>老板登录</h2>
+      <p>使用唯一超级管理员账号进入老板驾驶舱。</p>
+      <form id="login-form">
+        <label>用户名<input id="login-username" name="username" autocomplete="username" required autofocus></label>
+        <label>密码<input id="login-password" name="password" type="password" autocomplete="current-password" required></label>
+        <button class="primary wide" type="submit"><span>进入老板驾驶舱</span><b>↗</b></button>
+      </form>
+      <p id="login-error" class="form-error" role="alert"></p>
+      <p class="login-foot">仅限授权用户 · 会话使用 HttpOnly 安全 Cookie</p>
+    </section>
+  </main>
+
+<script src="/boss-login.js" defer></script></body></html>

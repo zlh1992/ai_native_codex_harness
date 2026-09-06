@@ -23,29 +23,29 @@ function fixture() {
   return { config, db, user, project, chats, run };
 }
 
-test('the third EXECUTE turn queues while EDIT can still run and queue cancellation is durable', async () => {
+test('EXECUTE can use every root slot and excess work remains cancellably queued', async () => {
   const { db, user, chats, run } = fixture();
-  const capacity = new CapacityService({ db, maxRootTurns: 11, maxExecuteLeases: 2, leaseTtlMs: 30_000 });
+  const capacity = new CapacityService({ db, maxRootTurns: 3, maxExecuteLeases: 3, leaseTtlMs: 30_000 });
   const firstRun = run(chats[0], 'execute');
   const secondRun = run(chats[1], 'execute');
   const thirdRun = run(chats[2], 'execute');
   const editRun = run(chats[3], 'edit');
   const first = await capacity.acquire({ turnRunId: firstRun.id, chatId: chats[0].id, userId: user.id, mode: 'execute' });
   const second = await capacity.acquire({ turnRunId: secondRun.id, chatId: chats[1].id, userId: user.id, mode: 'execute' });
+  const third = await capacity.acquire({ turnRunId: thirdRun.id, chatId: chats[2].id, userId: user.id, mode: 'execute' });
   const positions = [];
-  const third = capacity.acquire({
-    turnRunId: thirdRun.id, chatId: chats[2].id, userId: user.id, mode: 'execute', onQueue: (position) => positions.push(position),
+  const edit = capacity.acquire({
+    turnRunId: editRun.id, chatId: chats[3].id, userId: user.id, mode: 'edit', onQueue: (position) => positions.push(position),
   });
-  const thirdRejected = assert.rejects(third, /取消排队/);
-  const edit = await capacity.acquire({ turnRunId: editRun.id, chatId: chats[3].id, userId: user.id, mode: 'edit' });
-  assert.equal(capacity.status().activeExecuteLeases, 2);
+  const editRejected = assert.rejects(edit, /取消排队/);
+  assert.equal(capacity.status().activeExecuteLeases, 3);
   assert.equal(capacity.status().activeRootTurns, 3);
-  assert.equal(db.countExecutionLeases(), 2);
+  assert.equal(db.countExecutionLeases(), 3);
   assert.deepEqual(positions, [1]);
-  assert.equal(capacity.cancelChat(chats[2].id), true);
-  await thirdRejected;
-  assert.equal(db.getTurnRun(thirdRun.id).status, 'cancelled');
-  edit.release(); first.release(); second.release();
+  assert.equal(capacity.cancelChat(chats[3].id), true);
+  await editRejected;
+  assert.equal(db.getTurnRun(editRun.id).status, 'cancelled');
+  first.release(); second.release(); third.release();
   assert.equal(db.countExecutionLeases(), 0);
   db.close();
 });
@@ -67,7 +67,7 @@ test('root turn capacity never exceeds eleven', async () => {
   second.release(); third.release(); db.close();
 });
 
-test('turns sharing one project access serialize while another worktree can run', async () => {
+test('different chats sharing one project access can run concurrently', async () => {
   const { db, user, project, chats, run } = fixture();
   const capacity = new CapacityService({ db, maxRootTurns: 3, maxExecuteLeases: 3 });
   const firstRun = run(chats[0], 'edit');
@@ -76,20 +76,18 @@ test('turns sharing one project access serialize while another worktree can run'
   const first = await capacity.acquire({
     turnRunId: firstRun.id, chatId: chats[0].id, userId: user.id, mode: 'edit', workspaceKey: project.accessId,
   });
-  let secondGranted = false;
-  const secondPromise = capacity.acquire({
+  const second = await capacity.acquire({
     turnRunId: secondRun.id, chatId: chats[1].id, userId: user.id, mode: 'edit', workspaceKey: project.accessId,
-  }).then((token) => { secondGranted = true; return token; });
+  });
   const other = await capacity.acquire({
     turnRunId: otherRun.id, chatId: chats[2].id, userId: user.id, mode: 'edit', workspaceKey: 'another-access',
   });
-  assert.equal(secondGranted, false);
-  assert.equal(capacity.status().activeRootTurns, 2);
-  assert.equal(capacity.status().queuedTurns, 1);
-  first.release();
-  const second = await secondPromise;
-  assert.equal(secondGranted, true);
-  second.release(); other.release(); db.close();
+  assert.equal(capacity.status().activeRootTurns, 3);
+  assert.equal(capacity.status().queuedTurns, 0);
+  assert.equal(capacity.hasWorkspace(project.accessId), true);
+  first.release(); second.release(); other.release();
+  assert.equal(capacity.hasWorkspace(project.accessId), false);
+  db.close();
 });
 
 test('restart interrupts running work and cancels stale approvals and leases', () => {

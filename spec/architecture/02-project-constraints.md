@@ -5,10 +5,11 @@
 ## 产品与权限约束
 
 - **PRD-001**：项目是内容 ACL 边界；chat、task、文件和运行必须落在当前有效的 owner/shared access 上。
-- **PRD-002**：平台 `admin` 只提供账号与全局元数据管理能力，不自动获得员工自有项目内容权限。
-- **PRD-003**：chat transcript 默认只属于创建者。共享同一项目、roadmap 或 worktree 不授予读取其他用户 chat 的能力。
-- **PRD-004**：跨人员交付必须经过 task/submission 或未来显式 artifact/handoff；禁止用裸 `inject_items` 或全量 transcript 同步代替。
+- **PRD-002**：平台 `admin` 只提供账号与全局元数据管理能力，不自动获得员工自有项目内容权限；任何文件、chat 或 turn 内容仍须以该会话用户的有效 `project_access` 授权。当前唯一超级管理员可以设置员工新密码并使其既有会话失效；使用员工账号与该新密码重新登录将按员工自身权限访问内容。这是明确接受的账号接管/恢复能力，不是管理员直接绕过内容 ACL，系统不承诺员工内容对超级管理员保密。
+- **PRD-003**：chat transcript 默认只属于创建者。共享同一项目、roadmap 或 worktree 不授予读取其他用户原 chat 的能力。唯一例外是 owner 显式新 share：将该项目 owner 已有全部 chat 一次性 fork 为接收者私有副本；后续不自动同步。
+- **PRD-004**：跨人员交付经过 task/submission、显式 share 时的一次性 thread fork 或未来 artifact/handoff；禁止裸 `inject_items`、实时全量 transcript 同步或共用原 thread id。
 - **PRD-005**：当前仅支持一个超级管理员和多个普通员工；不能从现有角色模型推导组织、多老板或细粒度 viewer/reviewer 权限。
+- **PRD-006**：EDIT/EXECUTE 偏好属于 chat，不能由同项目其他 chat 的选择隐式改变；新建和迁移后的 chat 默认 EXECUTE，老板与员工采用同一模式语义和项目内自动放行策略。
 
 ## 运行平台约束
 
@@ -27,12 +28,13 @@
 
 ## 文件与执行约束
 
-- **FS-001**：浏览器和 dynamic tool 只能使用项目相对路径；绝对路径、`..`、保留目录和越界符号链接必须拒绝。保留目录匹配必须先规范化并忽略大小写，以覆盖默认大小写不敏感的 macOS 文件系统。
+- **FS-001**：浏览器和 dynamic tool 只能使用项目相对路径；绝对路径、`..`、保留目录和越界符号链接必须拒绝。保留目录匹配必须先规范化并忽略大小写，以覆盖默认大小写不敏感的 macOS 文件系统。实际文件 CRUD 必须在只允许当前项目及本次回收站目标的 Seatbelt helper 中完成，不能依赖主进程“先检查路径、后裸打开”的竞态窗口。
 - **FS-002**：`.git`、`.codex` 及共享 worktree 的 Git indirection 不得通过文件 API、workspace tool、原生 file-change approval 或 Seatbelt 暴露；原生 approval 无法取得完整目标集合时必须拒绝。
-- **FS-003**：共享项目必须为每个 active 员工建立独立 `project_access` 和 worktree；同一项目同一员工最多一个 active access。
-- **FS-004**：同一 access/worktree 任一时刻最多一个 active root turn，浏览器文件修改必须等待 worktree 空闲。
+- **FS-003**：共享项目必须为每个 active 员工建立独立 `project_access` 和 worktree；同一项目同一员工最多一个 active access。新授权必须先把 owner 当前 Git 可见的 tracked/untracked/删除状态提交为不可变基线，并将 `base_sha` 返回和持久化；不能从旧 HEAD 建树后留下一个未绑定的易变 patch。
+- **FS-004**：同一 chat 任一时刻最多一个 active root turn；同一 access/worktree 的不同 chat 可以并发。浏览器文件修改、submission 快照与 owner delivery 必须等待整个 access/worktree 空闲。浏览器编辑器覆盖既有文件时必须携带读取所得 SHA-256 `If-Match` 版本；stale save 返回 `FILE_VERSION_CONFLICT`，不能静默覆盖另一标签页或先前写入。并发 turn/命令若修改同一文件可能相互观察或覆盖，当前不承诺自动冲突解决。
 - **FS-005**：删除文件或项目默认移动到项目 trash，不能在普通 Web 流程中不可恢复销毁。
-- **FS-006**：命令环境不得继承 Portal、隧道、Codex 或其他项目秘密；网络访问默认关闭并按用户授权。
+- **FS-006**：命令环境不得继承 Portal、隧道、Codex 或其他项目秘密；网络访问默认关闭并按用户授权。命令 `HOME`/`TMPDIR` 必须按 `user.id + project_access.id` 隔离，不能由同一用户的不同项目复用可写 runtime。
+- **FS-007**：项目 HTML 必须默认以可切回源码的受限 iframe 渲染。iframe 与 HTML HTTP 响应都必须 sandbox，禁止 `allow-same-origin`、表单、弹窗、顶层导航、嵌套 frame、worker 和网络 API；不得为了预览把项目脚本提升为 Portal 同源脚本，或绕过 `project_access`、canonical path 与文件读取边界。
 
 ## 数据与生命周期约束
 
@@ -42,11 +44,12 @@
 - **DAT-004**：撤权、停用、改密、chat/project 删除必须处理中断、审批、子代理和 lease，并等待或拒绝，不能与活跃写入并发清理。用户级中断必须覆盖 capacity queue、thread/skill setup 和 active turn，并在响应前等待持久终态或返回明确 drain timeout。
 - **DAT-005**：服务重启必须把遗留的 queued/starting/running run 转为确定的 interrupted 终态，取消 pending approval，清理 lease 并写恢复事件。
 - **DAT-006**：事件和审计不得记录 prompt、密码、token、命令正文、文件正文、模型逐 token 输出或 raw diff。
+- **DAT-007**：新 task submission 必须绑定原 `project_access.id`、不可变 Git commit 和 tree；`passed` 审核必须先把该快照合入 owner 并记录 delivery commit。merge 失败时 submission 保持 pending，不能只推进任务状态。
 
 ## 容量约束
 
 - **CAP-001**：Codex turn 配置硬上限为 40；Portal active root turn 硬上限为 11。
-- **CAP-002**：同时有效的 EXECUTE lease 最多 2；额外 EXECUTE 请求必须可排队、可取消并持久化状态。
+- **CAP-002**：EXECUTE lease 上限默认等于 Portal active root 上限 11，且绝不能超过 root 上限；运营配置可以调低。超出用户、root 或配置上限的请求必须可排队、可取消并持久化状态。
 - **CAP-003**：每个 root 原生子代理并发最多 3，默认模型固定为 `gpt-5.6-luna`。
 - **CAP-004**：员工项目数硬上限为 100；用户并发、存储、命令时间和输出大小仍受各自配置限制。
 - **CAP-005**：存储配额对 Portal 文件 API 是写前硬限制，active workspace/worktree 与该用户可恢复 trash 都必须计入；任意 shell 产生文件目前只能执行后观测，不能宣称硬磁盘 quota。
@@ -64,6 +67,6 @@
 
 - 敌对互联网多租户、组织级数据隔离或按用户独立上游计费。
 - OIDC、MFA、邀请、首次强制改密、用户自助改密、设备会话管理。
-- 每 task/chat 独立 worktree、自动 commit、merge、冲突解决、PR 或代码审核工作流。
-- 任意顶层 chat 实时互发消息、共享完整 transcript 或跨 chat 共享隐式 memory。
+- 每 task/chat 独立 worktree、同文件并发冲突自动解决、PR 或完整代码审核 UI；当前只承诺 access worktree 的提交快照与 `passed` owner merge。
+- 任意顶层 chat 实时互发消息、持续 transcript 同步或跨 chat 共享隐式 memory；显式 share 的一次性完整历史 fork 已纳入支持。
 - Linux/Windows 命令沙箱兼容性。

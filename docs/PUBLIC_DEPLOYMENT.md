@@ -74,3 +74,15 @@ PUBLIC_TUNNEL_MODE=tailscale
 - 已运行 `npm run check` 和测试账号端到端验收。
 - 已明确告知用户：输入与项目片段会通过管理员的本机 Codex 登录发送给 OpenAI，且共享同一配额。
 - Mac 禁止自动睡眠，ChatGPT/Codex 登录有效，服务有可靠的备份与日志轮转计划。
+
+## 角色入口与分享历史
+
+老板本地入口为 [老板登录](http://127.0.0.1:4310/boss/login)，员工为 [员工登录](http://127.0.0.1:4310/employee)。公网在同一 HTTPS 域名后分别加 `/boss/login`、`/employee`；`PUBLIC_ORIGIN` 仍只配置 origin，不含这些路径。老板登录后进入 `/boss`，自己的项目工作台位于 `/boss/workbench`。
+
+新 share 会把老板在该项目已有的所有对话与文件一并分享。每名员工获得独立 Git worktree 与独立 Codex 对话副本，可以直接从历史继续；后续员工和老板的聊天相互独立，文件也不会自动写回，任务验收交付仍通过 submission。分享要求老板工作区空闲；任何对话 fork 失败则整次授权失败，可排查后重试。恢复保留的旧授权会继续使用员工原有对话，不重新复制或覆盖；升级前已有的 active 授权不会被自动补发历史。
+
+## 固定 Codex 二进制
+
+本项目协议固定为 `0.150.0-alpha.8`。ChatGPT App 自动更新可能替换其内置二进制；运行中的旧进程继续在线不代表下一次重启仍兼容。若 `--version` 或 initialize 版本不同，应安装官方 `@openai/codex` 的同一精确版本，把本机 `.env` 的 `CODEX_BIN` 指向该版本的独立可执行文件，再运行完整 gate 与隔离真实冒烟。不要只修改 pin 字符串绕过检查。
+
+本次部署使用 `.tools/codex-0.150.0-alpha.8/` 下的官方 npm macOS 架构包；`.tools` 与 `.env` 不提交 Git。升级协议仍按 [协议升级流程](../spec/architecture/08-operations-protocol-and-evolution.md) 执行。

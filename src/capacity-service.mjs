@@ -6,7 +6,7 @@ function expiry(milliseconds) {
 }
 
 export class CapacityService extends EventEmitter {
-  constructor({ db, maxRootTurns = 11, maxExecuteLeases = 2, leaseTtlMs = 30_000 }) {
+  constructor({ db, maxRootTurns = 11, maxExecuteLeases = maxRootTurns, leaseTtlMs = 30_000 }) {
     super();
     this.db = db;
     this.maxRootTurns = maxRootTurns;
@@ -74,7 +74,6 @@ export class CapacityService extends EventEmitter {
 
   #canStart(entry) {
     if (this.active.size >= this.maxRootTurns) return false;
-    if (entry.workspaceKey && [...this.active.values()].some((active) => active.workspaceKey === entry.workspaceKey)) return false;
     if (entry.mode !== 'execute') return true;
     return [...this.active.values()].filter((entry) => entry.mode === 'execute').length < this.maxExecuteLeases;
   }

@@ -28,6 +28,7 @@ if launch_job_exists "$TUNNEL_LABEL"; then
   if [[ -n "$TUNNEL_PID" ]]; then
     ADDRESS="$(sed -n '1p' "$PUBLIC_URL_FILE" 2>/dev/null || true)"
     echo "公网隧道已运行：${ADDRESS:-地址正在生成}（PID ${TUNNEL_PID}）"
+    [[ -n "$ADDRESS" ]] && print_portal_addresses "$ADDRESS"
     exit 0
   fi
   remove_launch_job "$TUNNEL_LABEL"
@@ -115,4 +116,5 @@ if ! public_health; then
   exit 1
 fi
 echo "公网隧道已启动：${ADDRESS}${TUNNEL_PID:+（PID ${TUNNEL_PID}）}"
+print_portal_addresses "$ADDRESS"
 [[ "$MODE" == "quick" ]] && echo "Quick Tunnel 重启后会生成新地址。"

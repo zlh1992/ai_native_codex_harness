@@ -11,9 +11,10 @@ test('generated app-server schema contains every native employee workflow contra
   assert.equal(loadConfig({}).codexCliVersion, version.codexCli);
   assert.ok(read('../src/codex-client.mjs').includes('Codex 协议版本不匹配'));
   const client = read('../protocol/generated/ClientRequest.ts');
-  for (const method of ['thread/read', 'thread/goal/set', 'thread/goal/get', 'skills/list', 'turn/start', 'turn/interrupt']) {
+  for (const method of ['thread/fork', 'thread/read', 'thread/goal/set', 'thread/goal/get', 'skills/list', 'turn/start', 'turn/interrupt', 'turn/steer']) {
     assert.match(client, new RegExp(`"${method.replace('/', '\\/')}"`));
   }
+  assert.ok(read('../protocol/generated/v2/TurnSteerParams.ts').includes('expectedTurnId: string'));
   const requests = read('../protocol/generated/ServerRequest.ts');
   for (const method of ['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/tool/call']) {
     assert.ok(requests.includes(`"method": "${method}"`));

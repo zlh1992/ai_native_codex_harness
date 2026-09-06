@@ -1,3 +1,5 @@
+import { rootModel } from './models.mjs';
+import { InputQueueService } from './input-queue-service.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -80,6 +82,7 @@ export class CodexService extends EventEmitter {
       db, maxRootTurns: config.portalMaxActiveRootTurns,
       maxExecuteLeases: config.portalMaxExecuteLeases, leaseTtlMs: config.executionLeaseTtlMs,
     });
+    this.inputQueue = new InputQueueService(this);
     this.loadedThreads = new Set();
     this.contextByThread = new Map();
     this.activeByChat = new Map();
@@ -87,6 +90,7 @@ export class CodexService extends EventEmitter {
     this.parentBySubagent = new Map();
     this.pendingChats = new Set();
     this.recoveringChats = new Set();
+    this.sharingAccesses = new Set();
     this.interruptedPendingChats = new Set();
     this.pendingByUser = new Map();
     this.pendingApprovals = new Map();
@@ -114,21 +118,23 @@ export class CodexService extends EventEmitter {
       await this.client.start();
       await this.#ensurePortalSkills();
       this.startError = null;
+      this.inputQueue.start();
     } catch (error) {
       this.skillsReady = false;
       this.startError = error;
+      this.inputQueue.pauseAll('CODEX_UNAVAILABLE');
       throw error;
     }
   }
-  stop() { this.client.stop(); }
+  stop() { this.inputQueue.stop(); this.client.stop(); }
 
   workspaceBusy(projectAccessId) {
     const recovering = [...this.recoveringChats].some((chatId) => this.db.getChat(chatId)?.projectAccessId === projectAccessId);
-    return recovering || this.capacity.hasWorkspace(projectAccessId) || this.db.runtimeForAccess(projectAccessId).busy;
+    return this.sharingAccesses.has(projectAccessId) || recovering || this.capacity.hasWorkspace(projectAccessId) || this.db.runtimeForAccess(projectAccessId).busy;
   }
 
   chatBusy(chatId) {
-    return this.recoveringChats.has(chatId) || this.activeByChat.has(chatId) || this.pendingChats.has(chatId)
+    return this.sharingAccesses.has(this.db.getChat(chatId)?.projectAccessId) || this.recoveringChats.has(chatId) || this.activeByChat.has(chatId) || this.pendingChats.has(chatId)
       || this.capacity.hasChat(chatId) || this.db.runtimeForChat(chatId).busy;
   }
 
@@ -152,9 +158,10 @@ export class CodexService extends EventEmitter {
     return [
       'You are the coding agent inside Codex Harness Remote.',
       `The only authorized workspace for this conversation is: ${projectRoot}`,
-      'Use the host workspace_* tools for reads, whole-file writes, search, deletion, and approved commands; use the native apply_patch tool for focused edits.',
+      'Use the host workspace_* tools for reads, whole-file writes, search, deletion, and project-local commands; use the native apply_patch tool for focused edits.',
       'The built-in shell, browser, app, plugin, MCP, computer-use, and web tools are unavailable.',
-      'workspace_exec is authorized only when the current Portal turn mode is EXECUTE; in EDIT mode it will be rejected.',
+      'workspace_exec is authorized automatically only when the current Portal turn mode is EXECUTE; in EDIT mode it will be rejected.',
+      'Project-local file changes and EXECUTE commands do not require interactive user confirmation, but all project, path, reserved-directory, network, quota, and lifecycle boundaries remain enforced by the host.',
       `You may use native subagents when useful, but at most ${this.config.maxSubagentsPerRoot} may be active for this root thread and every spawned subagent must use ${this.config.subagentModel}.`,
       'Never request another subagent model. Explicit model overrides are forbidden by Portal policy.',
       'Never attempt to inspect host credentials, Codex state, environment secrets, parent directories, or another user workspace.',
@@ -178,7 +185,7 @@ export class CodexService extends EventEmitter {
 
   #threadOptions(context) {
     return {
-      model: this.config.codexModel,
+      model: context.model || rootModel(this.config, context.chat, context.user),
       modelProvider: this.config.codexModelProvider,
       cwd: this.workspace.projectRoot(context.project),
       approvalPolicy: 'on-request',
@@ -248,11 +255,61 @@ export class CodexService extends EventEmitter {
     return threadId;
   }
 
+  async prepareSharedChats({ sources, project, user, authorize }) {
+    const snapshots = [];
+    for (const source of sources) {
+      authorize();
+      let threadId = null;
+      let messages = this.db.listMessages(source.id, null).map((message) => ({
+        id: `shared:${message.id}`, turnId: message.turnId, role: message.role,
+        kind: message.kind, content: message.content, createdAt: message.createdAt,
+      }));
+      if (source.codexThreadId) {
+        await this.client.start();
+        authorize();
+        // Fork schema has no dynamicTools field; resume installs current Portal tools before execution.
+        const { dynamicTools, ...options } = this.#threadOptions({ project, user });
+        const result = await this.client.request('thread/fork', {
+          threadId: source.codexThreadId, ...options, ephemeral: false,
+        }, this.#controlTimeoutMs()).catch(() => {
+          throw new HttpError(502, 'SHARE_FORK_FAILED', '无法复制已有对话，未完成共享。请稍后重试。');
+        });
+        authorize();
+        invariant(result.thread?.modelProvider === this.config.codexModelProvider,
+          409, 'CODEX_PROVIDER_MISMATCH', '对话副本使用了不同的 Codex provider，未完成共享。');
+        threadId = result.thread?.id;
+        invariant(threadId && threadId !== source.codexThreadId,
+          502, 'SHARE_FORK_FAILED', '无法创建独立对话副本，未完成共享。');
+        const history = await this.client.request('thread/read', { threadId, includeTurns: true }, this.#controlTimeoutMs());
+        authorize();
+        const nativeMessages = [];
+        for (const turn of history.thread?.turns || []) {
+          for (const item of turn.items || []) {
+            const role = item.type === 'userMessage' ? 'user'
+              : item.type === 'agentMessage' && (item.phase === 'final_answer' || item.phase == null) ? 'assistant' : null;
+            if (!role) continue;
+            const content = role === 'user'
+              ? (item.content || []).filter((part) => part.type === 'text').map((part) => part.text).join('\n')
+                .replace(/^<!-- portal-mode:(?:EDIT|EXECUTE) -->\n/, '').replace(/^\$task-execution\n/, '')
+              : item.text || '';
+            const localIndex = messages.findIndex((message) => message.role === role && message.content === content);
+            const local = localIndex >= 0 ? messages.splice(localIndex, 1)[0] : null;
+            nativeMessages.push({ id: item.id, turnId: turn.id, role, content, createdAt: local?.createdAt });
+          }
+        }
+        messages = [...nativeMessages, ...messages];
+      }
+      snapshots.push({ source, threadId, messages });
+    }
+    return snapshots;
+  }
+
   #controlTimeoutMs() {
     return Math.min(30_000, Math.max(1_000, Number(this.config.codexRequestTimeoutMs) || 30_000));
   }
 
   async recoverChatThread({ chat, project, user, action, acknowledgeHistoryBreak = false }) {
+    invariant(!this.sharingAccesses.has(project.accessId), 409, 'WORKSPACE_BUSY', '项目正在共享，请稍后重试。');
     invariant(!this.recoveringChats.has(chat.id), 409, 'THREAD_RECOVERY_RUNNING', '该对话正在恢复线程，请等待当前操作完成。');
     this.recoveringChats.add(chat.id);
     try {
@@ -366,9 +423,13 @@ export class CodexService extends EventEmitter {
       };
     }
     if (event === 'approval_required') return { approvalId: data.approvalId || null, kind: data.kind || null };
-    if (event === 'approval_resolved') return { approvalId: data.approvalId || null, requestId: data.requestId || null, decision: data.decision || null };
+    if (event === 'approval_resolved') return {
+      approvalId: data.approvalId || null, requestId: data.requestId || null,
+      decision: data.decision || null, kind: data.kind || null, automatic: data.automatic === true,
+    };
     if (event === 'goal_updated') return { present: Boolean(data.goal), status: data.goal?.status || null };
     if (event === 'usage') return { tokenUsage: data.tokenUsage || null };
+    if (event === 'input_steered') return { inputId: data.inputId, turnRunId: data.turnRunId };
     if (event === 'turn_queued') return {
       turnRunId: data.turnRunId || null, position: data.position || null, mode: data.mode || null,
       executeLeases: data.executeLeases ?? null, maxExecuteLeases: data.maxExecuteLeases ?? null,
@@ -395,9 +456,11 @@ export class CodexService extends EventEmitter {
 
   #emitPersistent({ turnRunId, chatId, emit }, event, data = {}) {
     if (['assistant_delta', 'reasoning_delta', 'command_output'].includes(event)) {
+      this.emit('turnLiveEvent', { turnRunId, chatId, eventType: event, payload: data });
       try { emit(event, data); } catch { /* disconnected browser; terminal snapshot still persists */ }
       return null;
     }
+    if (event === 'diff_updated') this.emit('turnLiveEvent', { turnRunId, chatId, eventType: event, payload: data });
     const payload = this.#persistedEventPayload(event, data);
     const persisted = this.db.appendTurnEvent({
       turnRunId, chatId, eventType: event, payload,
@@ -419,6 +482,10 @@ export class CodexService extends EventEmitter {
       actorUserId: run.userId, action: 'turn.approval_required', targetType: 'turn_run', targetId: turnRunId,
       detail: { chatId, approvalId: payload.approvalId, kind: payload.kind },
     });
+    if (run && event === 'approval_resolved' && payload.automatic) this.db.audit({
+      actorUserId: run.userId, action: 'turn.approval_auto_accepted', targetType: 'turn_run', targetId: turnRunId,
+      detail: { chatId, approvalId: payload.approvalId, kind: payload.kind },
+    });
     if (run && (event === 'turn_completed' || event === 'turn_error')) this.db.audit({
       actorUserId: run.userId, action: event === 'turn_completed' ? 'turn.completed' : 'turn.failed',
       targetType: 'turn_run', targetId: turnRunId,
@@ -429,7 +496,9 @@ export class CodexService extends EventEmitter {
     return persisted.id;
   }
 
-  async runTurn({ chat, project, user, prompt, effort, mode = 'edit', emit }) {
+  async runTurn({ chat, project, user, prompt, effort, mode = 'execute', emit, inputId = null }) {
+    invariant(inputId || !this.db.listChatInputs(chat.id).length, 409, 'INPUT_QUEUE_PENDING', '请通过消息队列发送，以保持发送顺序。');
+    const model = rootModel(this.config, chat, user);
     const text = messageText(prompt);
     invariant(text.length > 0 && text.length <= 100_000, 400, 'INVALID_PROMPT', '消息长度必须为 1–100000 个字符。');
     invariant(TURN_MODES.has(mode), 400, 'INVALID_TURN_MODE', '任务模式必须是 EDIT 或 EXECUTE。');
@@ -441,12 +510,13 @@ export class CodexService extends EventEmitter {
       invariant(refreshedUser.networkAccess === expectedNetworkAccess, 409, 'USER_POLICY_CHANGED', '用户网络策略已变化，请重新提交任务。');
       const refreshedProject = this.db.getProjectForUser(project.id, refreshedUser.id);
       invariant(refreshedProject && refreshedProject.accessId === expectedAccessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已撤销。');
-      const refreshedActive = [...this.activeByChat.values()].filter((entry) => entry.user.id === refreshedUser.id).length;
+      const refreshedActive = [...this.activeByChat.values()].filter((entry) => entry.user.id === refreshedUser.id && entry.chat.id !== chat.id).length;
       invariant(refreshedActive < refreshedUser.maxConcurrentTurns, 429, 'USER_CONCURRENCY_LIMIT', '已达到该用户的并发任务上限。');
       return { refreshedUser, refreshedProject };
     };
     ({ refreshedUser: user, refreshedProject: project } = refreshExecutionPolicy());
     invariant(!this.activeByChat.has(chat.id) && !this.pendingChats.has(chat.id), 409, 'TURN_ALREADY_RUNNING', '该对话已有任务在运行。');
+    invariant(!this.sharingAccesses.has(project.accessId), 409, 'WORKSPACE_BUSY', '项目正在共享，请稍后重试。');
     invariant(!this.recoveringChats.has(chat.id), 409, 'THREAD_RECOVERY_RUNNING', '该对话正在恢复线程，请等待当前操作完成。');
     invariant(this.globalActive + this.globalPending < this.config.codexMaxConcurrentTurns, 429, 'CODEX_BUSY', '本机 Codex 并发已满，请稍后重试。');
     const userActive = [...this.activeByChat.values()].filter((entry) => entry.user.id === user.id).length;
@@ -459,13 +529,23 @@ export class CodexService extends EventEmitter {
       invariant(task.version === chat.taskVersion && ['active', 'rework'].includes(task.status), 409, 'TASK_STALE', '任务已提交或版本已变化，请刷新任务列表。');
     }
     this.#assertProjectAgentPolicy(project);
-    const turnRun = this.db.createTurnRun({ chat, project, userId: user.id, mode });
-    this.db.addMessage({
-      id: `user:${turnRun.id}`, chatId: chat.id, turnId: turnRun.id, role: 'user', content: text,
-      metadata: { turnRunId: turnRun.id, mode, taskId: chat.taskId || null, taskVersion: chat.taskVersion || null },
-    });
+    let turnRun;
+    this.db.db.exec('BEGIN IMMEDIATE');
+    try {
+      turnRun = this.db.createTurnRun({ chat, project, userId: user.id, mode });
+      this.db.addMessage({
+        id: `user:${turnRun.id}`, chatId: chat.id, turnId: turnRun.id, role: 'user', content: text,
+        metadata: { turnRunId: turnRun.id, mode, taskId: chat.taskId || null, taskVersion: chat.taskVersion || null },
+      });
+      if (inputId) {
+        const input = this.db.getChatInput(chat.id, inputId);
+        invariant(input?.status === 'queued', 409, 'INPUT_CHANGED', '排队消息已变化。');
+        this.db.changeChatInput(chat.id, inputId, input.revision, { status: 'sent', prompt: '', turnRunId: turnRun.id });
+      }
+      this.db.db.exec('COMMIT');
+    } catch (error) { this.db.db.exec('ROLLBACK'); throw error; }
     const persistentEmit = (event, data) => this.#emitPersistent({ turnRunId: turnRun.id, chatId: chat.id, emit }, event, data);
-    const context = { chat, project, user, mode, turnRunId: turnRun.id };
+    const context = { chat, project, user, mode, model, turnRunId: turnRun.id };
     this.pendingChats.add(chat.id);
     this.globalPending += 1;
     this.pendingByUser.set(user.id, userPending + 1);
@@ -561,7 +641,7 @@ export class CodexService extends EventEmitter {
           ...skillInput,
         ],
         cwd: this.workspace.projectRoot(project),
-        model: this.config.codexModel,
+        model: context.model,
         effort: reasoningEffort,
         approvalPolicy: 'on-request',
         approvalsReviewer: 'user',
@@ -609,10 +689,11 @@ export class CodexService extends EventEmitter {
   }
 
   async interrupt(chatId) {
+    const paused = this.db.pauseChatInputs(chatId);
     if (this.capacity.cancelChat(chatId)) return true;
     const active = this.activeByChat.get(chatId);
     if (!active) {
-      if (!this.pendingChats.has(chatId)) return false;
+      if (!this.pendingChats.has(chatId)) return paused > 0;
       this.interruptedPendingChats.add(chatId);
       return true;
     }
@@ -624,6 +705,7 @@ export class CodexService extends EventEmitter {
   }
 
   async interruptUser(userId) {
+    for (const chat of this.db.listChats({ userId })) this.db.pauseChatInputs(chat.id, 'USER_INTERRUPTED');
     const pendingChatIds = [...this.pendingChats].filter((chatId) => this.db.getChat(chatId)?.userId === userId);
     for (const chatId of pendingChatIds) this.interruptedPendingChats.add(chatId);
     const queued = this.capacity.cancelUser(userId);
@@ -755,7 +837,7 @@ export class CodexService extends EventEmitter {
   async historyForChat(chat, authorize = () => {}) {
     if (!chat.codexThreadId) {
       authorize();
-      return this.db.listMessages(chat.id);
+      return this.db.listMessages(chat.id, null);
     }
     try {
       await this.client.start();
@@ -767,18 +849,20 @@ export class CodexService extends EventEmitter {
       const usedRuns = new Set();
       for (const turn of result.thread?.turns || []) {
         const finalText = [...(turn.items || [])].reverse().find((item) => item.type === 'agentMessage' && (item.phase === 'final_answer' || item.phase == null))?.text;
-        const run = this.db.getTurnRunByCodexTurn(turn.id)
-          || runs.find((candidate) => !usedRuns.has(candidate.id) && candidate.codexThreadId === chat.codexThreadId
-            && candidate.finalReplySnapshot && candidate.finalReplySnapshot === finalText)
-          || runs.find((candidate) => !usedRuns.has(candidate.id) && candidate.codexThreadId === chat.codexThreadId);
+        const nativeRun = this.db.getTurnRunByCodexTurn(turn.id);
+        const run = (nativeRun?.chatId === chat.id ? nativeRun : null)
+          || (!chat.sourceChatId && runs.find((candidate) => !usedRuns.has(candidate.id) && candidate.codexThreadId === chat.codexThreadId
+            && candidate.finalReplySnapshot && candidate.finalReplySnapshot === finalText))
+          || (!chat.sourceChatId && runs.find((candidate) => !usedRuns.has(candidate.id) && candidate.codexThreadId === chat.codexThreadId));
         if (run) usedRuns.add(run.id);
+        let userIndex = 0;
         for (const item of turn.items || []) {
           if (item.type === 'userMessage') {
             const content = (item.content || []).filter((part) => part.type === 'text').map((part) => part.text).join('\n')
               .replace(/^<!-- portal-mode:(?:EDIT|EXECUTE) -->\n/, '').replace(/^\$task-execution\n/, '');
             messages.push({
               id: item.id, chatId: chat.id, turnId: turn.id, role: 'user', kind: 'message', content,
-              metadata: { turnRunId: run?.id || null, mode: run?.mode || null }, createdAt: run?.createdAt || null,
+              metadata: { turnRunId: run?.id || null, mode: run?.mode || null, additionalInput: userIndex++ > 0 }, createdAt: run?.createdAt || null,
             });
           }
           if (item.type === 'agentMessage' && (item.phase === 'final_answer' || item.phase == null)) {
@@ -796,9 +880,17 @@ export class CodexService extends EventEmitter {
       }
       for (const message of messages) {
         const runId = message.metadata?.turnRunId;
-        const persistedId = runId && message.role === 'user' ? `user:${runId}`
+        const queuedSteer = message.role === 'user' && message.metadata?.additionalInput
+          && this.db.getChatInput(chat.id, message.id);
+        if (queuedSteer?.turn_run_id === runId && ['steering', 'sent'].includes(queuedSteer.status)) {
+          message.metadata.steered = true; message.metadata.inputId = queuedSteer.id;
+        }
+        const steer = message.role === 'user' && message.metadata?.additionalInput
+          && this.db.listMessages(chat.id, null).find((local) => local.metadata?.steered
+            && local.metadata.turnRunId === runId && (local.metadata.inputId === message.id || local.content === message.content));
+        const persistedId = (message.metadata?.steered ? `steer:${message.metadata.inputId}` : steer?.id) || (runId && message.role === 'user' && !message.metadata?.additionalInput ? `user:${runId}`
           : runId && message.role === 'assistant' ? `assistant:${runId}`
-            : `native:${chat.id}:${message.id}`;
+            : `native:${chat.id}:${message.id}`);
         this.db.addMessage({
           id: persistedId, chatId: chat.id, turnId: message.turnId, role: message.role,
           kind: message.kind, content: message.content, metadata: message.metadata, createdAt: message.createdAt,
@@ -808,7 +900,7 @@ export class CodexService extends EventEmitter {
     } catch (error) {
       authorize();
       this.emit('log', { level: 'warn', message: `读取 Codex thread 历史失败，回退旧缓存: ${error.message}` });
-      return this.db.listMessages(chat.id);
+      return this.db.listMessages(chat.id, null);
     }
   }
 
@@ -1022,14 +1114,17 @@ export class CodexService extends EventEmitter {
         this.#emit(active, 'security_warning', { message: 'Portal 已拒绝越界路径或错误模式的批准请求。' });
         return;
       }
+      const currentUser = this.db.getUserById(active.user.id);
+      invariant(currentUser?.status === 'active', 403, 'USER_DISABLED', '该用户已停用。');
+      invariant(currentUser.networkAccess === active.user.networkAccess, 409, 'USER_POLICY_CHANGED', '用户网络策略已变化。');
+      const currentProject = this.db.getProjectForUser(active.project.id, active.user.id);
+      invariant(currentProject && currentProject.accessId === active.project.accessId,
+        403, 'PROJECT_ACCESS_REVOKED', '项目授权已撤销。');
       const approvalId = `rpc:${message.id}`;
-      const request = this.#publicApprovalRequest(message.params || {}, fileTargets);
-      this.db.createApproval({
-        id: approvalId, turnRunId: active.turnRunId, chatId: active.chat.id, userId: active.user.id,
-        kind, itemId: message.params?.itemId || null, request,
+      this.#recordAutomaticApproval(active, kind, message.params || {}, {
+        approvalId, fileTargets, itemId: message.params?.itemId || message.params?.callId || null,
       });
-      this.pendingApprovals.set(approvalId, { rpcId: message.id, active, kind, fileTargets });
-      this.#emit(active, 'approval_required', { approvalId, kind, request });
+      this.client.respond(message.id, { decision: 'accept' });
       return;
     }
     this.client.respondError(message.id, -32601, `Codex Harness 不支持服务端请求: ${message.method}`);
@@ -1117,17 +1212,17 @@ export class CodexService extends EventEmitter {
     }
   }
 
-  #requestPortalApproval(active, kind, request) {
-    const approvalId = `portal:${randomUUID()}`;
-    const safeRequest = this.#publicApprovalRequest(request);
+  #recordAutomaticApproval(active, kind, request, {
+    approvalId = `auto:${randomUUID()}`, fileTargets = null, itemId = null,
+  } = {}) {
+    const safeRequest = this.#publicApprovalRequest(request, fileTargets);
     this.db.createApproval({
       id: approvalId, turnRunId: active.turnRunId, chatId: active.chat.id, userId: active.user.id,
-      kind, itemId: request.itemId || null, request: safeRequest,
+      kind, itemId: itemId || request.itemId || null, request: safeRequest,
     });
-    return new Promise((resolve) => {
-      this.pendingApprovals.set(approvalId, { resolve, active, kind });
-      this.#emit(active, 'approval_required', { approvalId, kind, request: safeRequest });
-    });
+    const resolved = this.db.resolveApproval(approvalId, 'accepted');
+    this.#emit(active, 'approval_resolved', { approvalId, decision: 'accept', kind, automatic: true });
+    return resolved;
   }
 
   #cancelApprovalsForActive(active) {
@@ -1178,7 +1273,7 @@ export class CodexService extends EventEmitter {
     if (name === 'workspace_read_file') return this.workspace.readFile(project, args.path);
     if (name === 'workspace_write_file') {
       let previous = 0;
-      try { previous = fs.statSync(this.workspace.resolve(project, args.path, { mustExist: true }).target).size; } catch { /* new file */ }
+      try { previous = this.workspace.fileMetadata(project, args.path).size; } catch { /* new file */ }
       this.#assertQuota(currentUser, Buffer.byteLength(String(args.content)), previous);
       return this.workspace.writeFile(project, args.path, args.content);
     }
@@ -1212,24 +1307,25 @@ export class CodexService extends EventEmitter {
       invariant(active.mode === 'execute', 403, 'EXECUTE_MODE_REQUIRED', 'EDIT 模式禁止执行命令；请切换到 EXECUTE 后重试。');
       const command = String(args.command || '');
       invariant(command.length > 0 && command.length <= 50_000, 400, 'INVALID_COMMAND', '命令长度必须为 1–50000。');
-      const decision = await this.#requestPortalApproval(active, 'command', {
-        command, cwd: String(args.cwd || '.'),
-        reason: 'Codex 请求在当前项目的 Seatbelt 沙箱中执行命令。',
-      });
-      invariant(decision === 'accept', 403, 'COMMAND_DECLINED', decision === 'cancel' ? '命令已取消。' : '命令未获批准。');
+      const cwd = String(args.cwd || '.');
+      invariant(this.#approvalPathAllowed(active, 'command', { cwd }), 403, 'COMMAND_CWD_FORBIDDEN', '命令工作目录必须位于当前项目内。');
       const approvedUser = this.db.getUserById(user.id);
       invariant(approvedUser?.status === 'active', 403, 'USER_DISABLED', '该用户已停用。');
       invariant(approvedUser.networkAccess === user.networkAccess, 409, 'USER_POLICY_CHANGED', '用户网络策略已变化。');
       const approvedProject = this.db.getProjectForUser(active.project.id, user.id);
       invariant(approvedProject && approvedProject.accessId === active.project.accessId,
         403, 'PROJECT_ACCESS_REVOKED', '项目授权已撤销。');
+      this.#recordAutomaticApproval(active, 'command', {
+        command, cwd,
+        reason: 'Portal 已按项目完全访问策略自动允许在当前项目的 Seatbelt 沙箱中执行命令。',
+      });
       const controller = new AbortController();
       active.commandControllers.add(controller);
       let result;
       try {
         result = await runSandboxedCommand({
           config: this.config, workspace: this.workspace, project: approvedProject, user: approvedUser,
-          command, cwd: args.cwd || '', signal: controller.signal,
+          command, cwd, signal: controller.signal,
         });
       } finally {
         active.commandControllers.delete(controller);
@@ -1249,6 +1345,7 @@ export class CodexService extends EventEmitter {
     this.#cancelApprovalsForActive(active);
     const rawStatus = turn?.status || error?.turnStatus || (error ? 'failed' : 'completed');
     const status = ['completed', 'failed', 'cancelled', 'interrupted'].includes(rawStatus) ? rawStatus : error ? 'failed' : 'completed';
+    if (status !== 'completed') this.db.pauseChatInputs(active.chat.id, 'TURN_STOPPED');
     this.db.updateChat(active.chat.id, { status: 'idle' });
     this.db.updateTurnRun(active.turnRunId, {
       status, completedAt: new Date().toISOString(), errorMessage: error?.message || null,
@@ -1292,6 +1389,7 @@ export class CodexService extends EventEmitter {
   }
 
   #onExit(error) {
+    this.inputQueue.pauseAll('CODEX_UNAVAILABLE');
     this.loadedThreads.clear();
     this.contextByThread.clear();
     this.parentBySubagent.clear();

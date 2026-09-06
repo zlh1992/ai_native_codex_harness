@@ -31,7 +31,7 @@ node src/cli.mjs reset-password --username=superadmin
 驾驶舱点击“创建用户”，填写用户名、显示名称和至少 12 位的初始密码。建议：
 
 - 默认关闭公网命令；确需 `npm install`、Git fetch 或联网构建时再开启。
-- App Server 全局 turn 硬上限为 40，Portal 同时运行的 root turn 硬上限为 11，其中 EXECUTE 最多占 2 个 lease；如需控制某个账号的资源占用，可在“管理”中单独调低。
+- App Server 全局 turn 硬上限为 40，Portal 同时运行的 root turn 硬上限为 11，默认 EXECUTE 可占用全部 11 个 lease；如需控制某个账号的资源占用，可在“管理”中单独调低。
 - 默认给 2 GB、100 个项目，观察空间和 Codex 配额后调整。
 - 通过独立安全渠道发用户名和初始密码，要求用户首次登录后由管理员重置成约定的新密码。目前没有自助改密入口。
 
@@ -71,10 +71,16 @@ npm run gate
 
 进程管理：`start-public.sh` 启动本地服务和公网隧道；`stop-tunnel.sh` 只关闭公网；`start-tunnel.sh` 恢复公网；`stop.sh` 才会关闭全部。本项目使用自己的 `.tools/cloudflared`，不依赖其他 Harness 项目的进程或工具目录。
 
-修改 `.env` 后重启服务。升级 Codex 或修改权限、任务、事件代码后必须运行 `npm run gate`。它固定执行“老板项目 → 双员工独立授权 → 同 tree 串行/文件锁 → 运行中项目禁止删除 → 员工任务提交 → 老板审核推进 → SSE 游标重放及跨边界拒绝 → 运行中撤权排空 → 脏树恢复 → resume 失败显式恢复”的隔离端到端验收。
+修改 `.env` 后重启服务。升级 Codex 或修改权限、任务、事件代码后必须运行 `npm run gate`。它固定执行“老板项目 → 双员工独立授权 → 同 access 多 chat 并发/浏览器文件锁 → 运行中项目禁止删除 → 员工任务提交 → 老板审核推进 → SSE 游标重放及跨边界拒绝 → 运行中撤权排空 → 脏树恢复 → resume 失败显式恢复”的隔离端到端验收。
 
 请从 macOS 主机终端或具备 loopback 监听及 Seatbelt 权限的 CI 执行完整门控。受限代理沙箱通常禁止监听临时端口及嵌套 `sandbox-exec`；遇到这类环境错误应切换到主机执行，不能跳过安全和 HTTP 端到端用例后宣称门控通过。
 
 ## 事件处理
 
 怀疑账号泄露：在驾驶舱停用用户或重置密码；检查审计；按需关闭隧道。怀疑 Cloudflare token 泄露：在 Cloudflare 控制台旋转 token，重新运行 `save-cloudflare-tunnel-token.sh`。怀疑本机 Codex 登录泄露：先停止 Harness，再在 Codex/ChatGPT 中撤销登录并重新认证。
+
+## 角色入口与分享历史
+
+老板本地入口为 [老板登录](http://127.0.0.1:4310/boss/login)，员工为 [员工登录](http://127.0.0.1:4310/employee)。公网在同一 HTTPS 域名后分别加 `/boss/login`、`/employee`；`PUBLIC_ORIGIN` 仍只配置 origin，不含这些路径。老板登录后进入 `/boss`，自己的项目工作台位于 `/boss/workbench`。
+
+新 share 会把老板在该项目已有的所有对话与文件一并分享。每名员工获得独立 Git worktree 与独立 Codex 对话副本，可以直接从历史继续；后续员工和老板的聊天相互独立，文件也不会自动写回，任务验收交付仍通过 submission。分享要求老板工作区空闲；任何对话 fork 失败则整次授权失败，可排查后重试。恢复保留的旧授权会继续使用员工原有对话，不重新复制或覆盖；升级前已有的 active 授权不会被自动补发历史。

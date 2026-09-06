@@ -36,7 +36,7 @@ async function api(url, options = {}) {
   const response = await fetch(url, { ...options, headers, credentials: 'same-origin' });
   const payload = response.headers.get('content-type')?.includes('json') ? await response.json() : null;
   if (!response.ok) {
-    if (response.status === 401) location.replace('/');
+    if (response.status === 401) location.replace('/boss/login');
     const error = new Error(payload?.error?.message || `请求失败 (${response.status})`);
     error.code = payload?.error?.code;
     throw error;
@@ -88,14 +88,14 @@ function renderProjects() {
     const mine = project.userId === state.me.id;
     const shares = project.sharedAccesses || [];
     const sharedUserIds = new Set(shares.map((access) => access.userId));
-    const shareRows = shares.map((access) => `<div class="share-row"><span class="share-state">${escapeHtml(access.displayName || access.username)} (@${escapeHtml(access.username)}) · 独立 worktree</span><button class="secondary danger" data-revoke="${project.id}" data-access="${access.id}">撤权</button></div>`).join('');
+    const shareRows = shares.map((access) => `<div class="share-row"><span class="share-state">${escapeHtml(access.displayName || access.username)} (@${escapeHtml(access.username)}) · 独立文件与对话 · 基线 ${escapeHtml((access.baseSha || 'unknown').slice(0, 12))}</span><button class="secondary danger" data-revoke="${project.id}" data-access="${access.id}">撤权</button></div>`).join('');
     let actions = '<span class="share-state">🔒 老板无内容访问权</span>';
     if (mine) {
       if (project.repoKind !== 'git') {
-        actions = `<button class="primary" data-init-git="${project.id}">初始化 Git</button><a class="secondary" href="/?workbench=1&project=${project.id}">打开</a>`;
+        actions = `<button class="primary" data-init-git="${project.id}">初始化 Git</button><a class="secondary" href="/boss/workbench?project=${project.id}">打开</a>`;
       } else {
         const available = employees().some((user) => user.status === 'active' && !sharedUserIds.has(user.id));
-        actions = `${shareRows}<div class="share-add">${available ? `<select data-share-user="${project.id}">${employeeOptions(sharedUserIds)}</select><button class="primary" data-grant="${project.id}">授权 / 恢复</button>` : ''}<a class="secondary" href="/?workbench=1&project=${project.id}">打开</a></div>`;
+        actions = `${shareRows}<p class="share-state">新共享包含当前文件与老板已有全部对话；双方后续独立。</p><div class="share-add">${available ? `<select data-share-user="${project.id}">${employeeOptions(sharedUserIds)}</select><button class="primary" data-grant="${project.id}">共享 / 恢复</button>` : ''}<a class="secondary" href="/boss/workbench?project=${project.id}">打开</a></div>`;
       }
     }
     return `<article class="project-card ${mine ? 'mine' : ''}">
@@ -157,7 +157,7 @@ async function grant(projectId, fixedUserId = '') {
   if (!userId) return toast('先选择一名员工。', 'error');
   try {
     const result = await api(`/api/admin/projects/${projectId}/shares`, { method: 'POST', body: { userId } });
-    toast(result.restored ? '已恢复该员工原有 worktree 与授权。' : '已创建独立 worktree 并授权。');
+    toast(result.restored ? '已恢复该员工原有 worktree、对话与授权。' : `已从 Git 基线 ${String(result.access?.baseSha || '').slice(0, 12)} 创建独立 worktree，已复制 ${result.copiedChats || 0} 段对话。`);
     await load();
   } catch (error) { toast(error.message, 'error'); }
 }
@@ -186,7 +186,7 @@ $('#new-user').addEventListener('click', () => openUser());
 $('#new-project').addEventListener('click', () => { $('#project-form').reset(); $('.form-error', $('#project-form')).textContent = ''; $('#project-dialog').showModal(); });
 $('#refresh').addEventListener('click', () => load().catch((error) => toast(error.message, 'error')));
 $('#refresh-audit').addEventListener('click', () => loadAudit().catch((error) => toast(error.message, 'error')));
-$('#logout').addEventListener('click', async () => { try { await api('/api/logout', { method: 'POST' }); } finally { location.replace('/'); } });
+$('#logout').addEventListener('click', async () => { try { await api('/api/logout', { method: 'POST' }); } finally { location.replace('/boss/login'); } });
 
 $('#confirm-form').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -251,12 +251,12 @@ $('#project-form').addEventListener('submit', async (event) => {
 async function bootstrap() {
   try {
     const data = await api('/api/me');
-    if (data.user.role !== 'admin') return location.replace('/');
+    if (data.user.role !== 'admin') return location.replace('/employee');
     state.me = data.user;
     state.csrf = data.csrfToken;
     await load();
   } catch (error) {
-    if (!state.me) location.replace('/');
+    if (!state.me) location.replace('/boss/login');
     else toast(error.message, 'error');
   }
 }

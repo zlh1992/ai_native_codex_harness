@@ -106,3 +106,9 @@ stop_owned_pid() {
   rm -f "$file"
   echo "${label}：已停止"
 }
+
+print_portal_addresses() {
+  local portal_base="${1%/}"
+  echo "老板登录：${portal_base}/boss/login"
+  echo "员工登录：${portal_base}/employee"
+}

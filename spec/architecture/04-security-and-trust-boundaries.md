@@ -7,8 +7,8 @@
 - 读取或写入其他用户/其他 access 的项目内容；
 - 猜测 project/chat/run/approval id 后越权；
 - 用路径穿越、符号链接、`.git` 或 `.codex` 访问宿主敏感数据；
-- 自选 Codex thread、cwd、sandbox policy、模型或任意 JSON-RPC method；
-- 在 EDIT 模式执行命令，或在未批准的 EXECUTE 中运行命令；
+- 自选 Codex thread、cwd、sandbox policy、白名单之外的模型或任意 JSON-RPC method；
+- 在 EDIT 模式执行命令，或让 EXECUTE 命令逃逸当前项目、独立 runtime 与账号网络策略；
 - 从命令环境读取 Portal、隧道或 Codex 凭据；
 - 利用 SSE cursor 或 submission 引用跨 chat、跨用户读取信息。
 
@@ -39,15 +39,30 @@ session user
 
 管理员驾驶舱读取跨用户项目时只拿元数据。任何文件、chat 或 turn 路由仍通过 `projectFor(session, projectId)`，不能因为 `role=admin` 绕过内容 ACL。
 
-敏感异步操作在 await 后必须重新校验授权，尤其是：创建/恢复 worktree、thread resume/start、skill discovery、排队转运行、批准处理、动态工具执行、显式 thread reset，以及返回 chat history、goal 或 spreadsheet preview 等受 ACL 内容之前。复验同时检查原 session 仍存在。
+### 超级管理员账号接管与宿主机边界
+
+当前产品信任唯一超级管理员处理员工账号恢复。管理员可在受认证、CSRF/Origin 保护的管理更新流程中为员工设置新密码；该流程撤销员工已有 Web 会话并排空运行。管理员随后若以员工账号和新密码登录，内容路由会像处理任何该员工会话一样，根据员工既有 `project_access` 放行。这是账号接管，不是破解员工原密码，也不是管理员会话存在文件、chat 或 turn 的直接 ACL 旁路。
+
+因此，Portal 的内容 ACL 保证“老板以自己的账号不能直接打开员工未分享项目”，但不保证“超级管理员主动操作后仍无法读取员工内容”。密码、session token 与内容不得写入审计；审计只记录脱敏的账号更新与排空结果。
+
+Web ACL 也不约束运行 Portal 的 Mac 操作系统账号或其他宿主机管理者：控制该主机的人可以直接读取项目主目录、worktree、trash 或数据库附近的文件，而无需通过 Portal。若需要对超级管理员或宿主机管理者保密，必须采用不同的账号恢复信任模型，以及独立 OS 身份、存储和执行环境。
+
+敏感异步操作在 await 后必须重新校验授权，尤其是：上传/解析请求体、创建/恢复 worktree、thread resume/start、skill discovery、排队转运行、批准处理、动态工具执行、显式 thread reset，以及返回 chat history、goal 或 spreadsheet preview 等受 ACL 内容之前。复验同时检查原 session 仍存在，并要求重新解析出的 `project_access.id` 与操作开始时一致；撤权后即使同一用户获得新 access，旧请求也不能改写新 tree。
 
 ## 文件路径与 Git
 
 - 所有客户端路径先转成受控项目相对路径，再在服务端解析 canonical target。
 - 拒绝绝对路径、空目标的危险操作、`..`、NUL、保留目录和越界符号链接；保留目录在 Unicode 规范化和大小写折叠后比较。
+- 主进程的 `lstat`/`realpath` 只做早期拒绝，不能作为最终竞态防线。树遍历、读取、写入、建目录和文件回收必须由独立 helper 在 Seatbelt 中执行；profile 只读当前 canonical project，写操作只额外开放当前 project 与本次 actor/access 的回收站目录。helper 再检查每个已存在路径分量，最终文件使用 `O_NOFOLLOW`，写入使用同目录临时文件加原子 rename。
 - 共享 worktree 的 `.git` 是指向 owner 仓库内部的 indirection，必须同时被文件 API 和 Seatbelt 隐藏。
 - 项目中的 `.codex` 和自定义 agent 配置不能改变 Portal 固定的工具、角色、模型或子代理策略。
 - 文件删除使用可恢复 trash；恢复必须由管理员在停服和核对 ACL 后执行。
+
+## HTML 主动内容预览
+
+`.html`/`.htm` 是不可信主动内容，不能像 Markdown 一样插入 Portal DOM，也不能以普通同源 iframe 运行。工作台默认用带 `sandbox="allow-scripts"` 且不含 `allow-same-origin` 的 iframe 打开经 `projectFor` 和 Workspace 边界读取的原始文件；原始 HTML 响应同时携带 CSP `sandbox allow-scripts`，使直接打开 URL 也不会恢复 Portal 同源身份。
+
+HTML 专用 CSP 允许自包含产物的内联脚本和样式，以及 `data:`/`blob:` 图片、字体和媒体；它拒绝 connect、form、frame、worker、object 与 base。预览脚本因此不能读取父页面、以 Portal 身份读取 API、提交表单或把自身变成同源应用。下载和源码编辑继续使用既有文件路由与版本控制，不新增管理员内容旁路。跨文件相对资源、外网依赖和完整浏览器导航不是当前预览契约。
 
 ## Codex 工具面
 
@@ -56,16 +71,17 @@ App Server 启动时关闭内置 Shell、unified exec、浏览器、插件、外
 允许的写入面分两类：
 
 1. `workspace_*` dynamic tools：每次调用都通过 Portal 上下文、ACL、路径和 turn mode 校验。
-2. 原生 apply-patch/file-change：Codex thread/turn 默认使用 `readOnly` sandbox，只有收到原生 approval 后才允许应用该次 patch。Portal 从 legacy `fileChanges` 或 v2 item/patch notification 得到完整目标集合，转为脱敏项目相对路径后逐项校验并展示。目标缺失、改变、越界、命中保留目录或请求持久 `grantRoot` 时 fail closed。这样普通 workspace 写入和跨请求的宽泛授权不能绕过 Portal 的文件目标校验；动态 `workspace_*` 写入仍由 Portal 自身执行。
+2. 原生 apply-patch/file-change：Codex thread/turn 默认使用 `readOnly` sandbox，由原生 approval 请求触发单次写入。Portal 从 legacy `fileChanges` 或 v2 item/patch notification 得到完整目标集合，转为脱敏项目相对路径后逐项校验；active user/access 复验成功后自动记录 accepted 并响应，目标缺失、越界、命中保留目录或请求持久 `grantRoot` 时 fail closed。这样无需用户逐次点击，也不把 workspace 扩成绕过 Portal 路径校验的宽泛可写根；动态 `workspace_*` 写入仍由 Portal 自身执行。
 
 原生 subagent 只能位于当前 root tree 内，数量最多 3，模型固定 Luna。Portal 检查可见的 collab item 与 thread settings；这降低误配置风险，但不等于证明共享 app-server 对恶意跨 root 行为具有进程级隔离。
 
 ## 命令沙箱
 
 - `workspace_exec` 只允许 EXECUTE turn。
-- 命令必须先有当前用户、chat、run 对应的 pending approval，并由浏览器接受。
+- 命令在当前用户、chat、run、active access、cwd 和模式校验后自动记录 accepted approval；不创建等待浏览器处理的 pending approval。
 - 子进程环境只保留最小 `PATH/HOME/TMPDIR/LANG/TERM/CI`；不展开继承整个 `process.env`。
-- Seatbelt 只允许当前 tree 与该用户 runtime 的必要访问；默认禁网。
+- `HOME` 与 `TMPDIR` 位于 `runtime/<user-id>/<project-access-id>/`；同一用户不同项目/access 不能读写彼此的 shell 启动文件、配置或临时缓存。
+- Seatbelt 只允许当前 tree 与该 access runtime 的必要访问；默认禁网。
 - 命令具有 wall timeout、CPU、进程、文件描述符和输出字节限制。
 
 Seatbelt 不是容器。完全不可信用户需要独立 OS 用户、VM/容器、独立磁盘 quota、独立 Codex 身份和独立 worker。
@@ -80,7 +96,7 @@ Seatbelt 不是容器。完全不可信用户需要独立 OS 用户、VM/容器�
 - raw diff 与完整工具参数/返回值；
 - 宿主绝对路径。
 
-允许记录 actor、资源 id、动作、状态、字节数、工具名称、审批类型、模型策略违规、final item id 和脱敏错误码。完整 final reply/diff 只作为 task submission/turn 的受 ACL 业务快照保存，不进入全局审计。
+允许记录 actor、资源 id、动作、状态、字节数、工具名称、自动审批类型、模型策略违规、final item id 和脱敏错误码。完整 final reply/diff 只作为 task submission/turn 的受 ACL 业务快照保存，不进入全局审计。
 
 ## 公网边界
 
@@ -88,3 +104,7 @@ Seatbelt 不是容器。完全不可信用户需要独立 OS 用户、VM/容器�
 - Quick Tunnel 地址是临时运行事实，不是稳定身份或长期访问控制。
 - 固定部署应设置明确 `PUBLIC_ORIGIN`、受管 tunnel token 文件和正确代理信任。
 - app-server stdio 永远只对 Portal 可见；浏览器不得直接获得 app-server 凭据或 capability token。
+
+角色专用登录 API 必须在创建 session 前检查账号角色；旧通用登录 API 保留兼容。角色入口分离不替代 API 的角色与内容 ACL。显式 owner share 允许把授权时已有完整对话复制给接收员工；副本仍严格属于接收者，不开放原 owner chat、run、SSE 或任务提交权限。
+
+老板可经既有 chat PATCH 接口修改 `preferredModel`（白名单 id 或 null）；此操作要求 admin、原 chat ACL、CSRF/Origin 且 chat 无运行/恢复/排队输入。员工无该权限，运行服务也强制员工使用默认模型。`/api/me` 的 `models` 仅向老板返回受控目录，目录不表示上游账号保证可用。

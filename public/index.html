@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <title>Codex Harness</title>
+  <title>员工工作台 · Codex Harness</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -13,7 +13,7 @@
     <section class="login-copy">
       <div class="wordmark"><span class="mark">C</span> CODEX / HARNESS</div>
       <p class="eyebrow">LOCAL MAC · REMOTE WORKBENCH</p>
-      <h1>把一台 Mac，变成一间安全的<br><em>Codex 工作室。</em></h1>
+      <h1>你的项目、任务与<br><em>独立 Codex 工作台。</em></h1>
       <p class="lede">独立账号、隔离项目、实时编程。代码留在管理员指定的本机工作区中。</p>
       <div class="trust-row">
         <span>独立工作区</span><span>受控命令沙箱</span><span>全量审计</span>
@@ -21,7 +21,7 @@
     </section>
     <section class="login-card">
       <div class="status-pill"><i></i><span id="login-health">正在连接本机服务</span></div>
-      <h2>登录工作台</h2>
+      <h2>员工登录</h2>
       <p>使用管理员分配给你的账号。</p>
       <form id="login-form">
         <label>用户名<input id="login-username" name="username" autocomplete="username" required autofocus></label>
@@ -44,6 +44,7 @@
       <div class="topbar-right">
         <span id="codex-status" class="backend-status"><i></i> Codex</span>
         <span id="model-badge" class="model-badge"></span>
+        <select id="model-select" class="model-badge hidden" aria-label="对话模型" title="选择当前对话的模型；任务和队列结束后可切换" disabled></select>
         <span id="user-chip" class="user-chip"></span>
         <button id="logout-button" class="icon-button" title="退出登录">↪</button>
       </div>
@@ -52,7 +53,7 @@
     <section id="tasks-view" class="employee-home">
       <div class="employee-hero">
         <div><p class="eyebrow">MY DELIVERY QUEUE</p><h1>我的任务</h1><p>只显示分配给你、且当前仍有项目访问权的工作。Codex 目标用于执行，任务提交仍需老板验收。</p></div>
-        <div class="capacity-card"><span>执行席位</span><b id="execute-capacity">0 / 2</b><small>EXECUTE 满员时自动排队，EDIT 不受影响</small></div>
+        <div class="capacity-card"><span>EXECUTE 并发</span><b id="execute-capacity">0 / 11</b><small>同项目不同对话可并行，达到总席位后排队</small></div>
       </div>
       <div class="employee-summary">
         <div><span>进行中</span><b id="task-active-count">0</b></div>
@@ -88,7 +89,7 @@
         <div class="stage-header">
           <div><p id="project-kicker" class="eyebrow">SELECT A PROJECT</p><h2 id="chat-title">欢迎使用 Codex Harness</h2></div>
           <div class="turn-controls">
-            <label>模式<select id="mode-select"><option value="edit">EDIT · 读写</option><option value="execute">EXECUTE · 命令</option></select></label>
+            <label>模式<select id="mode-select"><option value="execute">EXECUTE · 文件＋命令</option><option value="edit">EDIT · 仅文件读写</option></select></label>
             <label>推理强度<select id="effort-select"></select></label>
             <button id="stop-turn" class="danger-button hidden">停止</button>
           </div>
@@ -108,6 +109,7 @@
           <details id="diff-panel" class="insight-card hidden"><summary>本轮 diff</summary><pre></pre></details>
         </section>
         <form id="composer" class="composer">
+          <section id="input-queue" class="input-queue hidden" aria-label="待发送消息"></section>
           <textarea id="prompt-input" rows="1" maxlength="100000" placeholder="告诉 Codex 你想构建什么…" disabled></textarea>
           <button id="send-button" class="send-button" type="submit" disabled>↑</button>
           <div class="composer-foot"><span id="composer-context">选择一个对话后即可开始</span><span>⌘ Enter 发送</span></div>
@@ -198,5 +200,14 @@
 
   <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
   <script type="module" src="/app.js"></script>
+  <dialog id="queue-edit-dialog">
+    <form id="queue-edit-form" class="dialog-form">
+      <h2>编辑排队消息</h2>
+      <label for="queue-edit-input">消息内容</label>
+      <textarea id="queue-edit-input" rows="7" maxlength="100000" required></textarea>
+      <p id="queue-edit-error" class="form-error" role="alert"></p>
+      <div class="dialog-actions"><button class="secondary" value="cancel" formnovalidate>返回</button><button id="queue-edit-save" class="primary" value="save">保存修改</button></div>
+    </form>
+  </dialog>
 </body>
 </html>

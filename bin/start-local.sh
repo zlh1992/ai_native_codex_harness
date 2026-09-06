@@ -12,6 +12,7 @@ if launch_job_exists "$SERVER_LABEL"; then
   SERVER_PID="$(launch_job_pid "$SERVER_LABEL")"
   if local_health; then
     echo "本地服务已运行：http://127.0.0.1:${PORT}（PID ${SERVER_PID}）"
+    print_portal_addresses "http://127.0.0.1:${PORT}"
     exit 0
   fi
   remove_launch_job "$SERVER_LABEL"
@@ -46,6 +47,7 @@ for SECOND in {1..60}; do
     printf '%s\n' "$SERVER_PID" > "$SERVER_PID_FILE"
     chmod 600 "$SERVER_PID_FILE"
     echo "本地服务已启动：http://127.0.0.1:${PORT}（PID ${SERVER_PID}）"
+    print_portal_addresses "http://127.0.0.1:${PORT}"
     exit 0
   fi
   if local_codex_failed; then

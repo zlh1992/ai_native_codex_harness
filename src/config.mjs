@@ -22,6 +22,7 @@ function resolved(value, fallback) {
 export function loadConfig(env = process.env) {
   const dataDir = resolved(env.DATA_DIR, '.data');
   const codexMaxConcurrentTurns = Math.min(40, integer(env.CODEX_MAX_CONCURRENT_TURNS, 40, 1));
+  const portalMaxActiveRootTurns = Math.min(11, integer(env.PORTAL_MAX_ACTIVE_ROOT_TURNS, 11, 1));
   return Object.freeze({
     rootDir: ROOT_DIR,
     publicDir: path.join(ROOT_DIR, 'public'),
@@ -47,8 +48,9 @@ export function loadConfig(env = process.env) {
     codexReasoningEffort: env.CODEX_REASONING_EFFORT || 'high',
     codexRequestTimeoutMs: integer(env.CODEX_REQUEST_TIMEOUT_MS, 20 * 60 * 1000, 10_000),
     codexMaxConcurrentTurns,
-    portalMaxActiveRootTurns: Math.min(11, integer(env.PORTAL_MAX_ACTIVE_ROOT_TURNS, 11, 1)),
-    portalMaxExecuteLeases: Math.min(2, integer(env.PORTAL_MAX_EXECUTE_LEASES, 2, 1)),
+    portalMaxActiveRootTurns,
+    portalMaxExecuteLeases: Math.min(portalMaxActiveRootTurns,
+      integer(env.PORTAL_MAX_EXECUTE_LEASES, portalMaxActiveRootTurns, 1)),
     executionLeaseTtlMs: integer(env.EXECUTION_LEASE_TTL_MS, 30_000, 5_000),
     subagentModel: 'gpt-5.6-luna',
     maxSubagentsPerRoot: 3,

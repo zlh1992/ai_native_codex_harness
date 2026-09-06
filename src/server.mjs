@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { ROOT_MODELS, validateModel } from './models.mjs';
 
 import fs from 'node:fs';
 import http from 'node:http';
@@ -16,6 +17,7 @@ import { readBody, readJson, securityHeaders, sendJson, serveStatic, sse, sseHea
 
 const CURRENT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const INLINE_MIME = new Map([
+  ['.html', 'text/html; charset=utf-8'], ['.htm', 'text/html; charset=utf-8'],
   ['.png', 'image/png'], ['.jpg', 'image/jpeg'], ['.jpeg', 'image/jpeg'], ['.gif', 'image/gif'],
   ['.webp', 'image/webp'], ['.avif', 'image/avif'], ['.bmp', 'image/bmp'], ['.ico', 'image/x-icon'],
   ['.svg', 'image/svg+xml'], ['.pdf', 'application/pdf'], ['.txt', 'text/plain; charset=utf-8'],
@@ -23,6 +25,11 @@ const INLINE_MIME = new Map([
   ['.json', 'application/json; charset=utf-8'], ['.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
   ['.xlsm', 'application/vnd.ms-excel.sheet.macroEnabled.12'],
 ]);
+const HTML_PREVIEW_CSP = [
+  'sandbox allow-scripts', "default-src 'none'", "script-src 'unsafe-inline'", "style-src 'unsafe-inline'",
+  'img-src data: blob:', 'font-src data:', 'media-src data: blob:', "connect-src 'none'",
+  "frame-src 'none'", "worker-src 'none'", "object-src 'none'", "base-uri 'none'", "form-action 'none'",
+].join('; ');
 
 function loadDotEnv(file = path.resolve(CURRENT_DIR, '..', '.env')) {
   if (!fs.existsSync(file)) return;
@@ -188,6 +195,20 @@ function boundedInteger(value, field, min, max) {
   return number;
 }
 
+function turnMode(value, fallback = 'execute') {
+  const mode = String(value || fallback).toLowerCase();
+  invariant(TURN_MODES.has(mode), 400, 'INVALID_TURN_MODE', '任务模式必须是 EDIT 或 EXECUTE。');
+  return mode;
+}
+
+function expectedFileVersion(req) {
+  const raw = String(req.headers['if-match'] || '').trim();
+  if (!raw) return null;
+  const value = raw.replace(/^W\//, '').replace(/^"|"$/g, '');
+  invariant(/^[0-9a-f]{64}$/i.test(value), 400, 'INVALID_FILE_VERSION', 'If-Match 文件版本标识无效。');
+  return value;
+}
+
 function loginLimited(ip) {
   const cutoff = Date.now() - 15 * 60 * 1000;
   const recent = (loginAttempts.get(ip) || []).filter((timestamp) => timestamp > cutoff);
@@ -240,18 +261,24 @@ async function route(req, res) {
     sendJson(res, 200, { ok: true, codex: codexStatus.ready, codexState, initialized: db.countAdmins() > 0 }, config);
     return;
   }
-  if (req.method === 'POST' && pathname === '/api/login') {
+  if (req.method === 'POST' && ['/api/login', '/api/boss/login', '/api/employee/login'].includes(pathname)) {
     checkOrigin(req);
     const ip = clientIp(req);
     invariant(!loginLimited(ip), 429, 'LOGIN_RATE_LIMIT', '登录尝试过多，请 15 分钟后重试。');
     const body = await readJson(req, 16 * 1024);
-    const row = db.getUserAuthByUsername(String(body.username || '').trim());
-    const valid = row && row.status === 'active' && await verifyPassword(body.password, row.password_hash);
+    let row = db.getUserAuthByUsername(String(body.username || '').trim());
+    const verified = row && row.status === 'active' && await verifyPassword(body.password, row.password_hash);
+    const currentRow = verified ? db.getUserAuthByUsername(row.username) : null;
+    const valid = Boolean(currentRow && currentRow.id === row.id && currentRow.status === 'active'
+      && currentRow.password_hash === row.password_hash);
+    if (valid) row = currentRow;
     if (!valid) {
       recordLoginFailure(ip);
       db.audit({ action: 'auth.login_failed', targetType: 'user', targetId: row?.id || null, ip, detail: { username: String(body.username || '').slice(0, 64) } });
       throw new HttpError(401, 'LOGIN_FAILED', '用户名或密码错误，或账号已停用。');
     }
+    const expectedRole = pathname === '/api/boss/login' ? 'admin' : pathname === '/api/employee/login' ? 'user' : null;
+    invariant(!expectedRole || row.role === expectedRole, 403, 'LOGIN_ROLE_MISMATCH', '该账号不属于此登录入口，请使用对应的老板或员工入口。');
     loginAttempts.delete(ip);
     db.cleanSessions();
     const token = newSessionToken();
@@ -265,11 +292,18 @@ async function route(req, res) {
   }
 
   if (!pathname.startsWith('/api/')) {
-    if (!serveStatic(res, config, pathname)) sendJson(res, 404, { error: { code: 'NOT_FOUND', message: '页面不存在。' } }, config);
+    if (['/', '/index.html', '/boss.html'].includes(pathname)) {
+      const destination = pathname === '/boss.html' ? '/boss' : url.searchParams.get('workbench') === '1' ? '/boss/workbench' : '/employee';
+      res.writeHead(302, { ...securityHeaders(config), location: `${destination}${url.search}` });
+      res.end();
+      return;
+    }
+    const pages = { '/employee': '/index.html', '/boss': '/boss.html', '/boss/login': '/boss-login.html', '/boss/workbench': '/index.html' };
+    if (!serveStatic(res, config, pages[pathname] || pathname)) sendJson(res, 404, { error: { code: 'NOT_FOUND', message: '页面不存在。' } }, config);
     return;
   }
 
-  const session = requireSession(req);
+  let session = requireSession(req);
   if (req.method === 'POST' && pathname === '/api/logout') {
     requireMutation(req, session);
     db.deleteSession(session.tokenHash);
@@ -281,7 +315,7 @@ async function route(req, res) {
     const usage = userUsage(session.user.id);
     sendJson(res, 200, {
       user: session.user, csrfToken: session.csrfToken, usage,
-      model: config.codexModel, defaultEffort: config.codexReasoningEffort,
+      model: config.codexModel, models: session.user.role === 'admin' ? ROOT_MODELS : [], defaultEffort: config.codexReasoningEffort,
       efforts: [...EFFORTS], turnModes: [...TURN_MODES], codex: codex.status(),
     }, config);
     return;
@@ -294,6 +328,7 @@ async function route(req, res) {
   if (req.method === 'POST' && pathname === '/api/projects') {
     requireMutation(req, session);
     const body = await readJson(req);
+    session = refreshSession(session);
     const ownerId = session.user.id;
     const owner = db.getUserById(ownerId);
     invariant(owner && owner.status === 'active', 404, 'USER_NOT_FOUND', '项目所有者不存在或已停用。');
@@ -326,8 +361,11 @@ async function route(req, res) {
   if (match && req.method === 'PATCH') {
     requireMutation(req, session);
     let project = ownerProject(projectFor(session, match[1]));
+    const expectedAccessId = project.accessId;
     const body = await readJson(req);
+    session = refreshSession(session);
     project = ownerProject(projectFor(session, match[1]));
+    invariant(project.accessId === expectedAccessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已变化。');
     const updated = db.updateProject(project.id, {
       name: body.name === undefined ? project.name : shortText(body.name, '项目名称'),
       description: body.description === undefined ? project.description : String(body.description).trim().slice(0, 1000),
@@ -364,6 +402,7 @@ async function route(req, res) {
     const file = workspace.readBuffer(project, url.searchParams.get('path') || '');
     const extension = path.extname(file.path).toLowerCase();
     const mime = INLINE_MIME.get(extension) || 'application/octet-stream';
+    const isHtmlPreview = extension === '.html' || extension === '.htm';
     const filename = path.basename(file.path);
     let start = 0;
     let end = file.size - 1;
@@ -381,7 +420,9 @@ async function route(req, res) {
     const body = file.buffer.subarray(start, end + 1);
     res.writeHead(status, {
       ...securityHeaders(config),
-      'content-security-policy': "default-src 'none'; img-src data:; style-src 'unsafe-inline'",
+      'content-security-policy': isHtmlPreview
+        ? HTML_PREVIEW_CSP
+        : "default-src 'none'; img-src data:; style-src 'unsafe-inline'",
       'x-frame-options': 'SAMEORIGIN',
       'content-type': mime,
       'content-length': String(body.length),
@@ -412,21 +453,30 @@ async function route(req, res) {
   if (match && req.method === 'PUT') {
     requireMutation(req, session);
     let project = projectFor(session, match[1]);
+    const expectedAccessId = project.accessId;
     requireWorkspaceIdle(project);
     const body = await readBody(req, config.uploadMaxBytes);
+    session = refreshSession(session);
     project = projectFor(session, match[1]);
+    invariant(project.accessId === expectedAccessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已变化。');
     requireWorkspaceIdle(project);
     const quotaUser = activeUserFor(session);
+    const expectedVersion = expectedFileVersion(req);
     let previous = 0;
     let exists = false;
+    let currentVersion = null;
     try {
-      previous = fs.statSync(workspace.resolve(project, url.searchParams.get('path') || '', { mustExist: true }).target).size;
+      const metadata = workspace.fileMetadata(project, url.searchParams.get('path') || '');
+      previous = metadata.size;
+      currentVersion = metadata.version;
       exists = true;
     } catch { /* new file */ }
     invariant(!exists || url.searchParams.get('overwrite') === '1', 409, 'FILE_EXISTS', '文件已存在；请明确允许覆盖。');
+    invariant(!expectedVersion || (exists && currentVersion === expectedVersion),
+      409, 'FILE_VERSION_CONFLICT', '文件已被其他操作修改，请刷新后合并或重试。');
     const usage = userUsage(quotaUser.id);
     invariant(usage.bytes - previous + body.length <= quotaUser.maxStorageBytes, 413, 'STORAGE_QUOTA', '写入将超过用户存储配额。');
-    const file = workspace.writeFile(project, url.searchParams.get('path') || '', body);
+    const file = workspace.writeFile(project, url.searchParams.get('path') || '', body, { expectedVersion });
     db.touchProject(project.id);
     audit(req, session, 'file.write', 'project', project.id, { path: file.path, bytes: body.length });
     sendJson(res, 200, { file }, config);
@@ -446,9 +496,12 @@ async function route(req, res) {
   if (match && req.method === 'POST') {
     requireMutation(req, session);
     let project = projectFor(session, match[1]);
+    const expectedAccessId = project.accessId;
     requireWorkspaceIdle(project);
     const body = await readJson(req);
+    session = refreshSession(session);
     project = projectFor(session, match[1]);
+    invariant(project.accessId === expectedAccessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已变化。');
     requireWorkspaceIdle(project);
     const result = workspace.makeDirectory(project, body.path);
     db.touchProject(project.id);
@@ -460,20 +513,25 @@ async function route(req, res) {
   match = pathname.match(/^\/api\/projects\/([^/]+)\/chats$/);
   if (match && req.method === 'GET') {
     const project = projectFor(session, match[1]);
-    sendJson(res, 200, { chats: db.listChats({ projectId: project.id, userId: session.user.id }).map(chatPayload) }, config);
+    sendJson(res, 200, { chats: db.listChats({ projectId: project.id, userId: session.user.id }).filter((chat) => chat.projectAccessId === project.accessId).map(chatPayload) }, config);
     return;
   }
   if (match && req.method === 'POST') {
     requireMutation(req, session);
     let project = projectFor(session, match[1]);
+    const expectedAccessId = project.accessId;
     const body = await readJson(req);
+    session = refreshSession(session);
     project = projectFor(session, match[1]);
+    invariant(project.accessId === expectedAccessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已变化。');
+    invariant(!codex.sharingAccesses.has(project.accessId), 409, 'WORKSPACE_BUSY', '项目正在共享，请稍后重试。');
     const chat = db.createChat({
       projectId: project.id,
       userId: session.user.id,
       projectAccessId: project.accessId,
       treePath: project.treePath,
       title: shortText(body.title || '新对话', '对话标题', 120),
+      preferredMode: turnMode(body.preferredMode),
     });
     audit(req, session, 'chat.create', 'chat', chat.id, { projectId: project.id });
     sendJson(res, 201, { chat: chatPayload(chat) }, config);
@@ -503,9 +561,20 @@ async function route(req, res) {
     requireMutation(req, session);
     let chat = chatFor(session, match[1]);
     const body = await readJson(req);
+    session = refreshSession(session);
     chat = chatFor(session, match[1]);
-    const updated = db.updateChat(chat.id, { title: shortText(body.title, '对话标题', 120) });
-    audit(req, session, 'chat.update', 'chat', chat.id);
+    invariant(!codex.sharingAccesses.has(chat.projectAccessId), 409, 'WORKSPACE_BUSY', '项目正在共享，请稍后重试。');
+    const patch = {};
+    if (body.title !== undefined) patch.title = shortText(body.title, '对话标题', 120);
+    if (body.preferredMode !== undefined) patch.preferredMode = turnMode(body.preferredMode);
+    if (body.preferredModel !== undefined) {
+      invariant(session.user.role === 'admin', 403, 'ADMIN_REQUIRED', '只有老板可以选择模型。');
+      invariant(!codex.chatBusy(chat.id) && !db.listChatInputs(chat.id).length, 409, 'CHAT_RUNNING', '请等待当前任务和消息队列结束后切换模型。');
+      patch.preferredModel = validateModel(body.preferredModel);
+    }
+    invariant(Object.keys(patch).length > 0, 400, 'INVALID_CHAT_UPDATE', '没有可更新的对话字段。');
+    const updated = db.updateChat(chat.id, patch);
+    audit(req, session, 'chat.update', 'chat', chat.id, { preferredMode: patch.preferredMode || null });
     sendJson(res, 200, { chat: chatPayload(updated) }, config);
     return;
   }
@@ -520,6 +589,41 @@ async function route(req, res) {
     return;
   }
 
+  match = pathname.match(/^\/api\/chats\/([^/]+)\/queue(?:\/([^/]+)(?:\/(steer|resume))?)?$/);
+  if (match) {
+    let chat = chatFor(session, match[1]);
+    const inputId = match[2];
+    const action = match[3];
+    const inputPayload = (input) => input && ({
+      id: input.id, prompt: input.prompt, mode: input.mode, effort: input.effort,
+      status: input.status, revision: input.revision, reason: input.reason,
+      turnRunId: input.turn_run_id, createdAt: input.created_at,
+    });
+    if (req.method === 'GET' && !inputId) {
+      const run = db.getLatestTurnRunForChat(chat.id);
+      sendJson(res, 200, { inputs: db.listChatInputs(chat.id).map(inputPayload),
+        latestTurnRun: run && { id: run.id, status: run.status, mode: run.mode } }, config);
+      return;
+    }
+    requireMutation(req, session);
+    const body = await readJson(req, 512 * 1024);
+    invariant(body && typeof body === 'object' && !Array.isArray(body), 400, 'INVALID_JSON_BODY', '请求必须是 JSON 对象。');
+    session = refreshSession(session);
+    chat = chatFor(session, match[1]);
+    let input;
+    if (req.method === 'POST' && !inputId) input = codex.inputQueue.enqueue(chat.id, body);
+    else if (req.method === 'PATCH' && inputId && !action) input = codex.inputQueue.edit(chat.id, inputId, body.revision, body.prompt);
+    else if (req.method === 'DELETE' && inputId && !action) input = codex.inputQueue.cancel(chat.id, inputId, body.revision);
+    else if (req.method === 'POST' && action === 'resume') input = codex.inputQueue.resume(chat.id, inputId, body.revision, body.acknowledgeUncertain);
+    else if (req.method === 'POST' && action === 'steer') input = await codex.inputQueue.steer(chat.id, inputId, body.revision, body.expectedRunId);
+    else throw new HttpError(405, 'METHOD_NOT_ALLOWED', '不支持此队列操作。');
+    session = refreshSession(session);
+    chatFor(session, chat.id);
+    audit(req, session, `input.${action || req.method.toLowerCase()}`, 'chat', chat.id, { inputId: input.id, status: input.status });
+    sendJson(res, 200, { input: inputPayload(input) }, config);
+    return;
+  }
+
   match = pathname.match(/^\/api\/chats\/([^/]+)\/turns$/);
   if (match && req.method === 'POST') {
     requireMutation(req, session);
@@ -527,12 +631,15 @@ async function route(req, res) {
     let project = projectFor(session, chat.projectId);
     invariant(project.accessId === chat.projectAccessId, 403, 'PROJECT_ACCESS_REVOKED', '该对话对应的项目授权已撤销。');
     const body = await readJson(req, 256 * 1024);
+    session = refreshSession(session);
     chat = chatFor(session, match[1]);
     project = projectFor(session, chat.projectId);
     invariant(project.accessId === chat.projectAccessId, 403, 'PROJECT_ACCESS_REVOKED', '该对话对应的项目授权已撤销。');
+    invariant(!codex.sharingAccesses.has(project.accessId), 409, 'WORKSPACE_BUSY', '项目正在共享，请稍后重试。');
+    const mode = turnMode(body.mode, chat.preferredMode || 'execute');
+    if (chat.preferredMode !== mode) chat = db.updateChat(chat.id, { preferredMode: mode });
     sseHeaders(res, config);
     const heartbeat = setInterval(() => sse(res, 'ping', { at: Date.now() }), 15_000);
-    const mode = String(body.mode || 'edit').toLowerCase();
     audit(req, session, 'turn.start', 'chat', chat.id, { effort: body.effort || config.codexReasoningEffort, mode });
     try {
       await codex.runTurn({ chat, project, user: session.user, prompt: body.prompt, effort: body.effort, mode, emit: (event, data) => sse(res, event, data) });
@@ -572,9 +679,10 @@ async function route(req, res) {
       closed = true;
       if (heartbeat) clearInterval(heartbeat);
       codex.off('turnEvent', onEvent);
+      codex.off('turnLiveEvent', onLiveEvent);
     };
-    const sendEvent = (event) => {
-      if (closed || event.id <= lastSent || event.turnRunId !== run.id) return;
+    const sendEvent = (event, live = false) => {
+      if (closed || (!live && event.id <= lastSent) || event.turnRunId !== run.id) return;
       const currentUser = db.getUserById(session.user.id);
       const currentChat = db.getChat(chat.id);
       const currentAccess = currentUser?.status === 'active' && currentChat
@@ -583,8 +691,8 @@ async function route(req, res) {
         || currentAccess.accessId !== currentChat.projectAccessId) {
         cleanup(); if (!res.writableEnded) res.end(); return;
       }
-      lastSent = event.id;
-      sse(res, event.eventType, { ...event.payload, turnRunId: event.turnRunId, eventId: event.id });
+      if (!live) lastSent = event.id;
+      sse(res, event.eventType, { ...event.payload, turnRunId: event.turnRunId, ...(!live ? { eventId: event.id } : {}) });
       const currentRun = db.getTurnRun(run.id);
       if (currentRun && terminal.has(currentRun.status) && ['turn_completed', 'turn_error'].includes(event.eventType)) {
         cleanup(); if (!res.writableEnded) res.end();
@@ -595,16 +703,18 @@ async function route(req, res) {
       if (replaying) buffered.push(event);
       else sendEvent(event);
     };
+    const onLiveEvent = (event) => { if (!replaying) sendEvent(event, true); };
     codex.on('turnEvent', onEvent);
+    codex.on('turnLiveEvent', onLiveEvent);
     sseHeaders(res, config);
     const waterline = db.getLatestTurnEventIdForRun(run.id);
     while (!closed && lastSent < waterline) {
       const page = db.listTurnEvents(chat.id, { afterId: lastSent, turnRunId: run.id, throughId: waterline, limit: 1000 });
       if (!page.length) break;
-      page.forEach(sendEvent);
+      page.forEach((event) => sendEvent(event));
     }
     replaying = false;
-    buffered.sort((a, b) => a.id - b.id).forEach(sendEvent);
+    buffered.sort((a, b) => a.id - b.id).forEach((event) => sendEvent(event));
     if (!closed && terminal.has(db.getTurnRun(run.id)?.status)) {
       cleanup(); if (!res.writableEnded) res.end();
     } else if (!closed) {
@@ -619,6 +729,7 @@ async function route(req, res) {
     let chat = chatFor(session, match[1]);
     let project = projectFor(session, chat.projectId);
     const body = await readJson(req, 16 * 1024);
+    session = refreshSession(session);
     chat = chatFor(session, match[1]);
     project = projectFor(session, chat.projectId);
     const recovered = await codex.recoverChatThread({
@@ -667,6 +778,7 @@ async function route(req, res) {
     requireMutation(req, session);
     let chat = chatFor(session, match[1]);
     const body = await readJson(req, 16 * 1024);
+    session = refreshSession(session);
     chat = chatFor(session, match[1]);
     const approval = codex.resolveApproval({
       chatId: chat.id, userId: session.user.id, approvalId: decodeURIComponent(match[2]), decision: String(body.decision || ''),
@@ -692,6 +804,7 @@ async function route(req, res) {
     const task = taskFor(session, match[1]);
     invariant(['active', 'rework'].includes(task.status), 409, 'TASK_NOT_ACTIVE', '任务尚未激活、正在审核或已经通过。');
     const project = projectFor(session, task.projectId);
+    invariant(!codex.sharingAccesses.has(project.accessId), 409, 'WORKSPACE_BUSY', '项目正在共享，请稍后重试。');
     let chat = db.listChats({ projectId: project.id, userId: session.user.id })
       .find((candidate) => candidate.taskId === task.id && candidate.taskVersion === task.version
         && candidate.projectAccessId === project.accessId);
@@ -707,24 +820,39 @@ async function route(req, res) {
   if (match && req.method === 'POST') {
     requireMutation(req, session);
     let task = taskFor(session, match[1]);
+    let project = projectFor(session, task.projectId);
+    const expectedAccessId = project.accessId;
     const body = await readJson(req, 32 * 1024);
+    session = refreshSession(session);
     task = taskFor(session, match[1]);
+    project = projectFor(session, task.projectId);
+    invariant(project.accessId === expectedAccessId, 403, 'PROJECT_ACCESS_REVOKED', '任务对应的项目授权已变化。');
+    requireWorkspaceIdle(project);
+    invariant(['active', 'rework'].includes(task.status) && Number(body.taskVersion) === task.version,
+      409, 'TASK_VERSION_CHANGED', '任务版本已变化，请刷新后重新提交。');
     const note = String(body.note || '').trim();
     invariant(note.length <= 4000, 400, 'INVALID_NOTE', '提交说明不能超过 4000 个字符。');
     const run = db.getTurnRun(String(body.turnRunId || ''));
     invariant(run && run.userId === session.user.id, 403, 'TURN_FORBIDDEN', 'Codex 回复不存在或不属于你。');
     invariant(run.taskId === task.id && run.chatId === String(body.chatId || ''), 403, 'TASK_TURN_MISMATCH', 'Codex 回复不属于这个任务。');
     invariant(run.finalItemId === String(body.itemId || ''), 409, 'FINAL_ITEM_REQUIRED', '只能提交已完成的最终 Codex 回复。');
+    const snapshot = worktrees.createSubmissionSnapshot({
+      treePath: project.treePath, taskId: task.id, taskVersion: Number(body.taskVersion),
+    });
     let submission;
     try {
       submission = db.submitTask({
         taskId: task.id, taskVersion: Number(body.taskVersion), submitterUserId: session.user.id,
-        chatId: run.chatId, turnRunId: run.id, itemId: run.finalItemId, note,
+        projectAccessId: project.accessId, chatId: run.chatId, turnRunId: run.id, itemId: run.finalItemId, note,
+        snapshotCommitSha: snapshot.commitSha, snapshotTreeSha: snapshot.treeSha,
       });
     } catch (error) {
       throw new HttpError(409, 'TASK_SUBMISSION_REJECTED', error.message);
     }
-    audit(req, session, 'task.submit', 'task_submission', submission.id, { taskId: task.id, taskVersion: submission.taskVersion, turnRunId: run.id });
+    audit(req, session, 'task.submit', 'task_submission', submission.id, {
+      taskId: task.id, taskVersion: submission.taskVersion, turnRunId: run.id,
+      projectAccessId: project.accessId, snapshotCommitSha: snapshot.commitSha, snapshotTreeSha: snapshot.treeSha,
+    });
     sendJson(res, 201, { submission, task: taskFor(session, task.id) }, config);
     return;
   }
@@ -738,6 +866,7 @@ async function route(req, res) {
   if (req.method === 'POST' && pathname === '/api/admin/roadmaps') {
     requireMutation(req, session);
     const body = await readJson(req, 256 * 1024);
+    session = refreshSession(session);
     const project = ownerProject(projectFor(session, String(body.projectId || '')));
     invariant(Array.isArray(body.steps) && body.steps.length > 0 && body.steps.length <= 100, 400, 'INVALID_ROADMAP_STEPS', '路线图必须包含 1–100 个线性步骤。');
     const activeAccess = db.listProjectAccess(project.id, { activeOnly: true });
@@ -778,17 +907,55 @@ async function route(req, res) {
   match = pathname.match(/^\/api\/admin\/task-submissions\/([^/]+)\/review$/);
   if (match && req.method === 'POST') {
     requireMutation(req, session);
-    const submission = db.getSubmission(match[1]);
+    let submission = db.getSubmission(match[1]);
     invariant(submission, 404, 'SUBMISSION_NOT_FOUND', '提交不存在。');
-    const task = db.getTask(submission.taskId);
+    let task = db.getTask(submission.taskId);
     invariant(task, 404, 'TASK_NOT_FOUND', '任务不存在。');
-    ownerProject(projectFor(session, task.projectId));
+    let project = ownerProject(projectFor(session, task.projectId));
+    const expectedOwnerAccessId = project.accessId;
     const body = await readJson(req, 16 * 1024);
+    session = refreshSession(session);
+    submission = db.getSubmission(match[1]);
+    invariant(submission, 404, 'SUBMISSION_NOT_FOUND', '提交不存在。');
+    task = db.getTask(submission.taskId);
+    invariant(task, 404, 'TASK_NOT_FOUND', '任务不存在。');
+    project = ownerProject(projectFor(session, task.projectId));
+    invariant(project.accessId === expectedOwnerAccessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已变化。');
     invariant(['passed', 'rework'].includes(body.verdict), 400, 'INVALID_VERDICT', '审核结果必须是 passed 或 rework。');
+    invariant(submission.verdict === 'pending' && task.status === 'submitted' && task.version === submission.taskVersion,
+      409, 'SUBMISSION_NOT_PENDING', '提交或任务版本已变化，请刷新后重试。');
+    let delivery = null;
+    if (body.verdict === 'passed') {
+      const access = db.getProjectAccessById(submission.projectAccessId);
+      invariant(access && access.status === 'active' && access.accessKind === 'shared'
+        && access.projectId === project.id && access.userId === submission.submitterUserId,
+      409, 'SUBMISSION_ACCESS_REVOKED', '提交绑定的原项目授权已失效，不能交付。');
+      const next = task.roadmapId
+        ? db.getRoadmap(task.roadmapId)?.steps.find((candidate) => candidate.position > task.position && candidate.status === 'ready')
+        : null;
+      invariant(!next || db.getProjectForUser(next.projectId, next.assigneeUserId),
+        409, 'NEXT_ASSIGNEE_ACCESS_REVOKED', '下一任务员工的项目授权已失效，不能自动推进。');
+      requireWorkspaceIdle(project);
+      invariant(!codex.workspaceBusy(access.id), 409, 'WORKSPACE_BUSY', '员工工作树正在被 Codex 使用，请等待任务结束或先停止任务。');
+      delivery = worktrees.deliverSubmission({
+        projectRoot: workspace.projectRoot(project), treePath: access.treePath,
+        snapshotCommitSha: submission.snapshotCommitSha, snapshotTreeSha: submission.snapshotTreeSha,
+        taskId: task.id, taskVersion: submission.taskVersion,
+      });
+    }
     let reviewed;
-    try { reviewed = db.reviewSubmission({ submissionId: submission.id, verdict: body.verdict }); }
+    try {
+      reviewed = db.reviewSubmission({
+        submissionId: submission.id, verdict: body.verdict,
+        deliveryCommitSha: delivery?.deliveryCommitSha || null,
+      });
+    }
     catch (error) { throw new HttpError(409, 'SUBMISSION_REVIEW_REJECTED', error.message); }
-    audit(req, session, 'task.review', 'task_submission', submission.id, { taskId: task.id, verdict: body.verdict });
+    if (delivery) db.touchProject(project.id);
+    audit(req, session, 'task.review', 'task_submission', submission.id, {
+      taskId: task.id, verdict: body.verdict,
+      deliveryCommitSha: delivery?.deliveryCommitSha || null, alreadyDelivered: delivery?.alreadyDelivered || false,
+    });
     sendJson(res, 200, { submission: reviewed, task: db.getTask(task.id) }, config);
     return;
   }
@@ -814,8 +981,11 @@ async function route(req, res) {
   if (match && req.method === 'POST') {
     requireMutation(req, session);
     let project = ownerProject(projectFor(session, match[1]));
+    const expectedAccessId = project.accessId;
     const body = await readJson(req, 32 * 1024);
+    session = refreshSession(session);
     project = ownerProject(projectFor(session, match[1]));
+    invariant(project.accessId === expectedAccessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已变化。');
     const target = db.getUserById(String(body.userId || ''));
     invariant(target && target.role === 'user' && target.status === 'active', 404, 'EMPLOYEE_NOT_FOUND', '员工不存在或账号未启用。');
     invariant(!db.listProjectAccess(project.id, { activeOnly: true }).some((access) => access.userId === target.id),
@@ -834,30 +1004,50 @@ async function route(req, res) {
       sendJson(res, 200, { access: accessPayload(restored), restored: true }, config);
       return;
     }
-    const accessId = randomUUID();
-    const tree = worktrees.createShare({ projectRoot: workspace.projectRoot(project), projectId: project.id, accessId });
+    requireWorkspaceIdle(project);
+    codex.sharingAccesses.add(project.accessId);
+    let tree;
     let access;
+    let snapshots;
+    const accessId = randomUUID();
     try {
+      const authorize = () => {
+        session = refreshSession(session);
+        const current = ownerProject(projectFor(session, project.id));
+        invariant(current.accessId === expectedAccessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已变化。');
+        const employee = db.getUserById(target.id);
+        invariant(employee?.status === 'active' && employee.role === 'user', 403, 'USER_DISABLED', '员工账号已停用。');
+        invariant(!db.listProjectAccess(project.id, { activeOnly: true }).some((item) => item.userId === target.id),
+          409, 'SHARE_EXISTS', '该员工已经拥有此项目的有效授权。');
+        return employee;
+      };
+      const sources = db.listChats({ projectId: project.id, userId: project.userId });
+      tree = worktrees.createShare({ projectRoot: workspace.projectRoot(project), projectId: project.id, accessId });
+      const sharedProject = { ...project, accessKind: 'shared', accessUserId: target.id, accessId, treePath: tree.treePath };
+      snapshots = await codex.prepareSharedChats({ sources, project: sharedProject, user: target, authorize });
+      const employee = authorize();
       const currentUsage = userUsage(target.id);
-      const snapshotUsage = workspace.projectUsage({ ...project, accessKind: 'shared', accessUserId: target.id, accessId, treePath: tree.treePath });
-      invariant(currentUsage.bytes + snapshotUsage.bytes <= target.maxStorageBytes, 413, 'STORAGE_QUOTA', '授权工作树将超过员工存储配额。');
-      access = db.grantProjectAccess({
+      const snapshotUsage = workspace.projectUsage(sharedProject);
+      invariant(currentUsage.bytes + snapshotUsage.bytes <= employee.maxStorageBytes, 413, 'STORAGE_QUOTA', '授权工作树将超过员工存储配额。');
+      access = db.grantProjectAccessWithChats({
         id: accessId, projectId: project.id, userId: target.id, treePath: tree.treePath,
         branchName: tree.branchName, baseSha: tree.baseSha,
-      });
+      }, snapshots);
     } catch (error) {
-      try {
-        worktrees.discardUnboundShare({
-          projectRoot: workspace.projectRoot(project), treePath: tree.treePath, branchName: tree.branchName,
-        });
-      } catch { /* best-effort rollback */ }
+      if (tree && !access) try {
+        worktrees.discardUnboundShare({ projectRoot: workspace.projectRoot(project), treePath: tree.treePath, branchName: tree.branchName });
+      } catch { /* retain unbound tree if cleanup fails; never remove owner data */ }
       throw error;
+    } finally {
+      codex.sharingAccesses.delete(expectedAccessId);
     }
     audit(req, session, 'project.share_grant', 'project_access', access.id, {
       projectId: project.id, employeeId: target.id, baseSha: tree.baseSha,
       includedLocalChanges: tree.includedLocalChanges, untrackedFiles: tree.untrackedFiles,
+      copiedChats: snapshots.length,
     });
-    sendJson(res, 201, { access: accessPayload(access), restored: false, includedLocalChanges: tree.includedLocalChanges }, config);
+    sendJson(res, 201, { access: accessPayload(access), restored: false,
+      includedLocalChanges: tree.includedLocalChanges, copiedChats: snapshots.length }, config);
     return;
   }
   match = pathname.match(/^\/api\/admin\/projects\/([^/]+)\/shares\/([^/]+)$/);
@@ -896,13 +1086,18 @@ async function route(req, res) {
   if (req.method === 'POST' && pathname === '/api/admin/users') {
     requireMutation(req, session);
     const body = await readJson(req, 64 * 1024);
+    session = refreshSession(session);
     const username = validateUsername(body.username);
     invariant(!db.getUserAuthByUsername(username), 409, 'USERNAME_EXISTS', '用户名已存在。');
     const displayName = shortText(body.displayName || username, '显示名称', 64);
     const password = String(body.password || '');
     invariant(password.length >= 12 && password.length <= 256, 400, 'INVALID_PASSWORD', '密码长度必须为 12–256 个字符。');
+    const passwordHash = await hashPassword(password);
+    session = refreshSession(session);
+    requireAdmin(session);
+    invariant(!db.getUserAuthByUsername(username), 409, 'USERNAME_EXISTS', '用户名已存在。');
     const user = db.createUser({
-      username, displayName, passwordHash: await hashPassword(password), role: 'user',
+      username, displayName, passwordHash, role: 'user',
       networkAccess: Boolean(body.networkAccess ?? config.defaultNetworkAccess),
       maxProjects: boundedInteger(body.maxProjects ?? config.defaultMaxProjects, '项目上限', 1, 100),
       maxStorageBytes: boundedInteger(body.maxStorageBytes ?? config.defaultMaxStorageBytes, '存储上限', 1024 * 1024, Number.MAX_SAFE_INTEGER),
@@ -916,9 +1111,13 @@ async function route(req, res) {
   match = pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
   if (match && req.method === 'PATCH') {
     requireMutation(req, session);
-    const target = db.getUserById(match[1]);
+    let target = db.getUserById(match[1]);
     invariant(target, 404, 'USER_NOT_FOUND', '用户不存在。');
     const body = await readJson(req, 64 * 1024);
+    session = refreshSession(session);
+    requireAdmin(session);
+    target = db.getUserById(match[1]);
+    invariant(target, 404, 'USER_NOT_FOUND', '用户不存在。');
     invariant(!(target.role === 'admin' && body.status && body.status !== 'active'), 400, 'ADMIN_DISABLE_BLOCKED', '不能停用超级管理员账号。');
     const patch = {};
     if (body.displayName !== undefined) patch.displayName = shortText(body.displayName, '显示名称', 64);
@@ -931,6 +1130,10 @@ async function route(req, res) {
       const password = String(body.password);
       invariant(password.length >= 12 && password.length <= 256, 400, 'INVALID_PASSWORD', '密码长度必须为 12–256 个字符。');
       patch.passwordHash = await hashPassword(password);
+      session = refreshSession(session);
+      requireAdmin(session);
+      target = db.getUserById(match[1]);
+      invariant(target, 404, 'USER_NOT_FOUND', '用户不存在。');
     }
     const updated = db.updateUser(target.id, patch);
     if (patch.status === 'disabled' || patch.passwordHash) db.deleteUserSessions(target.id);

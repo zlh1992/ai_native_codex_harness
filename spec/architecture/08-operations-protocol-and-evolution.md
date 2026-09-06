@@ -33,7 +33,7 @@
 
 1. 读取目标二进制版本：`codex --version`。
 2. 生成到临时目录，并与 `protocol/generated/` 对比删除、变化和新增类型。
-3. 核对 Portal 使用的 `thread/start|resume|read|goal`、`skills/*`、`turn/start|interrupt`、approval、tool call、turn/item/thread notification 和 collab item。
+3. 核对 Portal 使用的 `thread/start|resume|fork|read|goal`、`skills/*`、`turn/start|interrupt`、approval、tool call、turn/item/thread notification 和 collab item。
 4. 用目标二进制执行：
 
    ```bash
@@ -76,10 +76,18 @@
 
 | 触发条件 | 应引入的能力 |
 | --- | --- |
-| 串行任务需要独立基线和合并 | execution environment 实体、每 task/chat worktree、base/head SHA、merge/review |
+| 并发任务需要独立基线、避免同文件冲突或更完整审核 | execution environment 实体、每 task/chat worktree、基线同步、冲突解决与 PR；保留现有 submission/delivery SHA 证据 |
 | 多人需要跨 chat 共享稳定结论 | versioned artifact、decision、handoff manifest、来源/hash/ACL |
 | 需要定向跨 chat 消息 | Portal broker、send/receive ACL、idempotency key、审计；禁止裸 inject |
 | 多组织或恶意租户 | organization membership、per-tenant worker、独立 OS/Codex identity、磁盘 quota |
 | 企业账号治理 | 邀请、OIDC/MFA、首次改密、自助改密、设备会话、持久限流 |
 
 架构演进必须从明确业务触发条件出发，不以“协议已经支持某方法”为启用理由。
+
+本地与公网地址输出分别展示 `/boss/login` 与 `/employee`。固定 `PUBLIC_ORIGIN` 仍是无路径的同一 origin；两个角色共用后端、同源 Cookie 与隧道，但登录 API、登录页面和首页分开。
+
+若 App 自动更新替换内置二进制，可使用独立安装的官方同版本 CLI 并通过 `CODEX_BIN` 绑定；这不改变协议 pin。重启前应核对实际二进制版本，运行中的旧进程 ready 不能证明磁盘上的新二进制兼容。
+
+输入队列 API：`GET/POST /api/chats/:chatId/queue`，`PATCH/DELETE /api/chats/:chatId/queue/:inputId`，`POST .../:inputId/steer|resume`。POST 新输入携带幂等 `id`、`prompt`、`mode`、`effort`；后续修改携带 `revision`，steer 额外携带 `expectedRunId`，不确定发送的 resume 额外要求 `acknowledgeUncertain=true`。既有 POST turns SSE 保持可用，但存在待处理输入时拒绝绕过 FIFO。协议升级检查增加 `turn/steer` 的 expectedTurnId、clientUserMessageId 与 response turnId；本次不改变精确 CLI pin。
+
+队列上线后，降级前应停止并排空全部运行、暂停所有输入并备份 SQLite；保留新表及未发正文，旧代码不会消费这些输入。重启不自动续发待处理消息，用户在队列中继续或取消。

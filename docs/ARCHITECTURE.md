@@ -31,7 +31,7 @@ Browser ─HTTPS─> Tunnel ─HTTP loopback─> Harness HTTP Server
 - 用户目录：`.data/workspaces/<user-uuid>/`
 - 项目目录：`.data/workspaces/<user-uuid>/<project-slug>/`
 - 老板共享给员工的 tree：`.data/trees/<project-access-uuid>/`
-- 命令 HOME/TMP：`.data/runtime/<user-uuid>/`
+- 命令 HOME/TMP：`.data/runtime/<user-uuid>/<project-access-uuid>/`
 - 可恢复废纸篓：`.data/trash/<user-uuid>/`
 - 元数据：`.data/harness.sqlite`
 - Codex 原生 thread：由本机 Codex 存储；本项目数据库只保存服务端签发的 chat 与 thread 映射。
@@ -46,8 +46,8 @@ Browser ─HTTPS─> Tunnel ─HTTP loopback─> Harness HTTP Server
 
 仅仅把 turn 的 `cwd` 指到项目目录并不足以隔离不受信任用户，因为普通 workspace-write 沙箱的读取边界可能大于单个项目。因此实现采用两层控制：
 
-1. app-server 关闭内置 Shell、unified exec、浏览器、插件、外部 MCP、computer use 和 image generation；保留原生 apply-patch、diff、approval、plan、goal、skills 与 multi-agent。每个 turn 使用只包含当前 tree 的 `workspaceWrite` 和 `on-request` approval。
-2. 模型可调用 `workspace_list/read/write/replace/mkdir/delete/search/exec` 动态工具和原生 apply-patch。前七个由后端做规范路径、保留目录与符号链接校验；`workspace_exec` 仅在 EXECUTE turn 获得浏览器一次批准后进入 macOS Seatbelt，只允许读写当前绑定 tree 与独立 runtime，不能读取同一员工的另一个项目。原生 apply-patch 受 App Server `workspaceWrite` 的唯一可写根约束。共享 worktree 的 `.git` 指针也被文件 API 与 Seatbelt 隐藏。
+1. app-server 关闭内置 Shell、unified exec、浏览器、插件、外部 MCP、computer use 和 image generation；保留原生 apply-patch、diff、approval、plan、goal、skills 与 multi-agent。每个 turn 使用 `readOnly` 基线和 `on-request` approval，让 Portal 在单次写入前取得完整目标集合。
+2. 模型可调用 `workspace_list/read/write/replace/mkdir/delete/search/exec` 动态工具和原生 apply-patch。前七个由后端做规范路径、保留目录与符号链接校验；合法项目文件变更由 Portal 自动接受。`workspace_exec` 仅在 EXECUTE turn 自动放行到 macOS Seatbelt，只允许读写当前绑定 tree 与独立 runtime，不能读取同一员工的另一个项目。共享 worktree 的 `.git` 指针也被文件 API 与 Seatbelt 隐藏。
 
 命令环境只包含最小 `PATH/HOME/TMPDIR/LANG/TERM/CI`，不会继承 Harness、Cloudflare 或 Codex 的密码/token 环境变量。网络默认关闭；管理员可按用户开启。
 
@@ -60,11 +60,11 @@ Browser ─HTTPS─> Tunnel ─HTTP loopback─> Harness HTTP Server
 - 登录：按来源 IP 的滑动窗口限速；成功/失败均写审计。
 - RBAC：`user` 与唯一 `admin` 两种不可由 Web 提权的账号角色；内容访问另由 OWNER/SHARED ACL 控制。
 - 项目成员：同一老板项目可有多条有效 SHARED 记录；数据库只限制同一项目、同一员工最多一条有效授权。每条授权绑定自己的 branch、base SHA 和 worktree；撤权后若脏树仍在，为同一员工恢复时复用原 access 与 tree。
-- 对话是用户私有的 thread 映射，不因同项目而互读 transcript。`thread/resume` 失败会保留旧 id 并进入 `resume_failed`，只有重试成功或用户明确确认 context reset 后才改变状态；reset 会记录 lineage。
+- 对话是用户私有的 thread 映射，不因同项目而互读原 transcript；新 share 显式把 owner 当时的全部对话 fork 为接收员工的私有副本，后续不自动同步。`thread/resume` 失败会保留旧 id 并进入 `resume_failed`，只有重试成功或用户明确确认 context reset 后才改变状态；reset 会记录 lineage。
 
 ## 7. 资源和滥用边界
 
-- App Server 全局 turn 硬上限 40，Portal active root turn 硬上限 11，EXECUTE lease 硬上限 2；同一 project access/worktree 的全部 root turn 串行，不同 access 可并发。浏览器文件修改也必须取得该 worktree 的空闲状态。
+- App Server 全局 turn 硬上限 40，Portal active root turn 硬上限 11，EXECUTE lease 默认同为 11；同一 chat 只能有一个 root turn，同一 project access/worktree 的不同 chat 可并发。浏览器文件修改、任务快照和交付必须取得整个 access 的空闲状态；并发 turn 同时修改同一文件时可能冲突。
 - 每用户项目数和逻辑存储配额。
 - Shell 的 wall timeout、CPU ulimit、进程数、文件描述符和输出字节上限。
 - 项目命令的网络访问按用户关闭/开启。

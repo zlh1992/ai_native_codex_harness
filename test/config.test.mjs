@@ -6,7 +6,7 @@ test('concurrency defaults to 40 and is hard-capped at 40', () => {
   const config = loadConfig({});
   assert.equal(config.codexMaxConcurrentTurns, 40);
   assert.equal(config.portalMaxActiveRootTurns, 11);
-  assert.equal(config.portalMaxExecuteLeases, 2);
+  assert.equal(config.portalMaxExecuteLeases, 11);
   assert.equal(config.maxSubagentsPerRoot, 3);
   assert.equal(config.subagentModel, 'gpt-5.6-luna');
   assert.equal(config.codexCliVersion, '0.150.0-alpha.8');
@@ -16,7 +16,8 @@ test('concurrency defaults to 40 and is hard-capped at 40', () => {
   assert.match(config.runtimeRoot, /\.data\/runtime$/);
   assert.equal(loadConfig({ CODEX_MAX_CONCURRENT_TURNS: '200' }).codexMaxConcurrentTurns, 40);
   assert.equal(loadConfig({ PORTAL_MAX_ACTIVE_ROOT_TURNS: '99' }).portalMaxActiveRootTurns, 11);
-  assert.equal(loadConfig({ PORTAL_MAX_EXECUTE_LEASES: '9' }).portalMaxExecuteLeases, 2);
+  assert.equal(loadConfig({ PORTAL_MAX_EXECUTE_LEASES: '9' }).portalMaxExecuteLeases, 9);
+  assert.equal(loadConfig({ PORTAL_MAX_ACTIVE_ROOT_TURNS: '4', PORTAL_MAX_EXECUTE_LEASES: '9' }).portalMaxExecuteLeases, 4);
   assert.equal(loadConfig({ DEFAULT_MAX_PROJECTS: '999' }).defaultMaxProjects, 100);
   assert.equal(loadConfig({ CODEX_MAX_CONCURRENT_TURNS: '12', DEFAULT_MAX_CONCURRENT_TURNS: '30' }).defaultMaxConcurrentTurns, 12);
 });

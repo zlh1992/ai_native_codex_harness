@@ -5,6 +5,13 @@ import fs from 'node:fs';
 const app = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
 const boss = fs.readFileSync(new URL('../public/boss.js', import.meta.url), 'utf8');
+const styles = fs.readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
+
+function frontendFunction(name) {
+  const match = app.match(new RegExp(`function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}`));
+  assert.ok(match, `missing frontend function ${name}`);
+  return Function(`${match[0]}; return ${name};`)();
+}
 
 test('authenticated workbench load failures do not masquerade as login failures', () => {
   assert.ok(app.includes('error.status = response.status'));
@@ -32,11 +39,36 @@ test('new chat, file, and folder use an accessible in-app dialog instead of wind
   assert.equal(app.includes('window.prompt('), false);
 });
 
+test('phone workbench gives projects and chats independent scroll areas with large tap targets', () => {
+  assert.match(styles, /@media\(max-width:720px\)\{[\s\S]*?\.project-rail\{min-height:0;max-height:none;overflow:visible/);
+  assert.ok(styles.includes('.project-list,.chat-list{flex:none;min-height:156px;overflow-y:auto'));
+  assert.ok(styles.includes('.chat-list{min-height:192px;max-height:min(40vh,360px)}'));
+  assert.ok(styles.includes('.project-item,.chat-item{min-height:64px;'));
+  assert.ok(styles.includes('.square-button{width:48px;height:48px;'));
+});
+
+test('HTML artifacts open as a sandboxed rendered preview while retaining source mode', () => {
+  assert.ok(app.includes("const HTML_PREVIEW_EXTENSIONS = new Set(['.html', '.htm']);"));
+  assert.ok(app.includes('if (HTML_PREVIEW_EXTENSIONS.has(extension))'));
+  assert.ok(app.includes("frame.className = 'preview-html';"));
+  assert.ok(app.includes("frame.setAttribute('sandbox', 'allow-scripts');"));
+  assert.equal(app.includes("frame.setAttribute('sandbox', 'allow-scripts allow-same-origin');"), false);
+  assert.ok(app.includes('state.viewerMode = SOURCE_FIRST_EXTENSIONS.has(extension) ? \'source\' : \'preview\';'));
+  assert.ok(html.includes('id="source-tab"'));
+});
+
+test('turn mode is stored per chat and defaults to project-local EXECUTE access', () => {
+  assert.ok(html.indexOf('<option value="execute">') < html.indexOf('<option value="edit">'));
+  assert.ok(html.includes('EXECUTE · 文件＋命令'));
+  assert.ok(app.includes("data.chat.preferredMode || 'execute'"));
+  assert.ok(app.includes("body: { preferredMode }"));
+});
+
 test('boss metrics describe multi-employee worktrees and the Portal root-turn limit', () => {
   assert.ok(boss.includes('每名员工一个独立 worktree'));
   assert.ok(boss.includes('codex.maxRootTurns || 11'));
   assert.equal(boss.includes('项目终身固定首位员工'), false);
-  assert.ok(boss.includes("result.restored ? '已恢复该员工原有 worktree 与授权。'"));
+  assert.ok(boss.includes("result.restored ? '已恢复该员工原有 worktree、对话与授权。'"));
 });
 
 test('destructive and context-reset actions use in-app confirmations', () => {
@@ -59,4 +91,74 @@ test('turn recovery paginates the durable journal instead of skipping to its lat
   assert.ok(app.includes("event.eventType === 'approval_required'"));
   assert.ok(app.includes("request.files.join('\\n')"));
   assert.ok(app.includes("if (['queued', 'starting', 'running'].includes(data.latestTurnRun?.status)) await resumePersistedTurn(data);"));
+});
+
+test('running turn recovery never synthesizes an empty user message', () => {
+  const shouldAppendLivePrompt = frontendFunction('shouldAppendLivePrompt');
+  const existing = [{ role: 'user', content: 'keep the visible prompt' }];
+
+  assert.equal(shouldAppendLivePrompt(existing, { prompt: '' }), false);
+  assert.equal(shouldAppendLivePrompt(existing, { prompt: '   ' }), false);
+  assert.equal(shouldAppendLivePrompt(existing, { prompt: 'keep the visible prompt' }), false);
+  assert.equal(shouldAppendLivePrompt(existing, { prompt: 'append this missing prompt' }), true);
+  assert.ok(app.includes('renderLiveTurn(running, shouldAppendLivePrompt(data.messages, running))'));
+});
+
+test('model selector restores each chat and prevents edits while saving or without a chat', () => {
+  const source = app.match(/function updateModelSelect\([^)]*\) \{[\s\S]*?\n\}/)[0];
+  const select = {};
+  const state = { selectedChat: null };
+  const update = Function('state', '$', `${source}; return updateModelSelect;`)(state, () => select);
+  update(); assert.equal(select.disabled, true); assert.equal(select.value, '');
+  state.selectedChat = { preferredModel: 'gpt-6-astra' };
+  update(); assert.equal(select.disabled, false); assert.equal(select.value, 'gpt-6-astra');
+  state.selectedChat = { preferredModel: 'gpt-5.6-terra' };
+  update(); assert.equal(select.value, 'gpt-5.6-terra');
+  state.modelSaving = true;
+  update(); assert.equal(select.disabled, true);
+  state.modelSaving = false; state.selectedChat = { preferredModel: null };
+  update(); assert.equal(select.value, '');
+  assert.match(html, /id="model-select"[^>]+aria-label="对话模型"/);
+});
+
+test('running chats keep the composer enabled and show editable, escaped queued messages', () => {
+  const elements = new Map();
+  const element = (selector) => {
+    if (!elements.has(selector)) elements.set(selector, { disabled: true, textContent: '', placeholder: '',
+      classList: { toggle() {} }, setAttribute() {} });
+    return elements.get(selector);
+  };
+  const source = app.match(/function setComposer\([^)]*\) \{[\s\S]*?\n\}/)[0];
+  const selected = { id: 'chat', title: 'Running', status: 'running', threadState: 'ready' };
+  const state = { selectedChat: selected, selectedProject: { name: 'Project' }, selectedTask: null, queueSending: false };
+  const setComposer = Function('state', '$', 'selectedChatRunning', 'renderInputQueue', 'renderModelSelector',
+    `${source}; return setComposer;`)(state, element, () => true, () => {}, () => {});
+  setComposer(true);
+  assert.equal(element('#prompt-input').disabled, false);
+  assert.equal(element('#send-button').disabled, false);
+  assert.match(element('#prompt-input').placeholder, /排队/);
+  selected.threadState = 'resume_failed'; setComposer(true);
+  assert.equal(element('#send-button').disabled, true);
+});
+
+test('queue submit retains the draft and reuses its ID if the HTTP acknowledgement is lost', async () => {
+  const source = app.match(/async function submitQueuedInput\([^)]*\) \{[\s\S]*?\n\}/)[0];
+  const state = { selectedChat: { id: 'chat' }, pendingInput: null, queueSending: false };
+  const prompt = { value: 'draft survives network loss', style: {} };
+  const requests = [];
+  let attempt = 0;
+  const submit = Function('state', '$', 'crypto', 'api', 'setComposer', 'refreshInputQueue', 'toast',
+    `${source}; return submitQueuedInput;`)(state,
+    (selector) => selector === '#prompt-input' ? prompt : { value: selector === '#mode-select' ? 'edit' : 'low' },
+    { randomUUID: () => 'stable-browser-message-id' }, async (url, request) => {
+      requests.push(request.body);
+      if (++attempt === 1) throw new Error('connection lost');
+      return { input: { status: 'sent' } };
+    }, () => {}, async () => {}, () => {});
+  await assert.rejects(submit(), /connection lost/);
+  assert.equal(prompt.value, 'draft survives network loss');
+  assert.equal(state.queueSending, false);
+  await submit();
+  assert.equal(requests[0].id, requests[1].id);
+  assert.equal(prompt.value, '');
 });

@@ -35,6 +35,7 @@ body.resizing-row{cursor:row-resize!important;user-select:none!important}
 .preview-image-wrap{min-height:100%;display:grid;place-items:start center;background-image:linear-gradient(45deg,#111511 25%,transparent 25%),linear-gradient(-45deg,#111511 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#111511 75%),linear-gradient(-45deg,transparent 75%,#111511 75%);background-size:20px 20px;background-position:0 0,0 10px,10px -10px,-10px 0}
 .preview-image{display:block;max-width:100%;height:auto;background:white;box-shadow:0 10px 36px rgba(0,0,0,.35)}
 .preview-pdf{display:block;width:100%;height:100%;min-height:420px;border:0;background:white;border-radius:5px}
+.preview-html{display:block;width:100%;height:100%;min-height:420px;border:0;background:white}
 .preview-markdown{max-width:860px;margin:0 auto;font-size:13px;line-height:1.75}
 .preview-markdown h1,.preview-markdown h2,.preview-markdown h3{color:var(--text);line-height:1.25;margin:1.3em 0 .55em}
 .preview-markdown pre,.preview-code{white-space:pre-wrap;overflow-wrap:anywhere;background:#080a09;border:1px solid #252a26;border-radius:9px;padding:14px;font:11px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace}
@@ -85,3 +86,33 @@ body.resizing-row{cursor:row-resize!important;user-select:none!important}
 .message-actions{display:flex;justify-content:flex-end;margin-top:7px}.submit-task-button{border:1px solid #65783f;background:#27311e;color:var(--accent);border-radius:8px;padding:8px 11px;font-size:10px;font-weight:750}.submit-task-button:hover{background:#313d23}
 .dialog-copy{color:var(--muted);font-size:12px;line-height:1.6}
 @media(max-width:760px){.employee-hero{display:block}.capacity-card{width:auto;margin-top:20px}.employee-summary{grid-template-columns:repeat(2,1fr)}.task-board{grid-template-columns:1fr}.turn-controls label:first-child{display:flex}}
+
+.boss-login .login-copy { border-top: 3px solid #d4aa69; }
+.boss-login .eyebrow { color: #d4aa69; }
+
+.boss-login .mark, .boss-login .primary { background: #e5bd7b; }
+.boss-login h1 em { color: #e5bd7b; }
+
+.input-queue{grid-column:1/-1;max-height:min(30vh,280px);overflow:auto;padding:2px 6px 10px;margin-bottom:6px;border-bottom:1px solid var(--line)}
+.queue-heading{display:flex;justify-content:space-between;gap:12px;color:var(--text);font-size:11px;padding:4px 0 8px}.queue-heading span,.queue-meta{color:var(--muted);font-size:10px}
+.queue-item{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:7px;background:#171c17}.queue-item p{font-size:12px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;max-height:72px;overflow:auto;margin:7px 0 10px}.queue-actions{display:flex;flex-wrap:wrap;gap:6px}.queue-steer{margin-left:auto;border:1px solid #526135;border-radius:7px;background:#27301c;color:var(--accent)}.queue-actions button:disabled{opacity:.4;cursor:not-allowed}
+#queue-edit-input{width:100%;resize:vertical}.composer:has(.input-queue:not(.hidden)){border-color:#526135}
+
+#model-select{display:inline-block;background:#101310;max-width:220px;cursor:pointer;color:var(--text)}#model-select:disabled{opacity:.5;cursor:default}#model-select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}@media(max-width:720px){#model-select{max-width:150px;font-size:10px}}
+
+/* Keep both workspace selectors large and reliably tappable on phones. */
+@media(max-width:720px){
+  .project-rail{min-height:0;max-height:none;overflow:visible;padding:20px 14px 24px}
+  .project-list,.chat-list{flex:none;min-height:156px;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;border:1px solid var(--line);border-radius:12px;padding:6px;background:#0f1210}
+  .project-list{max-height:min(32vh,280px)}
+  .chat-list{min-height:192px;max-height:min(40vh,360px)}
+  .project-item,.chat-item{min-height:64px;padding:13px 14px;border-radius:10px;gap:6px;touch-action:manipulation}
+  .project-item b,.chat-item b{font-size:15px;line-height:1.35}
+  .project-item span,.chat-item span{font-size:12px;line-height:1.35}
+  .rail-heading{padding:0 4px 14px}
+  .rail-heading h2{font-size:20px}
+  .chat-heading{margin-top:4px;padding-top:20px}
+  .square-button{width:48px;height:48px;font-size:24px;border-radius:12px;touch-action:manipulation}
+  .storage-card{margin:16px 4px 20px;padding:14px}
+  .storage-card>div{font-size:11px}
+}

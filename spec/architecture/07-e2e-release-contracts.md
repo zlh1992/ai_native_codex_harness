@@ -19,27 +19,29 @@ HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake ap
 - 老板通过 HTTP 登录并创建两个员工。
 - 老板创建项目和 owner 本地快照，然后同时授权两名员工。
 - 两名员工获得不同 `project_access` 和不同 worktree。
-- owner 的已跟踪修改与未跟踪文件进入授权快照。
+- owner 的已跟踪修改与未跟踪文件先进入不可变 Git baseline commit，授权记录返回该 `baseSha`，员工 worktree 从该 commit 创建。
 - 员工一写入的私有 worktree 文件对员工二不可见。
 
-### E2E-002 单 worktree 串行与浏览器写锁
+### E2E-002 同 worktree 多 chat 并发与浏览器写锁
 
-- 同一员工同一 access 的第一个 turn 持有 workspace 后，第二 chat 的 turn 保持 queued。
+- 同一员工同一 access 的第一个 turn 持续运行时，第二 chat 的 turn 可并发启动并完成。
+- 每个 chat 独立保存模式；新 chat 默认 EXECUTE，把第一 chat 改成 EDIT 不会改变第二 chat。
 - active turn 期间浏览器文件 PUT 返回 `WORKSPACE_BUSY`。
-- 中断第一个 turn 后，第二个 turn继续并进入 completed。
-- 完全排空后浏览器文件写恢复成功。
+- 中断第一个 turn 并完全排空后，浏览器文件写恢复成功。
+- 编辑器用读取所得 `version` 保存成功后，再使用旧版本保存返回 `FILE_VERSION_CONFLICT`，且不能覆盖首个写入。
 
 ### E2E-003 活跃项目删除屏障
 
 - owner 项目存在 running turn 时，DELETE project 返回 `PROJECT_BUSY`。
 - 中断并进入终态后才允许删除。
 
-### E2E-004 任务、不可变提交、审核与事件 ACL
+### E2E-004 任务、不可变 Git 提交、owner 交付、审核与事件 ACL
 
 - 老板创建跨两名员工的线性 roadmap 并激活。
 - 员工从 active task 创建 task chat，完成 turn，并以正确 task version、chat、run、final item 提交。
+- submission 绑定原 access、Git commit/tree；提交后的 owner 尚不可见员工文件。
 - 含 submission 的 chat 删除返回 `CHAT_HAS_SUBMISSION`。
-- 老板审核 passed 后下一名员工任务激活。
+- 老板审核 passed 时固定 submission commit 合入 owner，记录 delivery commit，老板目录能读取交付文件，然后下一名员工任务激活。
 - 同用户跨 chat、不同用户跨 chat 读取 run event 均返回 403。
 - `Last-Event-ID`/`after` 只返回更大的 cursor，顺序严格递增。
 - replay 和 admin audit 不包含测试 prompt 或 raw diff secret marker。
@@ -59,15 +61,24 @@ HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake ap
 - 未确认上下文断裂的 reset 返回 409。
 - 明确确认后新建 thread，old/new lineage 可查询，状态回到 ready。
 
+### E2E-007 老板/员工 HTML 产物安全预览
+
+- owner 写入 HTML 后，老板和获授权员工都能经各自 `project_access` 读取同一版本的产物。
+- 原始响应使用 `text/html`，并携带允许脚本但不允许 `allow-same-origin`、connect 或 form 的 sandbox CSP。
+- 前端把 `.html`/`.htm` 默认放进 iframe 预览而不是源码代码块；iframe 自身也只声明 `sandbox="allow-scripts"`，源码页签继续可用。
+
 ## 其他自动化强约束
 
 虽然下列用例不是单一 HTTP 流程，它们同样属于 `npm run gate`：
 
 - 真实 macOS Seatbelt：可写当前 tenant，不能读取 Codex credential；共享 worktree `.git` indirection 不可读。
 - 路径与文件：CRUD、越界符号链接拒绝、Excel 预览不泄露其他路径。
-- 并发：第 3 个 EXECUTE 排队，EDIT 不被全局 EXECUTE 队列阻塞，root 不超过 11，同 access 串行、不同 access 并行。
+- 并发：默认 EXECUTE 可占满全部 11 个 root 席，root 不超过 11，同 chat 串行，同 access 的不同 chat 与不同 access 均可并行。
+- 自动放行：合法项目文件变更和 EXECUTE 命令记录 accepted approval 后直接继续；缺失目标、保留路径、越界路径及 EDIT 命令仍拒绝。
 - 生命周期：queued/starting/running/approval/lease 在 chat/access/project 范围都有 guard。
 - 恢复竞态：撤权发生在 thread setup、skill discovery 或 turn startup 时不产生失控 native turn。
+- 文件与撤权竞态：主进程路径预检后替换父目录不能让 CRUD helper 读取或覆盖宿主文件；上传 body 尚未完成时撤权，最终写入必须返回 403 且不能落盘。
+- runtime 隔离：同一用户不同 project access 的命令使用不同 HOME/TMPDIR，不能互相读取启动文件、配置或临时缓存。
 - 快速完成竞态：completed 先到时仍保存 native turn id。
 - 事件/消息：journal cursor 有序、敏感正文省略、fallback 幂等、超过 5000 条分页恢复。
 - 协议：精确 CLI 版本、所需方法/事件/字段和固定 Luna 子代理策略存在。
@@ -92,9 +103,27 @@ HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake ap
 - Cloudflare/Tailscale 第三方服务在任何时间的可用性、DNS 或固定域名配置。
 - 真实 Codex 上游模型质量、配额、延迟和账号政策。
 - 共享 app-server 对恶意跨 root collab 的进程级隔离证明。
-- 每任务 worktree、merge/review、多人共享 transcript、artifact/handoff broker。
+- 每任务 worktree、自动冲突解决/PR、完整代码审核 UI、实时多人共享 transcript、artifact/handoff broker。
 - OIDC/MFA、邀请、自助密码、设备会话和持久登录限流。
 
 ## 修改这些契约
 
 变更 E2E 前必须在对应报告中记录：旧契约、业务理由、安全/数据影响、新契约、替代测试与回滚方式。仅因测试耗时、实现困难或新代码不通过而删除断言，不是可接受理由。
+
+### E2E-008 角色入口与一次性对话 fork
+
+- 老板/员工独立登录页面和 API，错误角色登录失败。
+- 新 share 复制分享前 owner 历史，多员工得到不同 thread/chat/worktree。
+- 员工续聊与 owner 后续新增历史相互不可见，原 chat/run ACL 不放宽。
+- 空闲屏障与 fork 失败不发布部分共享，恢复 retained access 不重复复制历史。
+
+### E2E-009 运行中输入队列与调整方向
+
+- 通过 HTTP 入队启动持续运行，运行中可继续加入多条消息。
+- 修改待发正文、取消指定消息、旧 revision 拒绝、已出队消息拒绝修改。
+- steer 使用当前 run 前置条件并保持原 run 运行，其余消息仍按顺序等待；完成后自动执行下一条且采用编辑后的内容。
+- 重复客户端 id 不重复发送；steer 历史与原生历史水合后只出现一次。
+- 另一用户的队列读取、修改、取消、继续和 steer 全部拒绝；错误 CSRF 拒绝。
+- 在线 run SSE 可收到实时 assistant delta；journal 重放与 audit 不含队列正文或 raw diff。
+- 停止后余下消息暂停；显式继续后自动完成。
+- 配套单元测试覆盖单并发账号、生命周期写锁、模式不匹配、发送结果不确定时的暂停/确认、停止与重启恢复；前端测试覆盖运行中可输入与网络失败保留草稿/幂等重试。

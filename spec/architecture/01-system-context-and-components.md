@@ -32,15 +32,15 @@ Browser request
 
 | 组件 | 当前职责 | 明确禁止承担的职责 |
 | --- | --- | --- |
-| `src/server.mjs` | HTTP 路由、认证入口、请求体限制、ACL、CSRF、Origin、响应/SSE、生命周期路由 | 不直接信任客户端路径、tree 或 thread；不直接调用任意 RPC |
+| `src/server.mjs` | HTTP 路由、认证入口、请求体限制、ACL、CSRF、Origin、响应/SSE、生命周期路由、文件预览响应安全头 | 不直接信任客户端路径、tree 或 thread；不直接调用任意 RPC |
 | `src/db.mjs` | schema/migration、业务实体、不变量事务、运行状态、事件、审计 | 不保存明文会话 token；不把 native thread id 当授权凭据 |
-| `src/fs-service.mjs` | canonical path、保留路径、符号链接和文件大小检查 | 不允许绝对路径、`..`、`.git`、越界链接 |
-| `src/worktree-service.mjs` | 初始化 Git、创建/恢复/移除员工独立 worktree | 不决定谁有权限；不在脏 tree 上静默销毁数据 |
-| `src/capacity-service.mjs` | root turn、用户并发、workspace 单写者、EXECUTE lease 排队 | 不替代数据库生命周期检查 |
+| `src/fs-service.mjs` | canonical path、保留路径、符号链接和文件大小检查；通过 Seatbelt helper 完成实际 CRUD | 不允许绝对路径、`..`、`.git`、越界链接；不在路径预检后退回主进程裸读写 |
+| `src/worktree-service.mjs` | 初始化 Git、创建/恢复/移除员工独立 worktree、固定 submission commit/tree、将 passed 快照合入 owner | 不决定谁有权限；不在脏 tree 上静默销毁数据；不自动解决 merge 冲突 |
+| `src/capacity-service.mjs` | root turn、用户并发、access 占用跟踪、EXECUTE lease 与排队 | 不替代数据库生命周期检查；不把同 access 的不同 chat 强制串行 |
 | `src/sandbox.mjs` | 最小环境、Seatbelt profile、命令超时和输出限制 | 不继承 Portal/Codex/Cloudflare 秘密；不提供跨项目读取 |
 | `src/codex-client.mjs` | 启停 app-server、JSONL RPC、精确协议版本验证 | 不向浏览器暴露；不做业务 ACL |
 | `src/codex-service.mjs` | thread/turn、事件、审批、动态工具、恢复、子代理政策、运行清理 | 不允许客户端指定原生 thread/cwd；不自动跨 chat 共享历史 |
-| `public/app.js` | 员工工作台、事件重放、文件与任务交互 | 不作为安全边界；所有限制必须由服务端重复执行 |
+| `public/app.js` | 员工/owner 工作台、事件重放、文件与任务交互、受限 HTML 产物 iframe 预览 | 不作为安全边界；所有限制必须由服务端重复执行，项目 HTML 不获得 Portal 同源能力 |
 | `public/boss.js` | 老板元数据与授权工作流 | 不获得员工项目内容旁路 |
 | `bin/*.sh` | 本机 launchd 生命周期、健康检查和隧道 | 不把服务直接监听到非回环地址 |
 
@@ -50,7 +50,8 @@ Browser request
 .data/harness.sqlite                         业务元数据与 journal
 .data/workspaces/<owner-id>/<project-slug>/ owner 项目主目录
 .data/trees/<project-access-id>/            每个 shared access 的独立 worktree
-.data/runtime/<user-id>/                    命令 HOME/TMP 与运行数据
+.data/runtime/<user-id>/<project-access-id>/ 命令 HOME/TMP 与 access 级运行数据
+.data/runtime/git/                          Portal 受信 Git 服务的独立 HOME
 .data/trash/<actor-id>/                     可恢复删除
 CODEX_HOME                                  原生 Codex thread/登录；由所有 Portal 用户共享
 ```
@@ -59,6 +60,9 @@ CODEX_HOME                                  原生 Codex thread/登录；由所�
 
 ## UI 分工
 
-- `/` 是统一登录与工作台入口。登录后普通用户进入员工工作台，管理员可以进入自己的工作台。
-- `/boss.html` 是老板驾驶舱，提供账号、授权、roadmap、审核和审计元数据能力。
+- `/employee` 是员工登录与工作台入口；`/boss/login` 是老板专用登录页，`/boss` 是老板驾驶舱，`/boss/workbench` 是老板项目工作台。本地与公网使用相同角色路径；无需不同域名或端口。`/` 与旧页面保留跳转兼容。
+- 老板与员工采用独立登录页面、角色专用登录 API 与不同首页；共用工作台组件及同源会话，页面不得把错误角色当作成功登录。
 - 两个页面可以共享同一登录会话，但 UI 导航不改变服务端内容 ACL。
+- owner 与 shared access 在同一工作台中使用相同文件预览组件；HTML 默认渲染且可切回源码，主动内容由 iframe sandbox 与响应 CSP 双重隔离。
+
+`src/input-queue-service.mjs` 负责 chat 私有输入的验证、编辑/取消/继续、FIFO 消费和当前 turn 的 steer；由 CodexService 启停，在业务 SQLite 中持久化。它调用既有 runTurn/capacity，不绕过 root、用户、EXECUTE、模式或 sandbox 边界。浏览器统一通过队列 API 接受消息，再订阅 Portal run SSE。

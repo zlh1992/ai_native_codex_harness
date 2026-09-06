@@ -82,11 +82,25 @@ export class HarnessDatabase {
         title TEXT NOT NULL,
         codex_thread_id TEXT UNIQUE,
         status TEXT NOT NULL DEFAULT 'idle',
+        preferred_mode TEXT NOT NULL DEFAULT 'execute' CHECK(preferred_mode IN ('edit','execute')),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS chats_user_id_idx ON chats(user_id);
       CREATE INDEX IF NOT EXISTS chats_project_id_idx ON chats(project_id);
+      CREATE TABLE IF NOT EXISTS chat_inputs (
+        id TEXT PRIMARY KEY,
+        chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+        prompt TEXT NOT NULL,
+        mode TEXT NOT NULL CHECK(mode IN ('edit','execute')),
+        effort TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','paused','steering','sent','cancelled')),
+        revision INTEGER NOT NULL DEFAULT 1,
+        reason TEXT,
+        turn_run_id TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS chat_inputs_chat_idx ON chat_inputs(chat_id,status);
       CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
         chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
@@ -176,6 +190,7 @@ export class HarnessDatabase {
         task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
         task_version INTEGER NOT NULL,
         submitter_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        project_access_id TEXT REFERENCES project_access(id) ON DELETE SET NULL,
         chat_id TEXT REFERENCES chats(id) ON DELETE SET NULL,
         turn_run_id TEXT REFERENCES turn_runs(id) ON DELETE SET NULL,
         codex_thread_id TEXT NOT NULL,
@@ -184,6 +199,10 @@ export class HarnessDatabase {
         final_reply_snapshot TEXT NOT NULL,
         diff_snapshot TEXT NOT NULL DEFAULT '',
         employee_note TEXT NOT NULL DEFAULT '',
+        snapshot_commit_sha TEXT,
+        snapshot_tree_sha TEXT,
+        delivery_commit_sha TEXT,
+        delivered_at TEXT,
         verdict TEXT NOT NULL DEFAULT 'pending' CHECK(verdict IN ('pending','passed','rework')),
         created_at TEXT NOT NULL,
         reviewed_at TEXT,
@@ -233,9 +252,18 @@ export class HarnessDatabase {
     this.#ensureColumn('chats', 'tree_path', 'TEXT');
     this.#ensureColumn('chats', 'task_id', 'TEXT REFERENCES tasks(id)');
     this.#ensureColumn('chats', 'task_version', 'INTEGER');
+    this.#ensureColumn('chats', 'source_chat_id', 'TEXT');
+    this.#ensureColumn('chats', 'shared_at', 'TEXT');
     this.#ensureColumn('chats', 'thread_state', "TEXT NOT NULL DEFAULT 'ready'");
     this.#ensureColumn('chats', 'thread_error', 'TEXT');
+    this.#ensureColumn('chats', 'preferred_model', 'TEXT');
+    this.#ensureColumn('chats', 'preferred_mode', "TEXT NOT NULL DEFAULT 'execute' CHECK(preferred_mode IN ('edit','execute'))");
     this.#ensureColumn('project_access', 'base_sha', 'TEXT');
+    this.#ensureColumn('task_submissions', 'project_access_id', 'TEXT REFERENCES project_access(id) ON DELETE SET NULL');
+    this.#ensureColumn('task_submissions', 'snapshot_commit_sha', 'TEXT');
+    this.#ensureColumn('task_submissions', 'snapshot_tree_sha', 'TEXT');
+    this.#ensureColumn('task_submissions', 'delivery_commit_sha', 'TEXT');
+    this.#ensureColumn('task_submissions', 'delivered_at', 'TEXT');
     this.#ensureSubmissionRetentionSchema();
     this.#backfillOwnerAccess();
     this.#repairOrphanedSubmissionsOnce();
@@ -266,6 +294,7 @@ export class HarnessDatabase {
           task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
           task_version INTEGER NOT NULL,
           submitter_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          project_access_id TEXT REFERENCES project_access(id) ON DELETE SET NULL,
           chat_id TEXT REFERENCES chats(id) ON DELETE SET NULL,
           turn_run_id TEXT REFERENCES turn_runs(id) ON DELETE SET NULL,
           codex_thread_id TEXT NOT NULL,
@@ -274,16 +303,22 @@ export class HarnessDatabase {
           final_reply_snapshot TEXT NOT NULL,
           diff_snapshot TEXT NOT NULL DEFAULT '',
           employee_note TEXT NOT NULL DEFAULT '',
+          snapshot_commit_sha TEXT,
+          snapshot_tree_sha TEXT,
+          delivery_commit_sha TEXT,
+          delivered_at TEXT,
           verdict TEXT NOT NULL DEFAULT 'pending' CHECK(verdict IN ('pending','passed','rework')),
           created_at TEXT NOT NULL,
           reviewed_at TEXT,
           UNIQUE(task_id, task_version)
         );
         INSERT INTO task_submissions
-          (id,task_id,task_version,submitter_user_id,chat_id,turn_run_id,codex_thread_id,codex_turn_id,
-           final_item_id,final_reply_snapshot,diff_snapshot,employee_note,verdict,created_at,reviewed_at)
-        SELECT id,task_id,task_version,submitter_user_id,chat_id,turn_run_id,codex_thread_id,codex_turn_id,
-           final_item_id,final_reply_snapshot,diff_snapshot,employee_note,verdict,created_at,reviewed_at
+          (id,task_id,task_version,submitter_user_id,project_access_id,chat_id,turn_run_id,codex_thread_id,codex_turn_id,
+           final_item_id,final_reply_snapshot,diff_snapshot,employee_note,snapshot_commit_sha,snapshot_tree_sha,
+           delivery_commit_sha,delivered_at,verdict,created_at,reviewed_at)
+        SELECT id,task_id,task_version,submitter_user_id,project_access_id,chat_id,turn_run_id,codex_thread_id,codex_turn_id,
+           final_item_id,final_reply_snapshot,diff_snapshot,employee_note,snapshot_commit_sha,snapshot_tree_sha,
+           delivery_commit_sha,delivered_at,verdict,created_at,reviewed_at
         FROM task_submissions_legacy;
         DROP TABLE task_submissions_legacy;
         CREATE INDEX task_submissions_task_idx ON task_submissions(task_id, created_at DESC);
@@ -611,18 +646,45 @@ export class HarnessDatabase {
   touchProject(id) { this.db.prepare('UPDATE projects SET updated_at=? WHERE id=?').run(now(), id); }
   deleteProject(id) { this.db.prepare('DELETE FROM projects WHERE id=?').run(id); }
 
-  createChat({ projectId, userId, projectAccessId, treePath, title, taskId = null, taskVersion = null }) {
+  createChat({ projectId, userId, projectAccessId, treePath, title, taskId = null, taskVersion = null, preferredMode = 'execute' }) {
     const id = randomUUID();
     const timestamp = now();
-    this.db.prepare('INSERT INTO chats (id,project_id,user_id,project_access_id,tree_path,title,task_id,task_version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
-      .run(id, projectId, userId, projectAccessId, treePath, title, taskId, taskVersion, timestamp, timestamp);
+    this.db.prepare('INSERT INTO chats (id,project_id,user_id,project_access_id,tree_path,title,task_id,task_version,preferred_mode,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      .run(id, projectId, userId, projectAccessId, treePath, title, taskId, taskVersion, preferredMode, timestamp, timestamp);
     return this.getChat(id);
+  }
+
+  grantProjectAccessWithChats(options, snapshots) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const access = this.grantProjectAccess(options);
+      const sharedAt = now();
+      for (const snapshot of snapshots) {
+        const chat = this.createChat({ projectId: options.projectId, userId: options.userId,
+          projectAccessId: access.id, treePath: access.treePath,
+          title: snapshot.source.title, preferredMode: snapshot.source.preferredMode });
+        this.db.prepare('UPDATE chats SET codex_thread_id=?,source_chat_id=?,shared_at=? WHERE id=?')
+          .run(snapshot.threadId, snapshot.source.id, sharedAt, chat.id);
+        for (const message of snapshot.messages) this.addMessage({
+          ...message, id: `native:${chat.id}:${message.id}`, chatId: chat.id,
+          metadata: { sharedSnapshot: true },
+        });
+      }
+      this.db.exec('COMMIT');
+      return access;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   mapChat(row) {
     return row ? {
       id: row.id, projectId: row.project_id, userId: row.user_id, title: row.title,
       codexThreadId: row.codex_thread_id, status: row.status,
+      preferredMode: row.preferred_mode || 'execute',
+      preferredModel: row.preferred_model || null,
+      sourceChatId: row.source_chat_id || null, sharedAt: row.shared_at || null,
       threadState: row.thread_state || 'ready', threadError: row.thread_error || null,
       projectAccessId: row.project_access_id, treePath: row.tree_path,
       taskId: row.task_id, taskVersion: row.task_version,
@@ -654,7 +716,7 @@ export class HarnessDatabase {
     for (const [key, column] of [
       ['title', 'title'], ['codexThreadId', 'codex_thread_id'], ['status', 'status'],
       ['taskId', 'task_id'], ['taskVersion', 'task_version'], ['threadState', 'thread_state'],
-      ['threadError', 'thread_error'],
+      ['threadError', 'thread_error'], ['preferredMode', 'preferred_mode'], ['preferredModel', 'preferred_model'],
     ]) {
       if (key in patch) { fields.push(`${column}=?`); values.push(patch[key]); }
     }
@@ -672,9 +734,11 @@ export class HarnessDatabase {
       EXISTS(SELECT 1 FROM turn_runs WHERE chat_id=? AND status IN ('queued','starting','running')) AS turn_busy,
       EXISTS(SELECT 1 FROM turn_approvals WHERE chat_id=? AND status='pending') AS approval_busy,
       EXISTS(SELECT 1 FROM execution_leases WHERE chat_id=? AND expires_at>?) AS lease_busy`).get(id, id, id, now());
+    const queueBusy = Boolean(this.db.prepare(`SELECT 1 FROM chat_inputs q JOIN chats c ON c.id=q.chat_id
+      WHERE c.id=? AND q.status IN ('queued','steering') LIMIT 1`).get(id));
     return {
-      busy: Boolean(row?.turn_busy || row?.approval_busy || row?.lease_busy),
-      turnBusy: Boolean(row?.turn_busy), approvalBusy: Boolean(row?.approval_busy), leaseBusy: Boolean(row?.lease_busy),
+      busy: queueBusy || Boolean(row?.turn_busy || row?.approval_busy || row?.lease_busy),
+      queueBusy, turnBusy: Boolean(row?.turn_busy), approvalBusy: Boolean(row?.approval_busy), leaseBusy: Boolean(row?.lease_busy),
     };
   }
 
@@ -686,9 +750,11 @@ export class HarnessDatabase {
         WHERE c.project_access_id=? AND a.status='pending') AS approval_busy,
       EXISTS(SELECT 1 FROM chats c JOIN execution_leases l ON l.chat_id=c.id
         WHERE c.project_access_id=? AND l.expires_at>?) AS lease_busy`).get(id, id, id, now());
+    const queueBusy = Boolean(this.db.prepare(`SELECT 1 FROM chat_inputs q JOIN chats c ON c.id=q.chat_id
+      WHERE c.project_access_id=? AND q.status IN ('queued','steering') LIMIT 1`).get(id));
     return {
-      busy: Boolean(row?.turn_busy || row?.approval_busy || row?.lease_busy),
-      turnBusy: Boolean(row?.turn_busy), approvalBusy: Boolean(row?.approval_busy), leaseBusy: Boolean(row?.lease_busy),
+      busy: queueBusy || Boolean(row?.turn_busy || row?.approval_busy || row?.lease_busy),
+      queueBusy, turnBusy: Boolean(row?.turn_busy), approvalBusy: Boolean(row?.approval_busy), leaseBusy: Boolean(row?.lease_busy),
     };
   }
 
@@ -699,9 +765,11 @@ export class HarnessDatabase {
         WHERE c.project_id=? AND a.status='pending') AS approval_busy,
       EXISTS(SELECT 1 FROM execution_leases l JOIN chats c ON c.id=l.chat_id
         WHERE c.project_id=? AND l.expires_at>?) AS lease_busy`).get(id, id, id, now());
+    const queueBusy = Boolean(this.db.prepare(`SELECT 1 FROM chat_inputs q JOIN chats c ON c.id=q.chat_id
+      WHERE c.project_id=? AND q.status IN ('queued','steering') LIMIT 1`).get(id));
     return {
-      busy: Boolean(row?.turn_busy || row?.approval_busy || row?.lease_busy),
-      turnBusy: Boolean(row?.turn_busy), approvalBusy: Boolean(row?.approval_busy), leaseBusy: Boolean(row?.lease_busy),
+      busy: queueBusy || Boolean(row?.turn_busy || row?.approval_busy || row?.lease_busy),
+      queueBusy, turnBusy: Boolean(row?.turn_busy), approvalBusy: Boolean(row?.approval_busy), leaseBusy: Boolean(row?.lease_busy),
     };
   }
 
@@ -747,6 +815,32 @@ export class HarnessDatabase {
         id: row.id, chatId: row.chat_id, oldThreadId: row.old_thread_id, newThreadId: row.new_thread_id,
         reason: row.reason, createdAt: row.created_at,
       }));
+  }
+
+  getChatInput(chatId, id) {
+    return this.db.prepare('SELECT * FROM chat_inputs WHERE chat_id=? AND id=?').get(chatId, id) || null;
+  }
+
+  listChatInputs(chatId) {
+    return this.db.prepare("SELECT * FROM chat_inputs WHERE chat_id=? AND status NOT IN ('sent','cancelled') ORDER BY rowid").all(chatId);
+  }
+
+  createChatInput({ id, chatId, prompt, mode, effort }) {
+    this.db.prepare('INSERT INTO chat_inputs (id,chat_id,prompt,mode,effort,created_at) VALUES (?,?,?,?,?,?)')
+      .run(id, chatId, prompt, mode, effort, now());
+    return this.getChatInput(chatId, id);
+  }
+
+  changeChatInput(chatId, id, revision, { status, prompt, reason = null, turnRunId = null }) {
+    const result = this.db.prepare(`UPDATE chat_inputs SET status=?,prompt=COALESCE(?,prompt),reason=?,
+      turn_run_id=COALESCE(?,turn_run_id),revision=revision+1 WHERE chat_id=? AND id=? AND revision=?`)
+      .run(status, prompt ?? null, reason, turnRunId, chatId, id, revision);
+    return Number(result.changes) ? this.getChatInput(chatId, id) : null;
+  }
+
+  pauseChatInputs(chatId, reason = 'TURN_STOPPED') {
+    return Number(this.db.prepare("UPDATE chat_inputs SET status='paused',reason=?,revision=revision+1 WHERE chat_id=? AND status='queued'")
+      .run(reason, chatId).changes);
   }
 
   addMessage({ id = randomUUID(), chatId, turnId = null, role, kind = 'message', content, metadata = {}, createdAt = now() }) {
@@ -807,6 +901,7 @@ export class HarnessDatabase {
     const timestamp = now();
     this.db.exec('BEGIN IMMEDIATE');
     try {
+      this.db.exec("UPDATE chat_inputs SET status='paused',reason=CASE WHEN status='steering' THEN 'DELIVERY_UNCERTAIN' ELSE 'PORTAL_RESTARTED' END,revision=revision+1 WHERE status IN ('queued','steering')");
       const interrupted = this.db.prepare("SELECT id,chat_id FROM turn_runs WHERE status IN ('queued','starting','running')").all();
       this.db.prepare("UPDATE turn_runs SET status='interrupted',error_message='Portal restarted',completed_at=? WHERE status IN ('queued','starting','running')")
         .run(timestamp);
@@ -1038,25 +1133,32 @@ export class HarnessDatabase {
     return this.getApproval(id);
   }
 
-  submitTask({ taskId, taskVersion, submitterUserId, chatId, turnRunId, itemId, note = '' }) {
+  submitTask({ taskId, taskVersion, submitterUserId, projectAccessId, chatId, turnRunId, itemId, note = '', snapshotCommitSha, snapshotTreeSha }) {
     const timestamp = now();
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const task = this.db.prepare('SELECT * FROM tasks WHERE id=?').get(taskId);
       if (!task || task.assignee_user_id !== submitterUserId) throw new Error('任务不存在或不属于当前员工。');
       if (!['active', 'rework'].includes(task.status) || task.version !== taskVersion) throw new Error('任务版本已变化，请刷新后重新提交。');
-      const run = this.db.prepare(`SELECT * FROM turn_runs WHERE id=? AND chat_id=? AND user_id=? AND task_id=?
-        AND task_version=? AND status='completed' AND final_item_id=?`).get(
+      const run = this.db.prepare(`SELECT r.*,c.project_access_id AS chat_project_access_id FROM turn_runs r
+        JOIN chats c ON c.id=r.chat_id WHERE r.id=? AND r.chat_id=? AND r.user_id=? AND r.task_id=?
+        AND r.task_version=? AND r.status='completed' AND r.final_item_id=?`).get(
         turnRunId, chatId, submitterUserId, taskId, taskVersion, itemId,
       );
       if (!run || !run.final_reply_snapshot || !run.codex_thread_id || !run.codex_turn_id) throw new Error('只能提交该任务对话中已完成的最终 Codex 回复。');
+      if (!/^[0-9a-f]{40,64}$/i.test(String(snapshotCommitSha || ''))
+        || !/^[0-9a-f]{40,64}$/i.test(String(snapshotTreeSha || ''))) throw new Error('任务提交必须绑定有效的 Git commit 和 tree 快照。');
+      if (run.chat_project_access_id !== projectAccessId) throw new Error('任务对话的项目授权已变化。');
+      const access = this.db.prepare("SELECT id FROM project_access WHERE id=? AND project_id=? AND user_id=? AND status='active'")
+        .get(projectAccessId, task.project_id, submitterUserId);
+      if (!access) throw new Error('任务提交对应的项目授权已失效。');
       const id = randomUUID();
       this.db.prepare(`INSERT INTO task_submissions
-        (id,task_id,task_version,submitter_user_id,chat_id,turn_run_id,codex_thread_id,codex_turn_id,final_item_id,
-         final_reply_snapshot,diff_snapshot,employee_note,created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-        id, taskId, taskVersion, submitterUserId, chatId, turnRunId, run.codex_thread_id, run.codex_turn_id,
-        run.final_item_id, run.final_reply_snapshot, run.diff_snapshot || '', note, timestamp,
+        (id,task_id,task_version,submitter_user_id,project_access_id,chat_id,turn_run_id,codex_thread_id,codex_turn_id,final_item_id,
+         final_reply_snapshot,diff_snapshot,employee_note,snapshot_commit_sha,snapshot_tree_sha,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        id, taskId, taskVersion, submitterUserId, projectAccessId, chatId, turnRunId, run.codex_thread_id, run.codex_turn_id,
+        run.final_item_id, run.final_reply_snapshot, run.diff_snapshot || '', note, snapshotCommitSha, snapshotTreeSha, timestamp,
       );
       const changed = this.db.prepare("UPDATE tasks SET status='submitted',updated_at=? WHERE id=? AND version=? AND status IN ('active','rework')")
         .run(timestamp, taskId, taskVersion);
@@ -1073,9 +1175,11 @@ export class HarnessDatabase {
   mapSubmission(row) {
     return row ? {
       id: row.id, taskId: row.task_id, taskVersion: row.task_version, submitterUserId: row.submitter_user_id,
-      chatId: row.chat_id, turnRunId: row.turn_run_id, codexThreadId: row.codex_thread_id,
+      projectAccessId: row.project_access_id, chatId: row.chat_id, turnRunId: row.turn_run_id, codexThreadId: row.codex_thread_id,
       codexTurnId: row.codex_turn_id, finalItemId: row.final_item_id, finalReplySnapshot: row.final_reply_snapshot,
-      diffSnapshot: row.diff_snapshot, employeeNote: row.employee_note, verdict: row.verdict,
+      diffSnapshot: row.diff_snapshot, employeeNote: row.employee_note,
+      snapshotCommitSha: row.snapshot_commit_sha, snapshotTreeSha: row.snapshot_tree_sha,
+      deliveryCommitSha: row.delivery_commit_sha, deliveredAt: row.delivered_at, verdict: row.verdict,
       createdAt: row.created_at, reviewedAt: row.reviewed_at,
     } : null;
   }
@@ -1092,8 +1196,11 @@ export class HarnessDatabase {
       .all(...(verdict ? [verdict] : [])).map((row) => this.mapSubmission(row));
   }
 
-  reviewSubmission({ submissionId, verdict }) {
+  reviewSubmission({ submissionId, verdict, deliveryCommitSha = null }) {
     if (!['passed', 'rework'].includes(verdict)) throw new Error('审核结果无效。');
+    if (verdict === 'passed' && !/^[0-9a-f]{40,64}$/i.test(String(deliveryCommitSha || ''))) {
+      throw new Error('审核通过前必须完成并记录 owner Git 交付 commit。');
+    }
     const timestamp = now();
     this.db.exec('BEGIN IMMEDIATE');
     try {
@@ -1101,8 +1208,14 @@ export class HarnessDatabase {
       if (!submission || submission.verdict !== 'pending') throw new Error('待审核提交不存在。');
       const task = this.db.prepare('SELECT * FROM tasks WHERE id=?').get(submission.task_id);
       if (!task || task.status !== 'submitted' || task.version !== submission.task_version) throw new Error('任务版本或状态已变化。');
-      const currentAccess = this.db.prepare("SELECT id FROM project_access WHERE project_id=? AND user_id=? AND status='active'")
-        .get(task.project_id, task.assignee_user_id);
+      if (verdict === 'passed' && (!submission.project_access_id || !submission.snapshot_commit_sha || !submission.snapshot_tree_sha)) {
+        throw new Error('历史提交缺少 Git 快照，不能直接审核通过；请要求返工并重新提交。');
+      }
+      const currentAccess = verdict === 'passed'
+        ? this.db.prepare("SELECT id FROM project_access WHERE id=? AND project_id=? AND user_id=? AND status='active'")
+          .get(submission.project_access_id, task.project_id, task.assignee_user_id)
+        : this.db.prepare("SELECT id FROM project_access WHERE project_id=? AND user_id=? AND status='active'")
+          .get(task.project_id, task.assignee_user_id);
       if (!currentAccess) throw new Error('当前任务员工的项目授权已失效，不能审核或自动推进。');
       const next = verdict === 'passed' && task.roadmap_id
         ? this.db.prepare("SELECT * FROM tasks WHERE roadmap_id=? AND position>? AND status='ready' ORDER BY position LIMIT 1")
@@ -1113,7 +1226,8 @@ export class HarnessDatabase {
           .get(next.project_id, next.assignee_user_id);
         if (!access) throw new Error('下一任务员工的项目授权已失效，不能自动推进。');
       }
-      this.db.prepare('UPDATE task_submissions SET verdict=?,reviewed_at=? WHERE id=?').run(verdict, timestamp, submissionId);
+      this.db.prepare(`UPDATE task_submissions SET verdict=?,reviewed_at=?,delivery_commit_sha=?,delivered_at=? WHERE id=?`)
+        .run(verdict, timestamp, verdict === 'passed' ? deliveryCommitSha : null, verdict === 'passed' ? timestamp : null, submissionId);
       if (verdict === 'rework') {
         this.db.prepare("UPDATE tasks SET status='rework',version=version+1,updated_at=? WHERE id=?").run(timestamp, task.id);
         if (task.roadmap_id) this.db.prepare("UPDATE roadmaps SET status='rework',version=version+1,updated_at=? WHERE id=?").run(timestamp, task.roadmap_id);

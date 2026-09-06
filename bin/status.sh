@@ -7,7 +7,7 @@ SERVER_PID="$(launch_job_pid "$SERVER_LABEL")"
 if launch_job_exists "$SERVER_LABEL" && [[ -n "$SERVER_PID" ]]; then
   if local_health; then
     echo "本地服务：运行中（PID ${SERVER_PID}）"
-    echo "本地地址：http://127.0.0.1:$PORT"
+    print_portal_addresses "http://127.0.0.1:$PORT"
   elif local_codex_failed; then
     echo "本地服务：Web 进程运行中，但 Codex app-server 启动失败（PID ${SERVER_PID}）"
   elif local_web_health; then
@@ -31,3 +31,5 @@ elif launch_job_exists "$TUNNEL_LABEL" && [[ -n "$TUNNEL_PID" ]]; then
 else
   echo "公网隧道：已停止"
 fi
+
+if [[ -n "$ADDRESS" ]]; then print_portal_addresses "$ADDRESS"; fi

@@ -4,7 +4,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { HarnessDatabase } from '../src/db.mjs';
+
+const SNAPSHOT_COMMIT = 'a'.repeat(40);
+const SNAPSHOT_TREE = 'b'.repeat(40);
+const DELIVERY_COMMIT = 'c'.repeat(40);
 
 function user(db, username, role = 'user') {
   return db.createUser({
@@ -12,6 +17,51 @@ function user(db, username, role = 'user') {
     maxProjects: 100, maxStorageBytes: 1024 ** 3, maxConcurrentTurns: 40,
   });
 }
+
+test('legacy submission schema gains Git delivery columns idempotently while retaining SET NULL evidence links', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-harness-submission-migration-'));
+  const config = { databasePath: path.join(base, 'db.sqlite'), workspacesRoot: path.join(base, 'workspaces') };
+  let db = new HarnessDatabase(config);
+  db.close();
+
+  const legacy = new DatabaseSync(config.databasePath);
+  legacy.exec(`
+    PRAGMA foreign_keys=OFF;
+    DROP TABLE task_submissions;
+    CREATE TABLE task_submissions (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      task_version INTEGER NOT NULL,
+      submitter_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+      turn_run_id TEXT NOT NULL REFERENCES turn_runs(id) ON DELETE CASCADE,
+      codex_thread_id TEXT NOT NULL,
+      codex_turn_id TEXT NOT NULL,
+      final_item_id TEXT NOT NULL,
+      final_reply_snapshot TEXT NOT NULL,
+      diff_snapshot TEXT NOT NULL DEFAULT '',
+      employee_note TEXT NOT NULL DEFAULT '',
+      verdict TEXT NOT NULL DEFAULT 'pending' CHECK(verdict IN ('pending','passed','rework')),
+      created_at TEXT NOT NULL,
+      reviewed_at TEXT,
+      UNIQUE(task_id, task_version)
+    );
+  `);
+  legacy.close();
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    db = new HarnessDatabase(config);
+    const columns = new Set(db.db.prepare('PRAGMA table_info(task_submissions)').all().map((column) => column.name));
+    for (const name of ['project_access_id', 'snapshot_commit_sha', 'snapshot_tree_sha', 'delivery_commit_sha', 'delivered_at']) {
+      assert.equal(columns.has(name), true, `${name} must exist after migration`);
+    }
+    const foreignKeys = db.db.prepare('PRAGMA foreign_key_list(task_submissions)').all();
+    assert.equal(foreignKeys.find((key) => key.from === 'chat_id')?.on_delete, 'SET NULL');
+    assert.equal(foreignKeys.find((key) => key.from === 'turn_run_id')?.on_delete, 'SET NULL');
+    assert.equal(foreignKeys.find((key) => key.from === 'project_access_id')?.on_delete, 'SET NULL');
+    db.close();
+  }
+});
 
 test('task access and immutable submission are bound to assignee, version, chat, turn and final item', () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-harness-task-'));
@@ -51,7 +101,8 @@ test('task access and immutable submission are bound to assignee, version, chat,
   }), /最终 Codex 回复/);
   const submission = db.submitTask({
     taskId: active.id, taskVersion: 1, submitterUserId: employee.id, chatId: chat.id,
-    turnRunId: run.id, itemId: 'item-final', note: 'Please check IDOR tests.',
+    projectAccessId: access.id, turnRunId: run.id, itemId: 'item-final', note: 'Please check IDOR tests.',
+    snapshotCommitSha: SNAPSHOT_COMMIT, snapshotTreeSha: SNAPSHOT_TREE,
   });
   assert.equal(submission.finalReplySnapshot, 'Finished and tested.');
   assert.equal(submission.diffSnapshot, 'diff --git a/a b/a');
@@ -103,15 +154,16 @@ test('a three-step roadmap advances linearly and rework creates a new task versi
     });
     return db.submitTask({
       taskId: task.id, taskVersion: task.version, submitterUserId: employee.id,
-      chatId: chat.id, turnRunId: run.id, itemId: `item-${suffix}`,
+      projectAccessId: access.id, chatId: chat.id, turnRunId: run.id, itemId: `item-${suffix}`,
+      snapshotCommitSha: SNAPSHOT_COMMIT, snapshotTreeSha: SNAPSHOT_TREE,
     });
   };
 
   let steps = db.getRoadmap(roadmap.id).steps;
   assert.deepEqual(steps.map((task) => task.status), ['active', 'ready', 'ready']);
   const firstSubmission = submit(steps[0], 'first-v1');
-  db.reviewSubmission({ submissionId: firstSubmission.id, verdict: 'passed' });
-  assert.throws(() => db.reviewSubmission({ submissionId: firstSubmission.id, verdict: 'passed' }), /待审核提交不存在/);
+  db.reviewSubmission({ submissionId: firstSubmission.id, verdict: 'passed', deliveryCommitSha: DELIVERY_COMMIT });
+  assert.throws(() => db.reviewSubmission({ submissionId: firstSubmission.id, verdict: 'passed', deliveryCommitSha: DELIVERY_COMMIT }), /待审核提交不存在/);
   steps = db.getRoadmap(roadmap.id).steps;
   assert.deepEqual(steps.map((task) => task.status), ['passed', 'active', 'ready']);
 
@@ -123,12 +175,12 @@ test('a three-step roadmap advances linearly and rework creates a new task versi
   assert.equal(db.getRoadmap(roadmap.id).version, 2);
 
   const reworkSubmission = submit(steps[1], 'second-v2');
-  db.reviewSubmission({ submissionId: reworkSubmission.id, verdict: 'passed' });
+  db.reviewSubmission({ submissionId: reworkSubmission.id, verdict: 'passed', deliveryCommitSha: DELIVERY_COMMIT });
   steps = db.getRoadmap(roadmap.id).steps;
   assert.deepEqual(steps.map((task) => task.status), ['passed', 'passed', 'active']);
 
   const thirdSubmission = submit(steps[2], 'third-v1');
-  db.reviewSubmission({ submissionId: thirdSubmission.id, verdict: 'passed' });
+  db.reviewSubmission({ submissionId: thirdSubmission.id, verdict: 'passed', deliveryCommitSha: DELIVERY_COMMIT });
   assert.deepEqual(db.getRoadmap(roadmap.id).steps.map((task) => task.status), ['passed', 'passed', 'passed']);
   assert.equal(db.getRoadmap(roadmap.id).status, 'passed');
   assert.throws(() => db.reviewSubmission({ submissionId: thirdSubmission.id, verdict: 'invalid' }), /审核结果无效/);
@@ -173,10 +225,11 @@ test('roadmap activation and advancement stop when the employee project ACL is r
   });
   const submission = db.submitTask({
     taskId: first.id, taskVersion: first.version, submitterUserId: employee.id,
-    chatId: chat.id, turnRunId: run.id, itemId: 'acl-final',
+    projectAccessId: access.id, chatId: chat.id, turnRunId: run.id, itemId: 'acl-final',
+    snapshotCommitSha: SNAPSHOT_COMMIT, snapshotTreeSha: SNAPSHOT_TREE,
   });
   db.revokeProjectAccess(access.id);
-  assert.throws(() => db.reviewSubmission({ submissionId: submission.id, verdict: 'passed' }), /不能审核或自动推进/);
+  assert.throws(() => db.reviewSubmission({ submissionId: submission.id, verdict: 'passed', deliveryCommitSha: DELIVERY_COMMIT }), /不能审核或自动推进/);
   assert.equal(db.getSubmission(submission.id).verdict, 'pending');
   assert.deepEqual(db.getRoadmap(roadmap.id).steps.map((task) => task.status), ['submitted', 'ready']);
   db.close();
@@ -218,11 +271,12 @@ test('review cannot pass a revoked current assignee even when the next assignee 
   });
   const submission = db.submitTask({
     taskId: current.id, taskVersion: current.version, submitterUserId: currentEmployee.id,
-    chatId: chat.id, turnRunId: run.id, itemId: 'current-final',
+    projectAccessId: currentAccess.id, chatId: chat.id, turnRunId: run.id, itemId: 'current-final',
+    snapshotCommitSha: SNAPSHOT_COMMIT, snapshotTreeSha: SNAPSHOT_TREE,
   });
   db.revokeProjectAccess(currentAccess.id);
 
-  assert.throws(() => db.reviewSubmission({ submissionId: submission.id, verdict: 'passed' }), /当前任务员工.*不能审核或自动推进/);
+  assert.throws(() => db.reviewSubmission({ submissionId: submission.id, verdict: 'passed', deliveryCommitSha: DELIVERY_COMMIT }), /当前任务员工.*不能审核或自动推进/);
   assert.equal(db.getSubmission(submission.id).verdict, 'pending');
   assert.deepEqual(db.getRoadmap(roadmap.id).steps.map((task) => task.status), ['submitted', 'ready']);
   db.close();

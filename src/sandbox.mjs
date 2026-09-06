@@ -8,10 +8,14 @@ function seatbeltString(value) {
 }
 
 function readableRoot(root) {
-  return `(subpath "${seatbeltString(root)}")`;
+  return `(literal "${seatbeltString(root)}") (subpath "${seatbeltString(root)}")`;
 }
 
-export function buildSeatbeltProfile({ userRoot, readableRoots = [], writableRoots = [], deniedPaths = [], networkAccess }) {
+function literalPath(value) {
+  return `(literal "${seatbeltString(value)}")`;
+}
+
+export function buildSeatbeltProfile({ userRoot, readableRoots = [], readableMetadataPaths = [], writableRoots = [], deniedPaths = [], networkAccess }) {
   const allowedWriteRoots = [...new Set([...(writableRoots.length ? writableRoots : [userRoot])].filter(Boolean))];
   const runtimeRoots = [
     ...allowedWriteRoots, ...readableRoots,
@@ -26,6 +30,7 @@ export function buildSeatbeltProfile({ userRoot, readableRoots = [], writableRoo
     '(import "system.sb")',
     '(allow process*)',
     `(allow file-read* ${runtimeRoots.map(readableRoot).join(' ')})`,
+    readableMetadataPaths.length ? `(allow file-read-metadata ${[...new Set(readableMetadataPaths)].map(literalPath).join(' ')})` : '',
     `(allow file-write* ${allowedWriteRoots.map(readableRoot).join(' ')})`,
     ...deniedPaths.flatMap((denied) => [
       `(deny file-read* (literal "${seatbeltString(denied)}") (subpath "${seatbeltString(denied)}"))`,
@@ -45,7 +50,7 @@ function killGroup(child, signal = 'SIGTERM') {
 export async function runSandboxedCommand({ config, workspace, project, user, command, cwd = '', signal }) {
   invariant(process.platform === 'darwin', 501, 'SANDBOX_UNAVAILABLE', '当前安全命令执行器仅支持 macOS Seatbelt。');
   const projectRoot = fs.realpathSync(workspace.projectRoot(project));
-  const runtimeRoot = fs.realpathSync(workspace.ensureRuntimeRoot(user.id));
+  const runtimeRoot = fs.realpathSync(workspace.ensureAccessRuntimeRoot(user.id, project.accessId));
   const requestedCwd = workspace.resolve(project, cwd || '', { mustExist: true, directory: true }).target;
   const home = path.join(runtimeRoot, 'home');
   const tmp = path.join(runtimeRoot, 'tmp');

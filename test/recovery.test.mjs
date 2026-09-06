@@ -437,3 +437,99 @@ test('thread recovery participates in chat and worktree lifecycle barriers', asy
   assert.equal(codex.workspaceBusy(project.accessId), false);
   db.close();
 });
+
+
+test('share barrier blocks owner turns and thread recovery without changing native mapping', async () => {
+  const { db, config, workspace, user, project, chat } = fixture();
+  const codex = new CodexService({ config, db, workspace });
+  codex.sharingAccesses.add(project.accessId);
+  assert.equal(codex.workspaceBusy(project.accessId), true);
+  assert.equal(codex.chatBusy(chat.id), true);
+  await assert.rejects(codex.runTurn({ chat, project, user, prompt: 'Blocked during share', mode: 'edit', emit: () => {} }),
+    (error) => error.code === 'WORKSPACE_BUSY');
+  await assert.rejects(codex.recoverChatThread({ chat, project, user, action: 'retry' }),
+    (error) => error.code === 'WORKSPACE_BUSY');
+  assert.equal(db.getChat(chat.id).codexThreadId, 'old-thread');
+  assert.equal(db.getLatestTurnRunForChat(chat.id), null);
+  codex.sharingAccesses.clear();
+  assert.equal(codex.workspaceBusy(project.accessId), false);
+  db.close();
+});
+
+test('share fork applies recipient policy and rejects revoked authorization after native await', async () => {
+  const { db, config, workspace, user, project, chat } = fixture();
+  const codex = new CodexService({ config, db, workspace });
+  const recipient = { ...user, networkAccess: false };
+  const recipientProject = { ...project, treePath: path.join(config.treesRoot, 'recipient') };
+  let revoked = false;
+  let readCalled = false;
+  codex.client.start = async () => {};
+  codex.client.request = async (method, params) => {
+    if (method === 'thread/fork') {
+      assert.equal(params.threadId, chat.codexThreadId);
+      assert.equal(params.cwd, recipientProject.treePath);
+      assert.equal(params.sandbox, 'read-only');
+      assert.match(params.baseInstructions, /network access for this user is disabled/);
+      assert.equal('dynamicTools' in params, false);
+      revoked = true;
+      return { thread: { id: 'independent-fork', modelProvider: config.codexModelProvider } };
+    }
+    readCalled = true;
+    return {};
+  };
+  await assert.rejects(codex.prepareSharedChats({ sources: [chat], project: recipientProject, user: recipient,
+    authorize() { if (revoked) throw new Error('authorization revoked'); },
+  }), /authorization revoked/);
+  assert.equal(readCalled, false);
+  assert.equal(db.getChat(chat.id).codexThreadId, 'old-thread');
+  db.close();
+});
+
+
+test('share publishing rolls back access and earlier chats when a later chat fails, and lineage migrates idempotently', () => {
+  const { db, config, user, project, chat } = fixture();
+  const recipient = db.createUser({ username: 'share-recipient', displayName: 'Recipient', passwordHash: 'test', role: 'user',
+    maxProjects: 10, maxStorageBytes: 1024 ** 3, maxConcurrentTurns: 2 });
+  const options = { projectId: project.id, userId: recipient.id, treePath: path.join(config.treesRoot, 'copy'), branchName: 'copy' };
+  const snapshot = { source: chat, threadId: 'new-private-thread', messages: [] };
+  assert.throws(() => db.grantProjectAccessWithChats(options, [snapshot, { ...snapshot, source: { ...chat, title: null } }]), /NOT NULL/);
+  assert.equal(db.listProjectAccess(project.id).length, 1);
+  assert.equal(db.listChats({ userId: recipient.id }).length, 0);
+  assert.equal(db.getChat(chat.id).userId, user.id);
+  const access = db.grantProjectAccessWithChats(options, [snapshot]);
+  const copied = db.listChats({ userId: recipient.id })[0];
+  assert.equal(copied.projectAccessId, access.id);
+  assert.equal(copied.sourceChatId, chat.id);
+  assert.equal(copied.taskId, null);
+  db.close();
+  const reopened = new HarnessDatabase(config);
+  assert.equal(reopened.getChat(copied.id).sourceChatId, chat.id);
+  assert.equal(reopened.getChat(copied.id).sharedAt, copied.sharedAt);
+  assert.deepEqual(reopened.db.prepare('PRAGMA foreign_key_check').all(), []);
+  reopened.close();
+});
+
+test('boss model preference reaches resumed thread and each native turn; employees retain default', async () => {
+  const { base, db, workspace, config, user, project, chat } = fixture();
+  const service = new CodexService({ config, db, workspace });
+  const calls = [];
+  service.client.start = async () => { service.client.started = true; };
+  service.client.request = async (method, params) => {
+    calls.push({ method, params });
+    if (method === 'thread/resume') return { thread: { id: chat.codexThreadId, modelProvider: config.codexModelProvider } };
+    if (method === 'turn/start') throw new Error('intentional test stop');
+    return {};
+  };
+  try {
+    db.db.prepare("UPDATE users SET role='admin' WHERE id=?").run(user.id);
+    for (const model of ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra']) {
+      const current = db.updateChat(chat.id, { preferredModel: model });
+      await assert.rejects(service.runTurn({ chat: current, project, user: db.getUserById(user.id), prompt: 'model test', mode: 'edit', emit() {} }), /intentional test stop/);
+      assert.equal(calls.filter((call) => call.method === 'turn/start').at(-1).params.model, model);
+    }
+    assert.equal(calls.find((call) => call.method === 'thread/resume').params.model, 'gpt-6-astra');
+    db.db.prepare("UPDATE users SET role='user' WHERE id=?").run(user.id);
+    await assert.rejects(service.runTurn({ chat: db.getChat(chat.id), project, user, prompt: 'employee model test', mode: 'edit', emit() {} }), /intentional test stop/);
+    assert.equal(calls.filter((call) => call.method === 'turn/start').at(-1).params.model, config.codexModel);
+  } finally { db.close(); fs.rmSync(base, { recursive: true, force: true }); }
+});

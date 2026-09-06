@@ -1,3 +1,4 @@
+const bossWorkbench = location.pathname === '/boss/workbench' || new URLSearchParams(location.search).get('workbench') === '1';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
@@ -7,7 +8,8 @@ const state = {
   runningTurns: new Map(), maxConcurrentTurns: 11, tasks: [], selectedTask: null,
   codexCapacity: null, pendingSubmission: null, pendingUpload: null,
   pendingTextAction: null, pendingConfirmAction: null,
-  eventCursors: new Map(),
+  eventCursors: new Map(), inputQueues: new Map(), queueRuns: new Map(),
+  queueRefreshing: false, queueHistoryPending: false, queueSending: false, queueEdit: null, pendingInput: null,
 };
 
 function formatBytes(value) {
@@ -117,9 +119,11 @@ async function api(path, options = {}) {
 }
 
 function showLogin() {
+  if (bossWorkbench) { location.replace('/boss/login'); return; }
   $('#login-view').classList.remove('hidden');
   $('#app-view').classList.add('hidden');
-  state.me = null;
+  state.me = null; state.inputQueues.clear(); state.queueRuns.clear(); state.runningTurns.clear();
+  state.pendingInput = null; state.queueEdit = null;
 }
 
 function showApp() {
@@ -149,13 +153,19 @@ async function bootstrap() {
 
   state.me = data.user;
   state.csrf = data.csrfToken;
-  if (data.user.role === 'admin' && new URLSearchParams(location.search).get('workbench') !== '1') {
-    location.replace('/boss.html');
+  if (data.user.role === 'user' && bossWorkbench) { location.replace('/employee'); return; }
+  if (data.user.role === 'admin' && !bossWorkbench) {
+    location.replace('/boss');
     return;
   }
   showApp();
+  document.title = bossWorkbench ? '老板工作台 · Codex Harness' : '员工工作台 · Codex Harness';
   $('#user-chip').textContent = `${data.user.displayName} · ${data.user.role === 'admin' ? '超级管理员' : data.user.username}`;
   $('#model-badge').textContent = data.model;
+  $('#model-badge').classList.toggle('hidden', data.user.role === 'admin');
+  $('#model-select').classList.toggle('hidden', data.user.role !== 'admin');
+  $('#model-select').replaceChildren(...[{ id: '', label: `默认 · ${data.model}` }, ...(data.models || [])].map((model) => new Option(model.label, model.id)));
+  updateModelSelect();
   $('#codex-status').classList.toggle('online', data.codex.ready);
   $('#boss-nav').classList.toggle('hidden', data.user.role !== 'admin');
   state.codexCapacity = data.codex;
@@ -170,7 +180,7 @@ async function bootstrap() {
     await Promise.all([loadProjects(), loadTasks()]);
     const selected = requestedProject && state.projects.find((project) => project.id === requestedProject);
     if (selected) { await selectProject(selected); switchView('workbench'); }
-    else switchView('tasks');
+    else switchView(bossWorkbench ? 'workbench' : 'tasks');
   } catch (error) {
     // api() already handles an actual expired session. Other failures must not
     // masquerade as a login failure and discard the authenticated UI state.
@@ -187,7 +197,7 @@ function updateUsage(usage, quota) {
 
 function updateCapacity(capacity = state.codexCapacity || {}) {
   state.codexCapacity = { ...(state.codexCapacity || {}), ...capacity };
-  $('#execute-capacity').textContent = `${state.codexCapacity.activeExecuteLeases || 0} / ${state.codexCapacity.maxExecuteLeases || 2}`;
+  $('#execute-capacity').textContent = `${state.codexCapacity.activeExecuteLeases || 0} / ${state.codexCapacity.maxExecuteLeases || 11}`;
 }
 
 async function loadTasks() {
@@ -290,15 +300,22 @@ async function loadChats() {
 }
 
 function renderChats() {
+  updateModelSelect();
   const root = $('#chat-list');
   if (!state.selectedProject) { root.className = 'chat-list empty-state'; root.textContent = '请先选择项目'; return; }
   if (!state.chats.length) { root.className = 'chat-list empty-state'; root.textContent = '点击 ＋ 开始第一段对话'; return; }
   root.className = 'chat-list';
   root.innerHTML = state.chats.map((chat) => {
     const running = state.runningTurns.has(chat.id) || chat.status === 'running';
-    return `<button class="chat-item ${state.selectedChat?.id === chat.id ? 'active' : ''} ${running ? 'running' : ''}" data-id="${chat.id}"><b>${running ? '<i class="run-dot">●</i> ' : ''}${escapeHtml(chat.title)}</b><span>${running ? '正在运行 · ' : ''}${formatDate(chat.updatedAt, true)}</span></button>`;
+    return `<button class="chat-item ${state.selectedChat?.id === chat.id ? 'active' : ''} ${running ? 'running' : ''}" data-id="${chat.id}"><b>${running ? '<i class="run-dot">●</i> ' : ''}${escapeHtml(chat.title)}</b><span>${running ? '正在运行 · ' : ''}${chat.sharedAt ? '共享时的独立副本 · ' : ''}${formatDate(chat.updatedAt, true)}</span></button>`;
   }).join('');
   $$('.chat-item', root).forEach((button) => button.addEventListener('click', () => selectChat(state.chats.find((item) => item.id === button.dataset.id))));
+}
+
+function shouldAppendLivePrompt(messages, entry) {
+  const prompt = String(entry?.prompt || '');
+  return Boolean(prompt.trim())
+    && !messages.some((message) => message.role === 'user' && message.content === prompt);
 }
 
 async function selectChat(chat) {
@@ -306,7 +323,10 @@ async function selectChat(chat) {
   renderChats();
   $('#chat-title').textContent = chat.title;
   const data = await api(`/api/chats/${chat.id}`);
+  if (state.selectedChat?.id !== chat.id) return;
   state.selectedChat = data.chat;
+  $('#mode-select').value = data.chat.preferredMode || 'execute';
+  updateModelSelect();
   state.selectedTask = data.task || null;
   state.eventCursors.set(chat.id, Number(data.latestEventId || 0));
   renderMessages(data.messages);
@@ -314,10 +334,11 @@ async function selectChat(chat) {
   if (!running && ['queued', 'starting', 'running'].includes(data.latestTurnRun?.status)) {
     running = await resumePersistedTurn(data);
   }
-  if (running) renderLiveTurn(running, !data.messages.some((message) => message.role === 'user' && message.content === running.prompt));
+  if (running) renderLiveTurn(running, shouldAppendLivePrompt(data.messages, running));
   renderActivity(running);
   await refreshTurnInsights();
   setComposer(true);
+  await refreshInputQueue();
 }
 
 function renderMessages(messages) {
@@ -369,13 +390,16 @@ function selectedChatRunning() {
 }
 
 function setComposer(enabled) {
-  const usable = enabled && !selectedChatRunning() && Boolean(state.selectedChat)
+  const usable = enabled && Boolean(state.selectedChat)
     && state.selectedChat.threadState !== 'resume_failed';
   $('#prompt-input').disabled = !usable;
-  $('#send-button').disabled = !usable;
+  $('#send-button').disabled = !usable || state.queueSending;
+  $('#send-button').setAttribute('aria-label', selectedChatRunning() ? '加入消息队列' : '发送消息');
+  $('#prompt-input').placeholder = selectedChatRunning() ? '继续输入，发送后排队…' : '告诉 Codex 你想构建什么…';
+  renderInputQueue();
   $('#stop-turn').classList.toggle('hidden', !selectedChatRunning());
   $('#composer-context').textContent = state.selectedChat
-    ? `${state.selectedProject.name} · ${state.selectedChat.title}${state.selectedTask ? ` · 任务 V${state.selectedTask.version}` : ''}${selectedChatRunning() ? ' · 正在运行，可切换到其他对话并行提问' : ''}`
+    ? `${state.selectedProject.name} · ${state.selectedChat.title}${state.selectedTask ? ` · 任务 V${state.selectedTask.version}` : ''}${selectedChatRunning() ? ' · 运行中 · 发送后排队，可调整当前方向' : ''}`
     : '选择一个对话后即可开始';
 }
 
@@ -455,6 +479,8 @@ async function refreshTurnInsights() {
 function applyJournalEvent(entry, event) {
   const data = event.payload || {};
   if (event.eventType === 'assistant_delta') entry.text += data.delta || '';
+  else if (event.eventType === 'diff_updated' && typeof data.diff === 'string') entry.diff = data.diff;
+  else if (event.eventType === 'input_steered') void refreshInputQueue({ history: true });
   else if (event.eventType === 'plan_updated') entry.plan = data.plan || [];
   else if (event.eventType === 'turn_queued') entry.statusText = `${data.mode || entry.mode.toUpperCase()} 正在排队 · 前方 ${Math.max(0, Number(data.position || 1) - 1)} 个任务`;
   else if (event.eventType === 'turn_status') entry.statusText = data.status === 'running' ? `Codex 正在执行 · ${entry.mode.toUpperCase()}` : 'Codex 正在启动…';
@@ -523,12 +549,13 @@ async function resumePersistedTurn(chatData) {
   const run = chatData.latestTurnRun;
   if (!run || state.runningTurns.has(chatData.chat.id)) return state.runningTurns.get(chatData.chat.id) || null;
   const entry = {
-    chatId: chatData.chat.id, projectId: chatData.chat.projectId, prompt: '', mode: run.mode || 'edit', text: '',
+    chatId: chatData.chat.id, projectId: chatData.chat.projectId, prompt: '', mode: run.mode || chatData.chat.preferredMode || 'execute', text: '',
     events: [], approvals: [], plan: [], diff: '', statusText: '正在恢复任务事件…', lastEventId: 0,
     turnRunId: run.id, recovered: true,
   };
   state.runningTurns.set(entry.chatId, entry);
-  await recoverTurnJournal(entry, { fullRun: true });
+  try { await recoverTurnJournal(entry, { fullRun: true }); }
+  catch (error) { state.runningTurns.delete(entry.chatId); state.queueRuns.delete(entry.chatId); throw error; }
   void (async () => {
     try {
       const backoff = [1000, 2000, 5000];
@@ -582,124 +609,95 @@ async function resumePersistedTurn(chatData) {
       if (state.selectedChat?.id === entry.chatId) {
         try {
           const fresh = await api(`/api/chats/${entry.chatId}`);
+          if (state.selectedChat?.id !== entry.chatId) return;
           state.selectedChat = fresh.chat; state.selectedTask = fresh.task || null;
           state.eventCursors.set(entry.chatId, Number(fresh.latestEventId || entry.lastEventId || 0));
           renderMessages(fresh.messages); renderActivity(); setComposer(true); await refreshTurnInsights();
+          if (['queued', 'starting', 'running'].includes(fresh.latestTurnRun?.status)) await resumePersistedTurn(fresh);
+          await Promise.all([loadChats(), loadTasks(), loadFiles(), refreshUsage()]);
         } catch { /* access may have been revoked while the turn drained */ }
       }
+      state.queueRuns.delete(entry.chatId);
       updateConcurrencyIndicator();
     }
   })();
   return entry;
 }
 
-async function sendTurn(prompt) {
-  const chat = { ...state.selectedChat, status: 'running' };
-  const project = { ...state.selectedProject };
-  const mode = $('#mode-select').value;
-  const entry = {
-    chatId: chat.id, projectId: project.id, prompt, mode, text: '', events: [], approvals: [], plan: [], diff: '',
-    statusText: 'Codex 正在思考…', lastEventId: Number(state.eventCursors.get(chat.id) || 0), turnRunId: null,
-  };
-  state.runningTurns.set(chat.id, entry);
-  state.selectedChat = chat;
-  const localChat = state.chats.find((item) => item.id === chat.id); if (localChat) localChat.status = 'running';
-  renderChats(); updateConcurrencyIndicator(); setComposer(true);
-  appendMessage('user', prompt);
-  renderLiveTurn(entry);
-  renderActivity(entry);
+function renderInputQueue() {
+  const root = $('#input-queue');
+  const inputs = state.inputQueues.get(state.selectedChat?.id) || [];
+  root.classList.toggle('hidden', !inputs.length);
+  const signature = JSON.stringify([inputs, selectedChatRunning()]);
+  if (root.dataset.signature === signature) return;
+  root.dataset.signature = signature;
+  root.innerHTML = `<div class="queue-heading">待发送 · ${inputs.length}<span>按顺序执行</span></div>` + inputs.map((input, index) => {
+    const busy = input.status === 'steering';
+    const uncertain = input.reason === 'DELIVERY_UNCERTAIN';
+    const status = busy ? '正在调整方向…' : uncertain ? '发送结果未确认，请核对对话' : input.status === 'paused' ? '已暂停' : '排队中';
+    return `<article class="queue-item" data-input-id="${escapeHtml(input.id)}">
+      <div class="queue-meta">${index + 1} · ${status} · ${escapeHtml(input.mode.toUpperCase())}</div>
+      <p>${escapeHtml(input.prompt)}</p><div class="queue-actions">
+      <button type="button" class="secondary compact" data-queue-action="edit" ${busy ? 'disabled' : ''}>编辑</button>
+      <button type="button" class="secondary compact" data-queue-action="cancel" ${busy ? 'disabled' : ''}>取消</button>
+      ${input.status === 'paused' ? `<button type="button" class="secondary compact" data-queue-action="resume">${uncertain ? '核对后重发' : '继续排队'}</button>` : ''}
+      <button type="button" class="queue-steer compact" data-queue-action="steer" ${busy || uncertain || !selectedChatRunning() ? 'disabled' : ''} title="把这条消息送入当前任务，调整运行方向">↑ 打断插队</button>
+      </div></article>`;
+  }).join('');
+}
+
+async function refreshInputQueue({ history = false } = {}) {
+  const chatId = state.selectedChat?.id;
+  if (!chatId || !state.me) return;
+  if (state.queueRefreshing) { state.queueHistoryPending ||= history; return; }
+  history ||= state.queueHistoryPending; state.queueHistoryPending = false;
+  state.queueRefreshing = true;
   try {
-    const response = await fetch(`/api/chats/${chat.id}/turns`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-csrf-token': state.csrf },
-      credentials: 'same-origin', body: JSON.stringify({ prompt, effort: $('#effort-select').value, mode }),
-    });
-    if (!response.ok || !response.body) {
-      const payload = response.headers.get('content-type')?.includes('json') ? await response.json() : null;
-      throw new Error(payload?.error?.message || `任务启动失败 (${response.status})`);
-    }
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const frames = buffer.split('\n\n'); buffer = frames.pop() || '';
-      for (const frame of frames) {
-        let event = 'message'; let data = null; let eventId = null;
-        for (const line of frame.split('\n')) {
-          if (line.startsWith('id:')) eventId = Number(line.slice(3).trim());
-          if (line.startsWith('event:')) event = line.slice(6).trim();
-          if (line.startsWith('data:')) { try { data = JSON.parse(line.slice(5)); } catch { data = {}; } }
-        }
-        if (!data) continue;
-        entry.lastEventId = Math.max(entry.lastEventId, Number(eventId || data.eventId || 0));
-        state.eventCursors.set(chat.id, entry.lastEventId);
-        if (data.turnRunId) entry.turnRunId = data.turnRunId;
-        if (event === 'assistant_delta') {
-          entry.text += data.delta || ''; renderLiveTurn(entry);
-        } else if (event === 'tool_started') {
-          entry.events.push({ callId: data.callId, name: data.name, done: false }); renderActivity(entry);
-        } else if (event === 'tool_completed') {
-          const tool = entry.events.find((item) => item.callId === data.callId); if (tool) tool.done = true; renderActivity(entry);
-        } else if (event === 'turn_status') {
-          entry.statusText = data.status === 'running' ? `Codex 正在执行 · ${entry.mode.toUpperCase()}` : 'Codex 正在启动…'; renderActivity(entry);
-        } else if (event === 'turn_queued') {
-          entry.statusText = `${data.mode} 正在排队 · 前方 ${Math.max(0, Number(data.position) - 1)} 个任务`;
-          updateCapacity({ activeExecuteLeases: data.executeLeases, maxExecuteLeases: data.maxExecuteLeases });
-          renderActivity(entry);
-        } else if (event === 'approval_required') {
-          entry.approvals.push({ id: data.approvalId, kind: data.kind, request: data.request });
-          if (state.selectedChat?.id === chat.id) renderApprovals(entry.approvals);
-          entry.statusText = '等待你批准操作…'; renderActivity(entry);
-        } else if (event === 'approval_resolved') {
-          entry.approvals = entry.approvals.filter((approval) => approval.id !== data.approvalId);
-          if (state.selectedChat?.id === chat.id) renderApprovals(entry.approvals);
-          entry.statusText = 'Codex 继续执行…'; renderActivity(entry);
-        } else if (event === 'plan_updated') {
-          entry.plan = data.plan || [];
-          if (state.selectedChat?.id === chat.id) renderPlanDiff(entry.plan, entry.diff);
-        } else if (event === 'diff_updated') {
-          entry.diff = data.diff || '';
-          if (state.selectedChat?.id === chat.id) renderPlanDiff(entry.plan, entry.diff);
-        } else if (event === 'subagent_updated') {
-          const count = Number(data.count) > 0 ? `${data.count}/${data.limit || 3}` : `上限 ${data.limit || 3}`;
-          entry.events.push({ name: `子代理 ${count} · ${data.model || 'gpt-5.6-luna'}`, done: data.phase === 'completed' });
-          renderActivity(entry);
-        } else if (event === 'native_item') {
-          const item = data.item || {};
-          const label = item.type === 'fileChange' ? '原生文件 diff' : item.type === 'commandExecution' ? '原生命令' : item.tool || item.type;
-          const existing = entry.events.find((value) => value.callId === item.id);
-          if (existing) existing.done = data.phase === 'completed';
-          else entry.events.push({ callId: item.id, name: label, done: data.phase === 'completed' });
-          renderActivity(entry);
-        } else if (event === 'turn_error' || event === 'codex_error') {
-          throw new Error(data.message || 'Codex 任务失败');
-        }
-      }
-    }
-  } catch (error) {
-    try { await recoverTurnJournal(entry); } catch { /* the normal history refresh below is the second fallback */ }
-    if (state.selectedChat?.id === chat.id) appendMessage('error', error.message);
-    toast(`${chat.title}: ${error.message}`, 'error');
-  } finally {
-    state.runningTurns.delete(chat.id);
-    const visibleChat = state.selectedChat?.id === chat.id;
-    if (visibleChat) state.selectedChat.status = 'idle';
-    updateConcurrencyIndicator(); renderActivity(state.runningTurns.get(state.selectedChat?.id)); setComposer(true);
-    if (state.selectedProject) await loadChats();
-    if (visibleChat) {
-      const data = await api(`/api/chats/${chat.id}`);
+    const queue = await api(`/api/chats/${chatId}/queue`);
+    if (state.selectedChat?.id !== chatId) return;
+    state.inputQueues.set(chatId, queue.inputs);
+    const signature = JSON.stringify(queue.latestTurnRun);
+    const changed = state.queueRuns.get(chatId) !== signature;
+    state.queueRuns.set(chatId, signature);
+    renderInputQueue();
+    if (history || (!state.runningTurns.has(chatId) && changed)) {
+      const data = await api(`/api/chats/${chatId}`);
+      if (state.selectedChat?.id !== chatId) return;
       state.selectedChat = data.chat; state.selectedTask = data.task || null;
       renderMessages(data.messages);
       if (['queued', 'starting', 'running'].includes(data.latestTurnRun?.status)) await resumePersistedTurn(data);
-      updateConcurrencyIndicator(); renderActivity(state.runningTurns.get(chat.id)); setComposer(true);
-      await refreshTurnInsights();
+      const running = state.runningTurns.get(chatId);
+      if (running) renderLiveTurn(running, shouldAppendLivePrompt(data.messages, running));
+      renderActivity(running); updateConcurrencyIndicator(); setComposer(true);
     }
-    await loadTasks();
-    if (state.selectedProject?.id === project.id) await Promise.all([loadFiles(), refreshUsage()]);
-  }
+  } catch (error) {
+    state.queueRuns.delete(chatId);
+    state.queueHistoryPending ||= history;
+    throw error;
+  } finally { state.queueRefreshing = false; }
 }
+
+async function submitQueuedInput() {
+  if (state.modelSaving) return toast('模型正在保存，请稍后发送。');
+  const chatId = state.selectedChat?.id;
+  const prompt = $('#prompt-input').value.trim();
+  if (!chatId || !prompt || state.queueSending) return;
+  const body = { prompt, mode: $('#mode-select').value, effort: $('#effort-select').value };
+  const signature = JSON.stringify([chatId, body]);
+  // Reuse the input ID on a network retry so an accepted message cannot be sent twice.
+  if (state.pendingInput?.signature !== signature) state.pendingInput = { signature, id: crypto.randomUUID() };
+  body.id = state.pendingInput.id;
+  state.queueSending = true; setComposer(true);
+  try {
+    await api(`/api/chats/${chatId}/queue`, { method: 'POST', body });
+    state.pendingInput = null;
+    if (state.selectedChat?.id === chatId && $('#prompt-input').value.trim() === prompt) {
+      $('#prompt-input').value = ''; $('#prompt-input').style.height = '';
+    }
+    await refreshInputQueue();
+  } finally { state.queueSending = false; setComposer(true); }
+}
+
 
 async function loadFiles() {
   if (!state.selectedProject) return;
@@ -719,6 +717,11 @@ function fileExtension(filePath) {
   const index = name.lastIndexOf('.');
   return index < 0 ? '' : name.slice(index).toLowerCase();
 }
+
+const HTML_PREVIEW_EXTENSIONS = new Set(['.html', '.htm']);
+const SOURCE_FIRST_EXTENSIONS = new Set([
+  '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.css', '.sh', '.py', '.java', '.go', '.rs', '.yaml', '.yml', '.toml',
+]);
 
 function rawFileUrl(filePath) {
   return `/api/projects/${state.selectedProject.id}/raw?path=${encodeURIComponent(filePath)}`;
@@ -808,6 +811,16 @@ async function renderFilePreview() {
   if (extension === '.pdf') {
     const frame = document.createElement('iframe'); frame.className = 'preview-pdf'; frame.src = raw; frame.title = filePath; root.append(frame); return;
   }
+  if (HTML_PREVIEW_EXTENSIONS.has(extension)) {
+    const frame = document.createElement('iframe');
+    frame.className = 'preview-html';
+    frame.src = raw;
+    frame.title = `${filePath} 预览`;
+    frame.setAttribute('sandbox', 'allow-scripts');
+    frame.setAttribute('referrerpolicy', 'no-referrer');
+    root.append(frame);
+    return;
+  }
   if (['.xlsx', '.xlsm'].includes(extension)) {
     root.innerHTML = '<div class="preview-empty"><div><b>正在解析工作簿…</b>读取工作表和单元格。</div></div>';
     const projectId = state.selectedProject.id; const selected = filePath;
@@ -854,12 +867,13 @@ async function openFile(filePath) {
       try {
         const file = await api(`/api/projects/${projectId}/file?path=${encodeURIComponent(filePath)}`);
         if (state.selectedProject?.id !== projectId || state.selectedFile !== filePath) return;
+        state.selectedFileInfo = file;
         state.fileContent = file.content; $('#file-editor').value = file.content;
       } catch (error) {
         if (error.code !== 'BINARY_FILE') throw error;
       }
     }
-    state.viewerMode = ['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.css', '.html', '.sh', '.py', '.java', '.go', '.rs', '.yaml', '.yml', '.toml'].includes(extension) ? 'source' : 'preview';
+    state.viewerMode = SOURCE_FIRST_EXTENSIONS.has(extension) ? 'source' : 'preview';
     $('#editor-path').textContent = filePath;
     $('#download-file').href = rawFileUrl(filePath); $('#download-file').download = filePath.split('/').pop();
     $('#editor-pane').classList.remove('hidden'); $('#file-tree-resizer').classList.remove('hidden'); $('.files-panel').classList.remove('viewer-closed');
@@ -869,11 +883,17 @@ async function openFile(filePath) {
   } catch (error) { toast(error.message, 'error'); }
 }
 
-async function writeFile(filePath, content, successMessage = '', { overwrite = true } = {}) {
-  await api(`/api/projects/${state.selectedProject.id}/file?path=${encodeURIComponent(filePath)}&overwrite=${overwrite ? '1' : '0'}`, {
-    method: 'PUT', headers: { 'content-type': 'application/octet-stream' }, body: content,
+async function writeFile(filePath, content, successMessage = '', { overwrite = true, expectedVersion = null } = {}) {
+  const data = await api(`/api/projects/${state.selectedProject.id}/file?path=${encodeURIComponent(filePath)}&overwrite=${overwrite ? '1' : '0'}`, {
+    method: 'PUT', headers: {
+      'content-type': 'application/octet-stream',
+      ...(expectedVersion ? { 'if-match': `"${expectedVersion}"` } : {}),
+    }, body: content,
   });
-  if (state.selectedFile === filePath && typeof content === 'string') state.fileContent = content;
+  if (state.selectedFile === filePath) {
+    state.selectedFileInfo = data.file;
+    if (typeof content === 'string') state.fileContent = content;
+  }
   await loadFiles();
   if (state.selectedFile === filePath && state.viewerMode === 'preview') await renderFilePreview();
   toast(successMessage || `已保存 ${filePath}`);
@@ -957,15 +977,36 @@ function setupResizers() {
 $('#login-form').addEventListener('submit', async (event) => {
   event.preventDefault(); $('#login-error').textContent = '';
   try {
-    await api('/api/login', { method: 'POST', body: { username: $('#login-username').value, password: $('#login-password').value } });
+    await api('/api/employee/login', { method: 'POST', body: { username: $('#login-username').value, password: $('#login-password').value } });
     $('#login-password').value = ''; await bootstrap();
   } catch (error) { $('#login-error').textContent = error.message; }
 });
 
 $('#logout-button').addEventListener('click', async () => { try { await api('/api/logout', { method: 'POST' }); } finally { showLogin(); } });
-$('#boss-nav').addEventListener('click', () => location.assign('/boss.html'));
+$('#boss-nav').addEventListener('click', () => location.assign('/boss'));
 $$('[data-view]').forEach((button) => button.addEventListener('click', () => switchView(button.dataset.view)));
 $('#refresh-tasks').addEventListener('click', () => Promise.all([loadTasks(), loadProjects()]).then(renderTasks).catch((error) => toast(error.message, 'error')));
+
+$('#mode-select').addEventListener('change', async (event) => {
+  if (!state.selectedChat) return;
+  const chatId = state.selectedChat.id;
+  const previous = state.selectedChat.preferredMode || 'execute';
+  const preferredMode = event.target.value;
+  state.selectedChat.preferredMode = preferredMode;
+  const local = state.chats.find((chat) => chat.id === chatId);
+  if (local) local.preferredMode = preferredMode;
+  try {
+    const data = await api(`/api/chats/${chatId}`, { method: 'PATCH', body: { preferredMode } });
+    if (state.selectedChat?.id === chatId) state.selectedChat = { ...state.selectedChat, ...data.chat };
+  } catch (error) {
+    if (state.selectedChat?.id === chatId) {
+      state.selectedChat.preferredMode = previous;
+      $('#mode-select').value = previous;
+    }
+    if (local) local.preferredMode = previous;
+    toast(error.message, 'error');
+  }
+});
 
 $('#approval-list').addEventListener('click', async (event) => {
   const button = event.target.closest('[data-decision]');
@@ -1003,7 +1044,7 @@ $('#message-list').addEventListener('click', (event) => {
   };
   $('#submit-form').reset();
   $('.form-error', $('#submit-form')).textContent = '';
-  $('#submit-summary').textContent = `${state.selectedTask.title} · V${state.selectedTask.version}。将保存这条最终回复及本轮 diff 的不可变快照。`;
+  $('#submit-summary').textContent = `${state.selectedTask.title} · V${state.selectedTask.version}。将保存最终回复、本轮 diff，以及当前工作树的不可变 Git commit/tree 快照。`;
   $('#submit-dialog').showModal();
 });
 
@@ -1098,18 +1139,75 @@ $('#new-chat').addEventListener('click', () => {
   });
 });
 
-$('#composer').addEventListener('submit', async (event) => {
-  event.preventDefault(); const prompt = $('#prompt-input').value.trim(); if (!prompt || selectedChatRunning()) return;
-  $('#prompt-input').value = ''; $('#prompt-input').style.height = ''; void sendTurn(prompt).catch((error) => toast(error.message, 'error'));
+$('#composer').addEventListener('submit', (event) => {
+  event.preventDefault();
+  void submitQueuedInput().catch((error) => toast(error.message, 'error'));
+});
+$('#input-queue').addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-queue-action]');
+  if (!button) return;
+  const chatId = state.selectedChat?.id;
+  const id = button.closest('[data-input-id]').dataset.inputId;
+  const input = (state.inputQueues.get(chatId) || []).find((item) => item.id === id);
+  if (!input) return;
+  const action = button.dataset.queueAction;
+  if (action === 'edit') {
+    state.queueEdit = { chatId, id, revision: input.revision };
+    $('#queue-edit-input').value = input.prompt;
+    $('#queue-edit-error').textContent = '';
+    $('#queue-edit-dialog').showModal(); $('#queue-edit-input').focus();
+    return;
+  }
+  if (action === 'resume' && input.reason === 'DELIVERY_UNCERTAIN') {
+    openConfirmDialog({ eyebrow: 'RESEND MESSAGE', title: '确认重新排队',
+      message: '上次发送可能已被 Codex 接受。请核对对话后确认重发，避免重复执行。', submitLabel: '已核对，重新排队',
+      onConfirm: async () => {
+        await api(`/api/chats/${chatId}/queue/${id}/resume`, { method: 'POST',
+          body: { revision: input.revision, acknowledgeUncertain: true } });
+        await refreshInputQueue();
+      },
+    });
+    return;
+  }
+  button.disabled = true;
+  try {
+    await api(`/api/chats/${chatId}/queue/${id}${action === 'cancel' ? '' : `/${action}`}`, {
+      method: action === 'cancel' ? 'DELETE' : 'POST',
+      body: { revision: input.revision, expectedRunId: state.runningTurns.get(chatId)?.turnRunId },
+    });
+    await refreshInputQueue({ history: action === 'steer' });
+  } catch (error) {
+    toast(error.message, 'error');
+    await refreshInputQueue().catch(() => {});
+  } finally { button.disabled = false; }
+});
+$('#queue-edit-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (event.submitter?.value === 'cancel') { $('#queue-edit-dialog').close(); return; }
+  const editing = state.queueEdit;
+  if (!editing) return;
+  const button = $('#queue-edit-save'); button.disabled = true;
+  try {
+    await api(`/api/chats/${editing.chatId}/queue/${editing.id}`, { method: 'PATCH',
+      body: { revision: editing.revision, prompt: $('#queue-edit-input').value } });
+    state.queueEdit = null; $('#queue-edit-dialog').close(); await refreshInputQueue();
+  } catch (error) { $('#queue-edit-error').textContent = error.message; }
+  finally { button.disabled = false; }
 });
 $('#prompt-input').addEventListener('input', (event) => { event.target.style.height = 'auto'; event.target.style.height = `${Math.min(180, event.target.scrollHeight)}px`; });
-$('#prompt-input').addEventListener('keydown', (event) => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') $('#composer').requestSubmit(); });
-$('#stop-turn').addEventListener('click', async () => { if (state.selectedChat) await api(`/api/chats/${state.selectedChat.id}/interrupt`, { method: 'POST' }); });
+$('#prompt-input').addEventListener('keydown', (event) => { if (!event.isComposing && (event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); $('#composer').requestSubmit(); } });
+$('#stop-turn').addEventListener('click', async () => {
+  if (!state.selectedChat) return;
+  try { await api(`/api/chats/${state.selectedChat.id}/interrupt`, { method: 'POST' }); await refreshInputQueue(); }
+  catch (error) { toast(error.message, 'error'); }
+});
 
 $('#refresh-files').addEventListener('click', () => state.selectedProject && loadFiles());
 $('#preview-tab').addEventListener('click', () => setViewerMode('preview').catch((error) => toast(error.message, 'error')));
 $('#source-tab').addEventListener('click', () => setViewerMode('source').catch((error) => toast(error.message, 'error')));
-$('#save-file').addEventListener('click', () => state.selectedFile && writeFile(state.selectedFile, $('#file-editor').value).catch((error) => toast(error.message, 'error')));
+$('#save-file').addEventListener('click', () => state.selectedFile && writeFile(
+  state.selectedFile, $('#file-editor').value, '', { expectedVersion: state.selectedFileInfo?.version || null },
+).catch((error) => toast(error.message, 'error')));
 $('#new-file').addEventListener('click', () => {
   if (!state.selectedProject) return toast('请先选择项目', 'error');
   openTextDialog({
@@ -1172,4 +1270,29 @@ $('#delete-file').addEventListener('click', () => {
   });
 });
 
+setInterval(() => {
+  if (!document.hidden) void refreshInputQueue().catch(() => {});
+}, 1000);
 setupResizers(); health(); bootstrap();
+
+function updateModelSelect() {
+  const select = $('#model-select');
+  select.value = state.selectedChat?.preferredModel || '';
+  select.disabled = !state.selectedChat || Boolean(state.modelSaving);
+}
+
+$('#model-select').addEventListener('change', async (event) => {
+  const chatId = state.selectedChat?.id;
+  if (!chatId) return;
+  const preferredModel = event.target.value || null;
+  state.modelSaving = true;
+  event.target.disabled = true;
+  try {
+    const data = await api(`/api/chats/${chatId}`, { method: 'PATCH', body: { preferredModel } });
+    if (state.selectedChat?.id === chatId) Object.assign(state.selectedChat, data.chat);
+    const local = state.chats.find((chat) => chat.id === chatId);
+    if (local) Object.assign(local, data.chat);
+    toast('对话模型已保存，下次发送时生效。');
+  } catch (error) { toast(error.message, 'error'); }
+  finally { state.modelSaving = false; updateModelSelect(); }
+});

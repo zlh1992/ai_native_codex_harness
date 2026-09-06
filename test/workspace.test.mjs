@@ -36,6 +36,38 @@ test('workspace rejects symlinks that escape the project', () => {
   assert.throws(() => service.readFile(project, 'escape'), /符号链接/);
 });
 
+test('sandboxed file operations reject a path swapped after main-process validation', { skip: process.platform !== 'darwin' }, () => {
+  const { base, service, project } = fixture();
+  const root = service.projectRoot(project);
+  const safe = path.join(root, 'safe');
+  const parked = path.join(root, 'safe-original');
+  const outside = path.join(base, 'outside');
+  fs.mkdirSync(safe);
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(safe, 'target.txt'), 'inside');
+  fs.writeFileSync(path.join(outside, 'target.txt'), 'host-secret');
+
+  const originalResolve = service.resolve.bind(service);
+  let swapped = false;
+  service.resolve = (...args) => {
+    const result = originalResolve(...args);
+    if (!swapped && args[1] === 'safe/target.txt') {
+      swapped = true;
+      fs.renameSync(safe, parked);
+      fs.symlinkSync(outside, safe);
+    }
+    return result;
+  };
+  assert.throws(() => service.readFile(project, 'safe/target.txt'), /符号链接|沙箱/);
+  assert.equal(fs.readFileSync(path.join(outside, 'target.txt'), 'utf8'), 'host-secret');
+
+  fs.unlinkSync(safe);
+  fs.renameSync(parked, safe);
+  swapped = false;
+  assert.throws(() => service.writeFile(project, 'safe/target.txt', 'overwrite-host'), /符号链接|沙箱/);
+  assert.equal(fs.readFileSync(path.join(outside, 'target.txt'), 'utf8'), 'host-secret');
+});
+
 test('workspace previews xlsx values without exposing another path', async () => {
   const { service, project } = fixture();
   const workbook = new ExcelJS.Workbook();

@@ -20,7 +20,7 @@ function inputText(params) {
   return (params.input || []).filter((item) => item.type === 'text').map((item) => item.text || '').join('\n');
 }
 
-function completeTurn(threadId, turnId, prompt) {
+function completeTurn(threadId, turnId, prompt, steers = []) {
   const finalItemId = `item-${turnId}`;
   const reply = `FAKE_CODEX_DONE: ${prompt.replace(/^<!-- portal-mode:(?:EDIT|EXECUTE) -->\n/, '').slice(0, 200)}`;
   notify('turn/diff/updated', { threadId, turnId, diff: 'diff --git a/gate.txt b/gate.txt\n+fake secret diff body' });
@@ -30,6 +30,7 @@ function completeTurn(threadId, turnId, prompt) {
   thread.turns.push({
     id: turnId, status: 'completed', items: [
       { id: `user-${turnId}`, type: 'userMessage', content: [{ type: 'text', text: prompt }] },
+      ...steers.map((item) => ({ id: item.id, type: 'userMessage', content: [{ type: 'text', text: item.text }] })),
       { id: finalItemId, type: 'agentMessage', phase: 'final_answer', text: reply },
     ],
   });
@@ -51,6 +52,16 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     threads.set(threadId, { id: threadId, modelProvider: 'openai_http', turns: [], goal: null });
     return respond(id, { thread: threads.get(threadId) });
   }
+  if (method === 'thread/fork') {
+    const source = threads.get(params.threadId);
+    if (!source) return fail(id, -32001, 'thread not found');
+    if (JSON.stringify(source.turns).includes('[[fork-fail]]')) return fail(id, -32002, 'fixture fork failure');
+    const threadId = `fake-thread-${process.pid}-${nextThread++}`;
+    const fork = structuredClone(source);
+    fork.id = threadId;
+    threads.set(threadId, fork);
+    return respond(id, { thread: fork });
+  }
   if (method === 'thread/resume') {
     if (process.env.FAKE_FAIL_RESUME === '1') return fail(id, -32000, '/private/fake/secret resume failure');
     if (!threads.has(params.threadId)) threads.set(params.threadId, { id: params.threadId, modelProvider: 'openai_http', turns: [], goal: null });
@@ -66,8 +77,20 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     const turnId = `fake-turn-${nextTurn++}`;
     const prompt = inputText(params);
     respond(id, { turn: { id: turnId, status: 'running' } });
-    if (prompt.includes('[[hold]]')) heldTurns.set(turnId, { threadId: params.threadId, prompt });
+    if (prompt.includes('[[hold]]')) heldTurns.set(turnId, { threadId: params.threadId, prompt, steers: [] });
     else setTimeout(() => completeTurn(params.threadId, turnId, prompt), 15).unref();
+    return;
+  }
+  if (method === 'turn/steer') {
+    const held = heldTurns.get(params.expectedTurnId);
+    if (!held || held.threadId !== params.threadId) return fail(id, -32001, 'active turn mismatch');
+    const text = inputText(params);
+    held.steers.push({ id: params.clientUserMessageId, text });
+    respond(id, { turnId: params.expectedTurnId });
+    if (text.includes('[[release]]')) {
+      heldTurns.delete(params.expectedTurnId);
+      setTimeout(() => completeTurn(held.threadId, params.expectedTurnId, held.prompt, held.steers), 50).unref();
+    }
     return;
   }
   if (method === 'turn/interrupt') {
