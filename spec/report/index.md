@@ -24,7 +24,7 @@
 
 | 日期 | 报告 | 状态 | 范围 |
 | --- | --- | --- | --- |
-| 2026-09-06 | [多人 Work Graph 实施](2026-09-06-human-work-graph-implementation.md) | 阶段性保存 | `graph` 保存当前实现，最终门控待完成；P0–P4：生成、分享、DAG、交付、review、恢复、UI 与发布契约 |
+| 2026-09-06 | [多人 Work Graph 实施](2026-09-06-human-work-graph-implementation.md) | 完成（未部署） | `graph`：P0–P4 闭环；最终 gate 90 项单元/集成及 16 项 HTTP 全部通过，生产仍为 `team_member` |
 | 2026-09-06 | [多人 Work Graph 最小演进计划](2026-09-06-human-work-graph-plan.md) | 完成（仅计划文档） | 当前能力核对、多人 DAG、员工资料、自动分享、待办、交接、审核、调度、截图 UI、分期与验收计划；后续实施见上方记录 |
 | 2026-09-06 | [移动端项目与对话选择区扩容](2026-09-06-mobile-workbench-selection.md) | 完成 | 手机端老板/员工工作台选择区高度、触控目标、回归与发布验证 |
 | 2026-09-06 | [运行中输入、消息队列与调整方向](2026-09-06-running-input-queue.md) | 完成 | 持久队列、编辑/取消、原生 steer、FIFO 与恢复/权限验证 |
