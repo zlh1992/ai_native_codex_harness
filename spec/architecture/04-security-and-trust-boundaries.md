@@ -108,3 +108,7 @@ Seatbelt 不是容器。完全不可信用户需要独立 OS 用户、VM/容器�
 角色专用登录 API 必须在创建 session 前检查账号角色；旧通用登录 API 保留兼容。角色入口分离不替代 API 的角色与内容 ACL。显式 owner share 允许把授权时已有完整对话复制给接收员工；副本仍严格属于接收者，不开放原 owner chat、run、SSE 或任务提交权限。
 
 老板可经既有 chat PATCH 接口修改 `preferredModel`（白名单 id 或 null）；此操作要求 admin、原 chat ACL、CSRF/Origin 且 chat 无运行/恢复/排队输入。员工无该权限，运行服务也强制员工使用默认模型。`/api/me` 的 `models` 仅向老板返回受控目录，目录不表示上游账号保证可用。
+
+## 后台业务工具边界
+
+planner/reviewer 仅暴露受限 work_graph_* 工具，禁止原生写入与命令。后台授权采用 owner/member 策略 epoch、access、job lease 与 generation；自动 files_only 分享不复制 transcript。 详细契约见 [多人 Work Graph](09-human-work-graph.md)，操作见 [工作图指南](../../docs/WORK_GRAPH.md)。

@@ -91,3 +91,7 @@
 输入队列 API：`GET/POST /api/chats/:chatId/queue`，`PATCH/DELETE /api/chats/:chatId/queue/:inputId`，`POST .../:inputId/steer|resume`。POST 新输入携带幂等 `id`、`prompt`、`mode`、`effort`；后续修改携带 `revision`，steer 额外携带 `expectedRunId`，不确定发送的 resume 额外要求 `acknowledgeUncertain=true`。既有 POST turns SSE 保持可用，但存在待处理输入时拒绝绕过 FIFO。协议升级检查增加 `turn/steer` 的 expectedTurnId、clientUserMessageId 与 response turnId；本次不改变精确 CLI pin。
 
 队列上线后，降级前应停止并排空全部运行、暂停所有输入并备份 SQLite；保留新表及未发正文，旧代码不会消费这些输入。重启不自动续发待处理消息，用户在队列中继续或取消。
+
+## 工作图运行
+
+工作图仍使用精确 CLI pin，无原生协议升级。通过独立开关控制创建入口、后台派发和自动应用审核；降级不得直接使用不认识 manual 提交的旧版本。 详细契约见 [多人 Work Graph](09-human-work-graph.md)，操作见 [工作图指南](../../docs/WORK_GRAPH.md)。

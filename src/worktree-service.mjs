@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { HttpError, invariant } from './errors.mjs';
+import { graphRelativePath } from './work-graph-contract.mjs';
 
 const RESERVED_DELIVERY_PARTS = new Set(['.git', '.codex', '.trash', '.home', '.tmp']);
 
@@ -24,9 +26,9 @@ export class WorktreeService {
     fs.mkdirSync(path.join(this.runtimeRoot, 'git'), { recursive: true, mode: 0o700 });
   }
 
-  #git(cwd, args, { allowFailure = false, input = undefined, trim = true, maxBuffer = 64 * 1024 * 1024 } = {}) {
+  #git(cwd, args, { allowFailure = false, input = undefined, trim = true, maxBuffer = 64 * 1024 * 1024, encoding = 'utf8' } = {}) {
     const result = spawnSync('/usr/bin/git', ['-C', cwd, ...args], {
-      encoding: 'utf8',
+      encoding,
       input,
       env: {
         PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
@@ -42,9 +44,9 @@ export class WorktreeService {
     if (result.status !== 0 && !allowFailure) {
       throw new HttpError(409, 'GIT_FAILED', 'Git 操作失败。', String(result.stderr || result.stdout || '').trim());
     }
-    const stdout = String(result.stdout || '');
+    const stdout = encoding === null ? result.stdout : String(result.stdout || '');
     const stderr = String(result.stderr || '');
-    return { ok: result.status === 0, stdout: trim ? stdout.trim() : stdout, stderr: trim ? stderr.trim() : stderr };
+    return { ok: result.status === 0, stdout: trim && encoding !== null ? stdout.trim() : stdout, stderr: trim ? stderr.trim() : stderr };
   }
 
   #assertDeliverableIndex(cwd) {
@@ -70,8 +72,7 @@ export class WorktreeService {
     }
     const staged = this.#git(cwd, ['diff', '--cached', '--quiet'], { allowFailure: true });
     if (!staged.ok) this.#git(cwd, ['-c', 'core.hooksPath=/dev/null', 'commit', '-m', message]);
-    const commitSha = this.#git(cwd, ['rev-parse', 'HEAD']).stdout;
-    const treeSha = this.#git(cwd, ['rev-parse', 'HEAD^{tree}']).stdout;
+    const [commitSha, treeSha] = this.#git(cwd, ['rev-parse', 'HEAD', 'HEAD^{tree}']).stdout.split('\n');
     invariant(/^[0-9a-f]{40,64}$/i.test(commitSha) && /^[0-9a-f]{40,64}$/i.test(treeSha),
       500, 'DELIVERY_SNAPSHOT_INVALID', 'Git 未返回有效的交付快照。');
     return { commitSha, treeSha };
@@ -79,9 +80,10 @@ export class WorktreeService {
 
   isReady(projectRoot) {
     if (!fs.existsSync(projectRoot)) return false;
-    const top = this.#git(projectRoot, ['rev-parse', '--show-toplevel'], { allowFailure: true });
-    if (!top.ok || canonical(top.stdout) !== canonical(projectRoot)) return false;
-    return this.#git(projectRoot, ['rev-parse', '--verify', 'HEAD'], { allowFailure: true }).ok;
+    const metadata = this.#git(projectRoot, ['rev-parse', '--show-toplevel', '--verify', 'HEAD'], { allowFailure: true });
+    if (!metadata.ok) return false;
+    const [top, head] = metadata.stdout.split('\n');
+    return Boolean(top && /^[0-9a-f]{40,64}$/i.test(head || '') && canonical(top) === canonical(projectRoot));
   }
 
   initialize(projectRoot) {
@@ -93,10 +95,12 @@ export class WorktreeService {
     this.#git(root, ['config', 'user.email', 'codex-harness@localhost']);
     if (!this.#git(root, ['rev-parse', '--verify', 'HEAD'], { allowFailure: true }).ok) {
       this.#git(root, ['add', '-A']);
-      this.#git(root, ['commit', '-m', 'Initialize Codex Harness project']);
+      this.#assertDeliverableIndex(root);
+      this.#git(root, ['-c', 'core.hooksPath=/dev/null', 'commit', '--allow-empty', '-m', 'Initialize Codex Harness project']);
     } else if (this.#git(root, ['status', '--porcelain']).stdout) {
       this.#git(root, ['add', '-A']);
-      this.#git(root, ['commit', '-m', 'Prepare Codex Harness sharing snapshot']);
+      this.#assertDeliverableIndex(root);
+      this.#git(root, ['-c', 'core.hooksPath=/dev/null', 'commit', '-m', 'Prepare Codex Harness sharing snapshot']);
     }
     return { ready: true, branch: this.#git(root, ['branch', '--show-current']).stdout || 'main' };
   }
@@ -108,7 +112,7 @@ export class WorktreeService {
     return target;
   }
 
-  createShare({ projectRoot, projectId, accessId }) {
+  createShare({ projectRoot, projectId, accessId, baseline = null }) {
     invariant(this.isReady(projectRoot), 409, 'GIT_REQUIRED', '项目尚未准备为 Git 仓库，请先在驾驶舱中初始化。');
     const treePath = this.treePath(accessId);
     invariant(!fs.existsSync(treePath), 409, 'TREE_EXISTS', '授权工作树已经存在。');
@@ -118,7 +122,7 @@ export class WorktreeService {
     const includedLocalChanges = Boolean(this.#git(projectRoot, ['status', '--porcelain']).stdout);
     const untracked = this.#git(projectRoot, ['ls-files', '--others', '--exclude-standard', '-z'], { trim: false }).stdout
       .split('\0').filter(Boolean);
-    const baseline = this.#snapshot(projectRoot, `Codex Harness sharing baseline for access ${accessId}`);
+    baseline ||= this.#snapshot(projectRoot, `Codex Harness sharing baseline for access ${accessId}`);
     try {
       this.#git(projectRoot, ['worktree', 'add', '-b', branchName, treePath, baseline.commitSha]);
       return {
@@ -136,6 +140,53 @@ export class WorktreeService {
     invariant(this.isReusableShare({ treePath }), 409, 'DELIVERY_WORKTREE_INVALID', '任务工作树不可用，无法创建交付快照。');
     const snapshot = this.#snapshot(treePath, `Codex Harness task ${taskId} v${taskVersion}`);
     return { ...snapshot, createdFrom: canonical(treePath) };
+  }
+
+  snapshotProject(projectRoot) {
+    if (!this.isReady(projectRoot)) this.initialize(projectRoot);
+    return this.#snapshot(projectRoot, 'Codex Harness work graph input snapshot');
+  }
+
+  head(projectRoot) { return this.#git(projectRoot, ['rev-parse', 'HEAD']).stdout; }
+
+  synchronizeShare({ projectRoot, treePath, commitSha }) {
+    invariant(this.isReady(projectRoot) && this.isReusableShare({ treePath }), 409, 'INPUT_WORKTREE_INVALID', '任务工作树不可用。');
+    invariant(/^[0-9a-f]{40,64}$/.test(commitSha)
+      && this.#git(projectRoot, ['merge-base', '--is-ancestor', commitSha, 'HEAD'], { allowFailure: true }).ok,
+    409, 'INPUT_BASE_INVALID', '任务输入基线不属于老板项目。');
+    invariant(!this.#git(treePath, ['status', '--porcelain']).stdout, 409, 'INPUT_WORKTREE_DIRTY', '工作树有未提交修改，请先处理再同步任务输入。');
+    const head = this.head(treePath);
+    if (head === commitSha) return { commitSha, alreadyPrepared: true };
+    invariant(this.#git(treePath, ['merge-base', '--is-ancestor', head, commitSha], { allowFailure: true }).ok,
+      409, 'INPUT_BASE_DIVERGED', '工作树有尚未交付的独立提交，请先处理基线冲突。');
+    this.#git(treePath, ['-c', 'core.hooksPath=/dev/null', 'merge', '--ff-only', commitSha]);
+    return { commitSha: this.head(treePath), alreadyPrepared: false };
+  }
+
+  readSnapshotFiles({ projectRoot, commitSha, paths, maxBytes = 2 * 1024 * 1024, includeContent = true, includeBytes = false }) {
+    invariant(/^[0-9a-f]{40,64}$/.test(String(commitSha)), 400, 'INVALID_SNAPSHOT', '成果版本无效。');
+    const files = [];
+    let total = 0;
+    for (const input of paths) {
+      const relative = graphRelativePath(input);
+      const entries = this.#git(projectRoot, ['ls-tree', '-z', commitSha, '--', relative], { trim: false }).stdout.split('\0').filter(Boolean);
+      const entry = entries.find((line) => line.slice(line.indexOf('\t') + 1) === relative);
+      invariant(entry && /^(100644|100755) blob /.test(entry), 409, 'OUTPUT_FILE_REQUIRED', `成果不是快照中的普通文件: ${relative}`);
+      const blobId = entry.split('\t')[0].split(' ')[2];
+      const size = Number(this.#git(projectRoot, ['cat-file', '-s', blobId]).stdout);
+      total += size;
+      invariant(Number.isSafeInteger(size) && size >= 0 && total <= maxBytes, 413, 'CONTEXT_TOO_LARGE', '成果内容超过本次读取预算。');
+      const bytes = this.#git(projectRoot, ['cat-file', 'blob', blobId], { encoding: null, trim: false, maxBuffer: Math.max(1024, size + 1024) }).stdout;
+      const file = { path: relative, size, sha256: createHash('sha256').update(bytes).digest('hex') };
+      if (includeContent) {
+        try { file.content = new TextDecoder('utf-8', { fatal: true }).decode(bytes); file.readable = !file.content.includes('\0'); }
+        catch { file.readable = false; }
+        if (!file.readable) delete file.content;
+      }
+      if (includeBytes) file.bytes = bytes;
+      files.push(file);
+    }
+    return files;
   }
 
   deliverSubmission({ projectRoot, treePath, snapshotCommitSha, snapshotTreeSha, taskId, taskVersion }) {

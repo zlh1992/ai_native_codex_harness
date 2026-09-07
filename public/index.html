@@ -52,7 +52,7 @@
 
     <section id="tasks-view" class="employee-home">
       <div class="employee-hero">
-        <div><p class="eyebrow">MY DELIVERY QUEUE</p><h1>我的任务</h1><p>只显示分配给你、且当前仍有项目访问权的工作。Codex 目标用于执行，任务提交仍需老板验收。</p></div>
+        <div><p class="eyebrow">MY DELIVERY QUEUE</p><h1>我的任务</h1><p>只显示分配给你、且当前仍有项目访问权的工作。可自行完成或使用 Codex 执行，提交后按项目策略验收。</p></div>
         <div class="capacity-card"><span>EXECUTE 并发</span><b id="execute-capacity">0 / 11</b><small>同项目不同对话可并行，达到总席位后排队</small></div>
       </div>
       <div class="employee-summary">
@@ -61,8 +61,9 @@
         <div><span>已通过</span><b id="task-passed-count">0</b></div>
         <div><span>可见项目</span><b id="visible-project-count">0</b></div>
       </div>
-      <div class="task-section-title"><div><p class="eyebrow">LINEAR ROADMAP</p><h2>交付队列</h2></div><button id="refresh-tasks" class="secondary">刷新</button></div>
+      <div class="task-section-title"><div><p class="eyebrow">DELIVERY TASKS</p><h2>交付队列</h2></div><button id="refresh-tasks" class="secondary">刷新</button></div>
       <div id="task-list" class="task-board empty-state">暂无分配任务</div>
+      <section id="work-graph-panel" class="hidden" aria-label="团队项目工作图"></section>
     </section>
 
     <section id="workbench-view" class="workbench hidden">
@@ -199,6 +200,7 @@
   </dialog>
 
   <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+  <dialog id="work-graph-drawer" class="work-graph-drawer" aria-label="工作图任务与验收"></dialog>
   <script type="module" src="/app.js"></script>
   <dialog id="queue-edit-dialog">
     <form id="queue-edit-form" class="dialog-form">

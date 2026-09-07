@@ -73,5 +73,5 @@ Browser
 
 1. 保持当前数据不变量、恢复和发布门控稳定。
 2. 若业务需要并发任务的独立基线或无冲突写入，引入 execution environment 实体、任务级 worktree、同步策略和冲突解决/PR；不能退回只保存回复或易变 worktree 的交付模型。
-3. 引入 project membership 角色和显式 artifact/handoff，；显式 share 的 owner 历史 fork 是当前支持的一次性操作。
+3. 多人 Work Graph 已提供显式 artifact/handoff 与自动 files_only 共享，见 [工作图契约](09-human-work-graph.md)；细粒度 project membership 角色仍属于后续演进。
 4. 最后处理组织、OIDC/MFA、持久限流、设备会话和 per-tenant worker。

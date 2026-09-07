@@ -13,6 +13,14 @@ import { HarnessDatabase } from './db.mjs';
 import { HttpError, invariant } from './errors.mjs';
 import { WorkspaceService, slugify } from './fs-service.mjs';
 import { WorktreeService } from './worktree-service.mjs';
+import { WorkGraphStore } from './work-graph-store.mjs';
+import { WorkGraphService } from './work-graph-service.mjs';
+import { ProjectShareService } from './project-share-service.mjs';
+import { TaskReviewService } from './task-review-service.mjs';
+import { ProjectContextService } from './project-context-service.mjs';
+import { WorkGraphRuntime } from './work-graph-runtime.mjs';
+import { WorkflowScheduler } from './workflow-scheduler.mjs';
+import { createWorkGraphRoutes } from './work-graph-routes.mjs';
 import { readBody, readJson, securityHeaders, sendJson, serveStatic, sse, sseHeaders } from './http-utils.mjs';
 
 const CURRENT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -61,6 +69,29 @@ db.recoverInterruptedRuntime();
 const workspace = new WorkspaceService(config);
 const worktrees = new WorktreeService(config);
 const codex = new CodexService({ config, db, workspace });
+const graphStore = new WorkGraphStore(db);
+const graphs = new WorkGraphService({ db, store: graphStore, workspace, worktrees, codex });
+const shares = new ProjectShareService({ db, store: graphStore, workspace, worktrees, codex });
+const reviews = new TaskReviewService({ db, store: graphStore, workspace, worktrees, codex, graphs });
+const graphContext = new ProjectContextService({ db, store: graphStore, workspace, worktrees, graphs });
+const graphRuntime = new WorkGraphRuntime({ db, store: graphStore, codex, graphs, reviews, context: graphContext });
+codex.workGraphRuntime = graphRuntime;
+graphStore.recoverJobs();
+const workflowScheduler = new WorkflowScheduler({ store: graphStore, handlers: {
+  'share.prepare': (job) => shares.prepareWorkflow(job),
+  'workflow.reconcile': (job) => graphs.reconcile(job.runId, job.generation),
+  'plan.generate': (job) => graphRuntime.plan(job),
+  'submission.review': (job) => graphRuntime.review(job),
+  'review.apply': (job) => {
+    invariant(config.workGraphAutoReviewEnabled, 409, 'AUTO_REVIEW_DISABLED', '自动审核已由运维暂停，请老板人工验收。');
+    return reviews.apply(job.payload.reviewId, { ownerId: job.ownerId, job });
+  },
+}, onLeaseLost: async (job) => {
+  const chat = db.listChats({ projectId: job.projectId }).find((c) => c.workflowJobId === job.id);
+  if (chat) await codex.interrupt(chat.id);
+} });
+const workGraphRoutes = createWorkGraphRoutes({ db, store: graphStore, graphs, reviews, runtime: graphRuntime,
+  scheduler: workflowScheduler, shares, codex, config, requireMutation, refreshSession, projectFor, requireAdmin, audit });
 const loginAttempts = new Map();
 
 function log(level, message, detail) {
@@ -304,6 +335,7 @@ async function route(req, res) {
   }
 
   let session = requireSession(req);
+  if (await workGraphRoutes(req, res, url, session)) return;
   if (req.method === 'POST' && pathname === '/api/logout') {
     requireMutation(req, session);
     db.deleteSession(session.tokenHash);
@@ -314,6 +346,7 @@ async function route(req, res) {
   if (req.method === 'GET' && pathname === '/api/me') {
     const usage = userUsage(session.user.id);
     sendJson(res, 200, {
+      workGraphEnabled: config.workGraphEnabled,
       user: session.user, csrfToken: session.csrfToken, usage,
       model: config.codexModel, models: session.user.role === 'admin' ? ROOT_MODELS : [], defaultEffort: config.codexReasoningEffort,
       efforts: [...EFFORTS], turnModes: [...TURN_MODES], codex: codex.status(),
@@ -383,6 +416,7 @@ async function route(req, res) {
     const retained = db.listProjectAccess(project.id).filter((access) => access.accessKind === 'shared'
       && access.status === 'revoked' && worktrees.isReusableShare({ treePath: access.treePath }));
     invariant(retained.length === 0, 409, 'RETAINED_WORKTREES', '项目仍有撤权后保留的工作树；请先恢复授权并处理其中的修改。');
+    invariant(!graphStore.runs({ projectId: project.id }).length, 409, 'PROJECT_WORKFLOW_HISTORY', '项目保留工作图交付历史，不能删除。');
     const trashed = workspace.trashProject(project);
     db.deleteProject(project.id);
     audit(req, session, 'project.trash', 'project', project.id, { name: project.name, recoverable: trashed.recoverable });
@@ -582,6 +616,7 @@ async function route(req, res) {
     requireMutation(req, session);
     const chat = chatFor(session, match[1]);
     invariant(!codex.chatBusy(chat.id), 409, 'CHAT_RUNNING', '请先停止正在运行、排队或恢复中的任务。');
+    invariant(!chat.workflowJobId, 409, 'CHAT_HAS_WORKFLOW', '后台工作图对话用于恢复与审核，不可删除。');
     invariant(!db.chatHasSubmission(chat.id), 409, 'CHAT_HAS_SUBMISSION', '该对话包含不可变的任务提交证据，不能删除。');
     try { db.deleteChat(chat.id); } catch (error) { throw new HttpError(409, 'CHAT_DELETE_REJECTED', error.message); }
     audit(req, session, 'chat.delete', 'chat', chat.id);
@@ -789,7 +824,9 @@ async function route(req, res) {
   }
 
   if (req.method === 'GET' && pathname === '/api/tasks') {
-    sendJson(res, 200, { tasks: db.listTasks({ userId: session.user.id }).filter((task) => db.getProjectForUser(task.projectId, session.user.id)) }, config);
+    sendJson(res, 200, { tasks: db.listTasks({ userId: session.user.id }).filter((task) => db.getProjectForUser(task.projectId, session.user.id) && (!task.workflowRunId
+      || (!['cancelled', 'superseded'].includes(graphStore.run(task.workflowRunId)?.status)
+        && db.getRoadmap(task.roadmapId)?.currentWorkflowId === task.workflowRunId))).map((task) => graphs.publicTask(task)) }, config);
     return;
   }
   match = pathname.match(/^\/api\/tasks\/([^/]+)$/);
@@ -802,6 +839,7 @@ async function route(req, res) {
   if (match && req.method === 'POST') {
     requireMutation(req, session);
     const task = taskFor(session, match[1]);
+    if (task.workflowRunId) graphs.taskFor(task.id, session.user.id);
     invariant(['active', 'rework'].includes(task.status), 409, 'TASK_NOT_ACTIVE', '任务尚未激活、正在审核或已经通过。');
     const project = projectFor(session, task.projectId);
     invariant(!codex.sharingAccesses.has(project.accessId), 409, 'WORKSPACE_BUSY', '项目正在共享，请稍后重试。');
@@ -813,7 +851,7 @@ async function route(req, res) {
       title: `任务 · ${task.title}`.slice(0, 120), taskId: task.id, taskVersion: task.version,
     });
     audit(req, session, 'task.chat_open', 'task', task.id, { chatId: chat.id, taskVersion: task.version });
-    sendJson(res, 200, { task, project: projectPayload(project), chat: chatPayload(chat) }, config);
+    sendJson(res, 200, { task: graphs.publicTask(task), project: projectPayload(project), chat: chatPayload(chat) }, config);
     return;
   }
   match = pathname.match(/^\/api\/tasks\/([^/]+)\/submissions$/);
@@ -907,56 +945,19 @@ async function route(req, res) {
   match = pathname.match(/^\/api\/admin\/task-submissions\/([^/]+)\/review$/);
   if (match && req.method === 'POST') {
     requireMutation(req, session);
-    let submission = db.getSubmission(match[1]);
-    invariant(submission, 404, 'SUBMISSION_NOT_FOUND', '提交不存在。');
-    let task = db.getTask(submission.taskId);
-    invariant(task, 404, 'TASK_NOT_FOUND', '任务不存在。');
-    let project = ownerProject(projectFor(session, task.projectId));
-    const expectedOwnerAccessId = project.accessId;
+    reviews.context(match[1], session.user.id);
     const body = await readJson(req, 16 * 1024);
     session = refreshSession(session);
-    submission = db.getSubmission(match[1]);
-    invariant(submission, 404, 'SUBMISSION_NOT_FOUND', '提交不存在。');
-    task = db.getTask(submission.taskId);
-    invariant(task, 404, 'TASK_NOT_FOUND', '任务不存在。');
-    project = ownerProject(projectFor(session, task.projectId));
-    invariant(project.accessId === expectedOwnerAccessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已变化。');
-    invariant(['passed', 'rework'].includes(body.verdict), 400, 'INVALID_VERDICT', '审核结果必须是 passed 或 rework。');
-    invariant(submission.verdict === 'pending' && task.status === 'submitted' && task.version === submission.taskVersion,
-      409, 'SUBMISSION_NOT_PENDING', '提交或任务版本已变化，请刷新后重试。');
-    let delivery = null;
-    if (body.verdict === 'passed') {
-      const access = db.getProjectAccessById(submission.projectAccessId);
-      invariant(access && access.status === 'active' && access.accessKind === 'shared'
-        && access.projectId === project.id && access.userId === submission.submitterUserId,
-      409, 'SUBMISSION_ACCESS_REVOKED', '提交绑定的原项目授权已失效，不能交付。');
-      const next = task.roadmapId
-        ? db.getRoadmap(task.roadmapId)?.steps.find((candidate) => candidate.position > task.position && candidate.status === 'ready')
-        : null;
-      invariant(!next || db.getProjectForUser(next.projectId, next.assigneeUserId),
-        409, 'NEXT_ASSIGNEE_ACCESS_REVOKED', '下一任务员工的项目授权已失效，不能自动推进。');
-      requireWorkspaceIdle(project);
-      invariant(!codex.workspaceBusy(access.id), 409, 'WORKSPACE_BUSY', '员工工作树正在被 Codex 使用，请等待任务结束或先停止任务。');
-      delivery = worktrees.deliverSubmission({
-        projectRoot: workspace.projectRoot(project), treePath: access.treePath,
-        snapshotCommitSha: submission.snapshotCommitSha, snapshotTreeSha: submission.snapshotTreeSha,
-        taskId: task.id, taskVersion: submission.taskVersion,
-      });
+    let result;
+    try { result = reviews.legacy({ submissionId: match[1], ownerId: session.user.id, verdict: body.verdict }); }
+    catch (error) {
+      if (error instanceof HttpError) throw error;
+      throw new HttpError(409, 'SUBMISSION_REVIEW_REJECTED', error.message);
     }
-    let reviewed;
-    try {
-      reviewed = db.reviewSubmission({
-        submissionId: submission.id, verdict: body.verdict,
-        deliveryCommitSha: delivery?.deliveryCommitSha || null,
-      });
-    }
-    catch (error) { throw new HttpError(409, 'SUBMISSION_REVIEW_REJECTED', error.message); }
-    if (delivery) db.touchProject(project.id);
-    audit(req, session, 'task.review', 'task_submission', submission.id, {
-      taskId: task.id, verdict: body.verdict,
-      deliveryCommitSha: delivery?.deliveryCommitSha || null, alreadyDelivered: delivery?.alreadyDelivered || false,
-    });
-    sendJson(res, 200, { submission: reviewed, task: db.getTask(task.id) }, config);
+    audit(req, session, 'task.review', 'task_submission', result.submission.id,
+      { taskId: result.task.id, verdict: body.verdict, deliveryCommitSha: result.delivery?.deliveryCommitSha || null,
+        alreadyDelivered: result.delivery?.alreadyDelivered || false });
+    sendJson(res, 200, { submission: result.submission, task: result.task }, config);
     return;
   }
   if (req.method === 'GET' && pathname === '/api/admin/dashboard') {
@@ -980,74 +981,20 @@ async function route(req, res) {
   match = pathname.match(/^\/api\/admin\/projects\/([^/]+)\/shares$/);
   if (match && req.method === 'POST') {
     requireMutation(req, session);
-    let project = ownerProject(projectFor(session, match[1]));
-    const expectedAccessId = project.accessId;
+    const project = ownerProject(projectFor(session, match[1]));
     const body = await readJson(req, 32 * 1024);
-    session = refreshSession(session);
-    project = ownerProject(projectFor(session, match[1]));
-    invariant(project.accessId === expectedAccessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已变化。');
-    const target = db.getUserById(String(body.userId || ''));
-    invariant(target && target.role === 'user' && target.status === 'active', 404, 'EMPLOYEE_NOT_FOUND', '员工不存在或账号未启用。');
-    invariant(!db.listProjectAccess(project.id, { activeOnly: true }).some((access) => access.userId === target.id),
-      409, 'SHARE_EXISTS', '该员工已经拥有此项目的有效授权。');
-    const revoked = db.latestRevokedProjectAccess(project.id, target.id);
-    if (revoked && worktrees.isReusableShare({ treePath: revoked.treePath })) {
-      const currentUsage = userUsage(target.id);
-      const retainedUsage = workspace.projectUsage({
-        ...project, accessKind: 'shared', accessUserId: target.id,
-        accessId: revoked.id, treePath: revoked.treePath,
-      });
-      invariant(currentUsage.bytes + retainedUsage.bytes <= target.maxStorageBytes,
-        413, 'STORAGE_QUOTA', '恢复授权工作树将超过员工存储配额。');
-      const restored = db.restoreProjectAccess(revoked.id);
-      audit(req, session, 'project.share_restore', 'project_access', restored.id, { projectId: project.id, employeeId: target.id });
-      sendJson(res, 200, { access: accessPayload(restored), restored: true }, config);
-      return;
-    }
-    requireWorkspaceIdle(project);
-    codex.sharingAccesses.add(project.accessId);
-    let tree;
-    let access;
-    let snapshots;
-    const accessId = randomUUID();
-    try {
-      const authorize = () => {
-        session = refreshSession(session);
-        const current = ownerProject(projectFor(session, project.id));
-        invariant(current.accessId === expectedAccessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已变化。');
-        const employee = db.getUserById(target.id);
-        invariant(employee?.status === 'active' && employee.role === 'user', 403, 'USER_DISABLED', '员工账号已停用。');
-        invariant(!db.listProjectAccess(project.id, { activeOnly: true }).some((item) => item.userId === target.id),
-          409, 'SHARE_EXISTS', '该员工已经拥有此项目的有效授权。');
-        return employee;
-      };
-      const sources = db.listChats({ projectId: project.id, userId: project.userId });
-      tree = worktrees.createShare({ projectRoot: workspace.projectRoot(project), projectId: project.id, accessId });
-      const sharedProject = { ...project, accessKind: 'shared', accessUserId: target.id, accessId, treePath: tree.treePath };
-      snapshots = await codex.prepareSharedChats({ sources, project: sharedProject, user: target, authorize });
-      const employee = authorize();
-      const currentUsage = userUsage(target.id);
-      const snapshotUsage = workspace.projectUsage(sharedProject);
-      invariant(currentUsage.bytes + snapshotUsage.bytes <= employee.maxStorageBytes, 413, 'STORAGE_QUOTA', '授权工作树将超过员工存储配额。');
-      access = db.grantProjectAccessWithChats({
-        id: accessId, projectId: project.id, userId: target.id, treePath: tree.treePath,
-        branchName: tree.branchName, baseSha: tree.baseSha,
-      }, snapshots);
-    } catch (error) {
-      if (tree && !access) try {
-        worktrees.discardUnboundShare({ projectRoot: workspace.projectRoot(project), treePath: tree.treePath, branchName: tree.branchName });
-      } catch { /* retain unbound tree if cleanup fails; never remove owner data */ }
-      throw error;
-    } finally {
-      codex.sharingAccesses.delete(expectedAccessId);
-    }
-    audit(req, session, 'project.share_grant', 'project_access', access.id, {
-      projectId: project.id, employeeId: target.id, baseSha: tree.baseSha,
-      includedLocalChanges: tree.includedLocalChanges, untrackedFiles: tree.untrackedFiles,
-      copiedChats: snapshots.length,
-    });
-    sendJson(res, 201, { access: accessPayload(access), restored: false,
-      includedLocalChanges: tree.includedLocalChanges, copiedChats: snapshots.length }, config);
+    const authorize = () => {
+      session = refreshSession(session);
+      const current = ownerProject(projectFor(session, project.id));
+      invariant(current.accessId === project.accessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已变化。');
+    };
+    authorize();
+    const result = await shares.grant({ project, userId: String(body.userId || ''), authorize,
+      scope: body.scope || 'files_and_history' });
+    audit(req, session, result.restored ? 'project.share_restore' : 'project.share_grant', 'project_access', result.access.id,
+      { projectId: project.id, employeeId: result.access.userId, baseSha: result.access.baseSha,
+        copiedChats: result.copiedChats, scope: body.scope || 'files_and_history' });
+    sendJson(res, result.restored ? 200 : 201, { ...result, access: accessPayload(result.access) }, config);
     return;
   }
   match = pathname.match(/^\/api\/admin\/projects\/([^/]+)\/shares\/([^/]+)$/);
@@ -1058,7 +1005,7 @@ async function route(req, res) {
     invariant(access && access.projectId === project.id && access.accessKind === 'shared'
       && ['active', 'revoked'].includes(access.status), 404, 'SHARE_NOT_FOUND', '授权不存在。');
     if (access.status === 'active') db.revokeProjectAccess(access.id);
-    try { await codex.interruptAccessAndWait(access.id); }
+    try { await Promise.all([codex.interruptAccessAndWait(access.id), graphRuntime.interruptMember(access.userId, project.id)]); }
     catch (error) {
       if (error.code === 'TURN_DRAIN_TIMEOUT') throw new HttpError(409, 'SHARE_DRAIN_TIMEOUT', '撤权已生效，但运行尚未完全排空；工作树已保留，可稍后重试清理。');
       throw error;
@@ -1139,7 +1086,7 @@ async function route(req, res) {
     if (patch.status === 'disabled' || patch.passwordHash) db.deleteUserSessions(target.id);
     if (patch.status === 'disabled' || patch.passwordHash || (patch.networkAccess !== undefined && patch.networkAccess !== target.networkAccess)) {
       try {
-        await codex.interruptUserAndWait(target.id);
+        await Promise.all([codex.interruptUserAndWait(target.id), graphRuntime.interruptMember(target.id)]);
       } catch (error) {
         audit(req, session, 'user.update', 'user', target.id, {
           fields: Object.keys(patch).filter((key) => key !== 'passwordHash'),
@@ -1191,13 +1138,19 @@ server.keepAliveTimeout = 65_000;
 server.listen(config.port, config.host, () => {
   log('info', 'Codex Harness Remote 已启动', { url: `http://${config.host}:${config.port}`, model: config.codexModel });
   if (db.countAdmins() === 0) log('error', '尚无超级管理员，请另开终端运行 ./bin/create-super-admin.sh');
+  if (config.workGraphDispatchEnabled) workflowScheduler.start();
+  else workflowScheduler.stop();
   codex.start().then(() => log('info', 'Codex app-server 已就绪')).catch((error) => log('error', 'Codex app-server 启动失败；首次对话会重试', { message: error.message }));
 });
 
 function shutdown(signal) {
   log('info', `收到 ${signal}，正在关闭`);
+  workflowScheduler.stop();
   codex.stop();
-  server.close(() => { db.close(); process.exit(0); });
+  server.close(async () => {
+    await Promise.allSettled([...workflowScheduler.inFlight.values()].map(entry => entry.promise));
+    db.close(); process.exit(0);
+  });
   setTimeout(() => process.exit(1), 5000).unref();
 }
 process.on('SIGINT', () => shutdown('SIGINT'));

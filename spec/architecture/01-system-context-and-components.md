@@ -66,3 +66,7 @@ CODEX_HOME                                  原生 Codex thread/登录；由所�
 - owner 与 shared access 在同一工作台中使用相同文件预览组件；HTML 默认渲染且可切回源码，主动内容由 iframe sandbox 与响应 CSP 双重隔离。
 
 `src/input-queue-service.mjs` 负责 chat 私有输入的验证、编辑/取消/继续、FIFO 消费和当前 turn 的 steer；由 CodexService 启停，在业务 SQLite 中持久化。它调用既有 runTurn/capacity，不绕过 root、用户、EXECUTE、模式或 sandbox 边界。浏览器统一通过队列 API 接受消息，再订阅 Portal run SSE。
+
+## 工作图组件
+
+WorkGraphStore 管理持久状态；ProjectContextService 固定输入；ProjectShareService 批量准备授权；WorkGraphService 管理清单/交付/依赖；TaskReviewService 管理验收；WorkflowScheduler 和 WorkGraphRuntime 复用 Codex 运行；静态 WorkGraphUI 复用任务首页。 详细契约见 [多人 Work Graph](09-human-work-graph.md)，操作见 [工作图指南](../../docs/WORK_GRAPH.md)。

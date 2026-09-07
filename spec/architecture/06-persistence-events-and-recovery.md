@@ -95,3 +95,7 @@ submission 的 chat/run 外键使用 `ON DELETE SET NULL`，同时保存不可�
 队列 HTTP GET 返回正文，只允许当前 chat owner 在有效 access 内读取；列表和状态由前端定期恢复。待发队列发生变化和新 run 出现后，前端继续复用 run SSE/journal 和消息历史恢复，停止后保留暂停卡片。POST 确认丢失时保留输入框草稿并复用客户端 id 重试。
 
 `input_steered` journal 仅含 input/run 标识，不含正文。GET run SSE 还可向已授权在线订阅者传递不持久化的 assistant/reasoning/command delta 与实时 diff；实时帧不推进 journal cursor，重放仍只返回脱敏语义事件。每次投递继续复验用户状态与 access，断线后正文由受 ACL 的消息/run 快照补齐。
+
+## 工作图恢复
+
+工作图 submission 支持 manual 空原生身份，业务事件采用接收者 ACL。Portal 启动恢复 job；completed 原生运行与持久结构化回执可收敛，其他不确定原生投递需人工确认重试。 详细契约见 [多人 Work Graph](09-human-work-graph.md)，操作见 [工作图指南](../../docs/WORK_GRAPH.md)。

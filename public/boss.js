@@ -132,7 +132,7 @@ async function loadAudit() {
   renderAudit(data.audit);
 }
 
-function openUser(user = null) {
+async function openUser(user = null) {
   const form = $('#user-form');
   form.reset();
   $('[name=id]', form).value = user?.id || '';
@@ -148,7 +148,21 @@ function openUser(user = null) {
   $('#status-field').classList.toggle('hidden', !user);
   $('#user-dialog-title').textContent = user ? `管理 ${user.username}` : '创建员工';
   $('.form-error', form).textContent = '';
+  const save = $('[value=default]', form);
+  save.disabled = true;
+  form.dataset.profileRevision = '0';
+  $('#employee-profile-fields').classList.toggle('hidden', user?.role === 'admin');
   $('#user-dialog').showModal();
+  try {
+    const profile = user?.role === 'user' ? (await api(`/api/admin/users/${user.id}/profile`)).profile : {};
+    if ($('[name=id]', form).value !== (user?.id || '')) return;
+    for (const key of ['jobTitle', 'responsibilities', 'deliveryPreference', 'notes']) $('[name=' + key + ']', form).value = profile[key] || '';
+    $('[name=skills]', form).value = (profile.skills || []).join(', ');
+    $('[name=availability]', form).value = profile.availability || 'available';
+    form.dataset.profileRevision = String(profile.revision || 0);
+    form.dataset.employeeProfile = String(user?.role !== 'admin');
+    save.disabled = false;
+  } catch (error) { $('.form-error', form).textContent = error.message; }
 }
 
 async function grant(projectId, fixedUserId = '') {
@@ -228,7 +242,19 @@ $('#user-form').addEventListener('submit', async (event) => {
   if (form.get('password')) body.password = form.get('password');
   if (id) body.status = form.get('active') === 'on' ? 'active' : 'disabled';
   try {
-    await api(id ? `/api/admin/users/${id}` : '/api/admin/users', { method: id ? 'PATCH' : 'POST', body });
+    const saved = await api(id ? `/api/admin/users/${id}` : '/api/admin/users', { method: id ? 'PATCH' : 'POST', body });
+    // Keep the created account identity if the independent profile save needs retrying.
+    $('[name=id]', target).value = saved.user.id;
+    $('[name=username]', target).disabled = true;
+    $('[name=password]', target).required = false;
+    $('[name=password]', target).value = '';
+    if (target.dataset.employeeProfile === 'true') {
+      const profile = Object.fromEntries(['jobTitle', 'responsibilities', 'deliveryPreference', 'availability', 'notes'].map(key => [key, form.get(key)]));
+      profile.skills = String(form.get('skills') || '').split(/[,，]/).map(x => x.trim()).filter(Boolean);
+      profile.revision = Number(target.dataset.profileRevision);
+      const result = await api(`/api/admin/users/${saved.user.id}/profile`, { method: 'PATCH', body: profile });
+      target.dataset.profileRevision = String(result.profile.revision);
+    }
     $('#user-dialog').close();
     toast(id ? '员工策略已更新。' : '员工账号已创建。');
     await load();

@@ -70,3 +70,9 @@
 - 每 task/chat 独立 worktree、同文件并发冲突自动解决、PR 或完整代码审核 UI；当前只承诺 access worktree 的提交快照与 `passed` owner merge。
 - 任意顶层 chat 实时互发消息、持续 transcript 同步或跨 chat 共享隐式 memory；显式 share 的一次性完整历史 fork 已纳入支持。
 - Linux/Windows 命令沙箱兼容性。
+
+## 多人工作图约束
+
+- **WFG-001**：DAG 的员工节点与 root 内部子代理不同；自动分享仅 files_only，不能广播私有 transcript。
+- **WFG-002**：自动验收仅可在明确策略、当前权限、任务版本和有效租约下应用；必须先完成 Git delivery 再下发依赖任务。
+- **WFG-003**：人工提交不能伪造原生身份，不确定原生调用不得自动重复；详见 [工作图契约](09-human-work-graph.md)。

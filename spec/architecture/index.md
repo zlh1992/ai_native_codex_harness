@@ -18,12 +18,14 @@
 | [07 端到端发布契约](07-e2e-release-contracts.md) | 哪些行为已经被自动 E2E 或真实公网链路验证？ |
 | [08 运维、协议升级与演进](08-operations-protocol-and-evolution.md) | 如何启动、升级 Codex 协议、发布和继续演进？ |
 
+| [09 多人 Work Graph](09-human-work-graph.md) | 真实员工 DAG、自动共享、交付审核与持久调度如何闭环？ |
+
 ## 已接受的核心决策
 
 1. 项目是内容 ACL 与共享事实边界。
 2. `project_access` 对应的主目录或 Git worktree 是当前写入隔离边界；同一 access 的不同 chat 可并发，但同文件并发修改可能产生业务冲突。
 3. 对话是用户私有的推理与交互记录；同项目不意味着原 transcript 互相可读；显式新 share 将 owner 既有历史一次性 fork 为员工私有副本。
-4. roadmap、task、绑定 Git commit/tree 的不可变 submission、审核通过后的 owner merge，以及未来的 artifact/handoff 才是跨对话协作协议。
+4. roadmap、task、绑定 Git commit/tree 的不可变 submission、审核通过后的 owner merge，以及工作图的 artifact/handoff 才是跨对话协作协议。
 5. 浏览器只访问 Portal HTTP/SSE，禁止直接访问或选择 Codex JSON-RPC、thread、cwd、tree 或 sandbox policy。
 6. 不同 chat 的 root turn 可在同一 access/worktree 并行，默认 EXECUTE 容量与 11 个 Portal root 席一致；浏览器写入、task submission 和 owner delivery 仍要求 access 空闲。系统尚未实现每任务 worktree、自动冲突解决或 PR 工作流。
 7. EDIT 只允许项目文件读写，EXECUTE 额外允许项目内命令；chat 独立持久化模式且默认 EXECUTE。通过 ACL、路径和保留目录校验的项目内文件变更与 EXECUTE 命令由 Portal 自动接受，不要求老板或员工逐次点击。

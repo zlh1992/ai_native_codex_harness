@@ -84,9 +84,9 @@ queued -> starting -> running -> completed
 
 ## Roadmap、Task 与 Submission
 
-- roadmap 是有序线性步骤；同一时刻按流程激活当前任务，审核 passed 后推进下一步。
+- `kind=linear` roadmap 是有序线性步骤；同一时刻按流程激活当前任务，审核 passed 后推进下一步。
 - task 的 assignee 必须拥有该项目当前有效 access；撤权后激活、提交、审核和推进均应停止。passed 审核同时校验当前与下一 task assignee。
-- submission 以 `(task_id, task_version)` 唯一，必须引用该 assignee、对应 task chat、完成的 turn、final item 和当前版本。
+- submission 以 `(task_id, task_version)` 唯一；`kind=codex` 必须引用该 assignee、对应 task chat、完成的 turn、final item 和当前版本。
 - submission 保存 `codex_thread_id`、`codex_turn_id`、final item、final reply、diff、employee note、原 `project_access_id` 和 Git snapshot commit/tree 的不可变快照。
 - 创建 submission 前，原 access/worktree 必须空闲；Portal 将 tracked、untracked 和删除状态提交为固定 commit，并拒绝保留路径、symlink 或 submodule 条目。
 - `passed` 审核前，owner workspace 和原 access worktree 都必须空闲；Portal 先快照 owner 当前本地修改，再把 submission commit 以 merge commit 合入 owner。冲突时 abort merge，submission 保持 pending；成功后记录 `delivery_commit_sha` 和 `delivered_at`，然后才推进 task/roadmap。
@@ -137,3 +137,7 @@ steering -> paused (delivery uncertain; never automatically resend)
 ```
 
 编辑、取消、继续和 steer 必须携带当前 revision。消息开始发送或版本变化后旧操作返回 `INPUT_CHANGED`，不能覆盖已经提交给模型的内容。成功/取消后清空队列正文，保留幂等标识；正常发送的正文转入 `user:<run>`，steer 使用 `steer:<inputId>`。队列内容不复制到 share 的新 chat；只有已送入对话的历史参加既有 fork。
+
+## 多人图扩展
+
+`kind=dag` 的计划、人工提交、清单、审核及 handoff 遵循 [多人 Work Graph](09-human-work-graph.md)。manual 原生身份为空；不能套用 linear 的下一步推进逻辑。包含 workflow 历史的项目暂不提供普通删除，须保留提交与恢复证据。

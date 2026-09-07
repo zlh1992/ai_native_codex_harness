@@ -1,3 +1,5 @@
+import { WorkGraphUI } from './work-graph.js';
+
 const bossWorkbench = location.pathname === '/boss/workbench' || new URLSearchParams(location.search).get('workbench') === '1';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -11,6 +13,12 @@ const state = {
   eventCursors: new Map(), inputQueues: new Map(), queueRuns: new Map(),
   queueRefreshing: false, queueHistoryPending: false, queueSending: false, queueEdit: null, pendingInput: null,
 };
+const workGraphUI = new WorkGraphUI({ api, toast, openTask, refreshTasks: loadTasks,
+  openFile: async (projectId, relative) => {
+    if (!state.projects.some((p) => p.id === projectId)) await loadProjects();
+    await selectProject(state.projects.find((p) => p.id === projectId));
+    switchView('workbench'); await openFile(relative);
+  } });
 
 function formatBytes(value) {
   const bytes = Number(value || 0);
@@ -178,9 +186,10 @@ async function bootstrap() {
   const requestedProject = new URLSearchParams(location.search).get('project');
   try {
     await Promise.all([loadProjects(), loadTasks()]);
+    if (data.workGraphEnabled !== false) await workGraphUI.initialize(data.user, state.projects);
     const selected = requestedProject && state.projects.find((project) => project.id === requestedProject);
     if (selected) { await selectProject(selected); switchView('workbench'); }
-    else switchView(bossWorkbench ? 'workbench' : 'tasks');
+    else switchView('tasks');
   } catch (error) {
     // api() already handles an actual expired session. Other failures must not
     // masquerade as a login failure and discard the authenticated UI state.
@@ -204,6 +213,7 @@ async function loadTasks() {
   const data = await api('/api/tasks');
   state.tasks = data.tasks || [];
   renderTasks();
+  if (workGraphUI.initialized && state.me?.role === 'admin') await workGraphUI.refresh();
 }
 
 function taskStatusLabel(status) {
@@ -211,6 +221,7 @@ function taskStatusLabel(status) {
 }
 
 function renderTasks() {
+  if (workGraphUI.initialized && state.me?.role === 'admin') return;
   const active = state.tasks.filter((task) => ['active', 'rework'].includes(task.status)).length;
   $('#task-active-count').textContent = String(active);
   $('#task-submitted-count').textContent = String(state.tasks.filter((task) => task.status === 'submitted').length);
@@ -224,16 +235,17 @@ function renderTasks() {
   }
   root.className = 'task-board';
   root.innerHTML = state.tasks.map((task) => {
-    const actionable = ['active', 'rework'].includes(task.status);
+    const actionable = ['active', 'rework'].includes(task.status) && (!task.workflowRunId || task.workflowStatus === 'running');
     return `<article class="task-card status-${task.status}">
       <div class="task-card-top"><span class="status-tag ${task.status}">${escapeHtml(taskStatusLabel(task.status))}</span><span>V${task.version} · #${task.position + 1}</span></div>
       <p class="eyebrow">${escapeHtml(task.roadmapTitle || 'DIRECT TASK')} · ${escapeHtml(task.projectName)}</p>
       <h3>${escapeHtml(task.title)}</h3>
       <div class="acceptance"><b>验收标准</b><p>${escapeHtml(task.acceptance)}</p></div>
-      <div class="task-card-foot"><span>${formatDate(task.updatedAt, true)}</span>${actionable ? `<button class="primary task-open" data-id="${task.id}">${task.status === 'rework' ? '继续返工' : '进入任务'}</button>` : ''}</div>
+      <div class="task-card-foot"><span>${formatDate(task.updatedAt, true)}</span>${task.workflowRunId ? `<button class="secondary task-inspect" data-id="${task.id}">清单 / 交付</button>` : ''}${actionable ? `<button class="primary task-open" data-id="${task.id}">${task.status === 'rework' ? '继续返工' : '进入任务'}</button>` : ''}</div>
     </article>`;
   }).join('');
   $$('.task-open', root).forEach((button) => button.addEventListener('click', () => openTask(button.dataset.id)));
+  $$('.task-inspect', root).forEach((button) => button.addEventListener('click', () => workGraphUI.inspect(state.tasks.find((t) => t.id === button.dataset.id)).catch((e) => toast(e.message, 'error'))));
 }
 
 async function openTask(taskId) {
@@ -251,6 +263,7 @@ async function openTask(taskId) {
 async function loadProjects() {
   const data = await api('/api/projects');
   state.projects = data.projects;
+  await workGraphUI.updateProjects(state.projects);
   renderProjects();
   if (state.tasks) renderTasks();
   if (state.selectedProject) {
@@ -1038,6 +1051,11 @@ $('#message-list').addEventListener('click', (event) => {
   }
   const button = event.target.closest('.submit-task-button');
   if (!button || !state.selectedTask || !state.selectedChat) return;
+  if (state.selectedTask.workflowRunId) {
+    void workGraphUI.inspect(state.selectedTask, { chatId: state.selectedChat.id, turnRunId: button.dataset.turnRunId,
+      itemId: button.dataset.itemId }).catch((e) => toast(e.message, 'error'));
+    return;
+  }
   state.pendingSubmission = {
     taskId: state.selectedTask.id, taskVersion: Number(button.dataset.taskVersion), chatId: state.selectedChat.id,
     turnRunId: button.dataset.turnRunId, itemId: button.dataset.itemId,

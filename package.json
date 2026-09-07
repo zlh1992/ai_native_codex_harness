@@ -11,7 +11,7 @@
     "start": "node src/server.mjs",
     "dev": "NODE_ENV=development node --watch src/server.mjs",
     "admin": "node src/cli.mjs",
-    "test": "node --test test/*.test.mjs",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs",
     "test:e2e": "node --test --test-concurrency=1 test/e2e/*.test.mjs",
     "check": "for file in src/*.mjs public/*.js test/*.mjs test/*/*.mjs; do node --check \"$file\" || exit 1; done && bash -n bin/*.sh && npm test",
     "gate": "npm run check && npm run test:e2e"

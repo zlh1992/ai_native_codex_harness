@@ -21,6 +21,7 @@ export class InputQueueService {
 
   policy(chatId) {
     const chat = this.db.getChat(chatId);
+    invariant(!chat?.purpose || chat.purpose === 'normal', 403, 'WORKFLOW_JOB_REQUIRED', '后台规划与验收对话由工作图调度器管理。');
     const user = chat && this.db.getUserById(chat.userId);
     invariant(user?.status === 'active', 403, 'USER_DISABLED', '账号不可用。');
     const project = this.db.getProjectForUser(chat.projectId, user.id);
@@ -30,6 +31,7 @@ export class InputQueueService {
     if (chat.taskId) {
       const task = this.db.getTaskForUser(chat.taskId, user.id);
       invariant(task && task.version === chat.taskVersion && ['active', 'rework'].includes(task.status), 409, 'TASK_STALE', '任务已提交或版本已变化。');
+      this.codex.workGraphRuntime?.assertContext({ chat });
     }
     return { chat, user, project };
   }

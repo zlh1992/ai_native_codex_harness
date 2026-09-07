@@ -72,6 +72,14 @@
       <label>密码<input name="password" type="password" minlength="12" autocomplete="new-password"><small>新员工必填，至少 12 位；编辑时留空表示不修改。</small></label>
       <div class="field-grid three"><label>项目上限<input name="maxProjects" type="number" min="1" max="100" value="100"></label><label>空间上限（GB）<input name="maxStorageGb" type="number" min="1" value="2"></label><label>并发任务<input name="maxConcurrentTurns" type="number" min="1" max="40" value="40"></label></div>
       <div class="toggle-row"><label><input name="networkAccess" type="checkbox"> 允许命令访问公网</label><label id="status-field" class="hidden"><input name="active" type="checkbox"> 账号启用</label></div>
+      <fieldset id="employee-profile-fields"><legend>工作图分工资料</legend>
+        <div class="field-grid"><label>岗位<input name="jobTitle" maxlength="120"></label><label>可用性<select name="availability"><option value="available">可安排</option><option value="limited">时间有限</option><option value="unavailable">暂不可安排</option></select></label></div>
+        <label>职责<textarea name="responsibilities" maxlength="4000" rows="3"></textarea></label>
+        <label>能力标签<input name="skills" placeholder="以逗号分隔，最多 30 项"></label>
+        <label>交付偏好<textarea name="deliveryPreference" maxlength="1000" rows="2"></textarea></label>
+        <label>能力说明<textarea name="notes" maxlength="4000" rows="2"></textarea></label>
+        <small>用于生成分工计划，不改变账号权限。</small>
+      </fieldset>
       <p class="form-error" role="alert"></p>
       <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button value="default" class="primary">保存</button></div>
     </form>

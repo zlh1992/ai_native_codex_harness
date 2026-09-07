@@ -115,3 +115,7 @@ completed task turn
 queued/steering 输入加入 chat/access/project 的持久生命周期与文件写入屏障；paused 是未执行草稿，不占运行资源。停止会暂停待发消息并中断当前 turn；失败、中断、停用、改密、撤权与 app-server 退出同样阻止队列继续自动执行。继续排队需重新通过执行策略校验。启动错误或运行异常不能自动反复重试同一消息。
 
 “打断插队”通过固定版本原生 `turn/steer` 把选定消息送入当前 turn，不创建第二个 root。Portal 同时校验客户端看到的 Portal run id，以及服务端持有的 native `expectedTurnId`，并把 queue id 作为 `clientUserMessageId`；不接受客户端 thread/cwd。只允许同一运行模式，当前模型、模式、沙箱、lease 和其余待发顺序均保持原执行语义。starting、已经结束、停止中或另一次 steer 尚未确认时返回冲突，不能误投下一轮。steer RPC 期间即使原 turn 完成，也须等待 RPC 确认后才允许下个输入启动。
+
+## 持久工作图调度
+
+工作图以独立持久 job 调度，模型工作最多一个，复用 root 配额；暂停/取消围栏旧 generation，账号策略变化和撤权排空相关审核。 详细契约见 [多人 Work Graph](09-human-work-graph.md)，操作见 [工作图指南](../../docs/WORK_GRAPH.md)。

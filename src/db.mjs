@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { ensureSubmissionSchema, migrateWorkGraph } from './work-graph-schema.mjs';
 
 function json(value, fallback = {}) {
   try { return JSON.parse(value); } catch { return fallback; }
@@ -267,6 +268,7 @@ export class HarnessDatabase {
     this.#ensureSubmissionRetentionSchema();
     this.#backfillOwnerAccess();
     this.#repairOrphanedSubmissionsOnce();
+    migrateWorkGraph(this.db);
   }
 
   #ensureColumn(table, name, definition) {
@@ -275,59 +277,7 @@ export class HarnessDatabase {
   }
 
   #ensureSubmissionRetentionSchema() {
-    const columns = this.db.prepare('PRAGMA table_info(task_submissions)').all();
-    const foreignKeys = this.db.prepare('PRAGMA foreign_key_list(task_submissions)').all();
-    const chat = columns.find((column) => column.name === 'chat_id');
-    const run = columns.find((column) => column.name === 'turn_run_id');
-    const chatForeignKey = foreignKeys.find((foreignKey) => foreignKey.from === 'chat_id');
-    const runForeignKey = foreignKeys.find((foreignKey) => foreignKey.from === 'turn_run_id');
-    const current = chat?.notnull === 0 && run?.notnull === 0
-      && chatForeignKey?.on_delete === 'SET NULL' && runForeignKey?.on_delete === 'SET NULL';
-    if (current) return;
-
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      this.db.exec(`
-        ALTER TABLE task_submissions RENAME TO task_submissions_legacy;
-        CREATE TABLE task_submissions (
-          id TEXT PRIMARY KEY,
-          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-          task_version INTEGER NOT NULL,
-          submitter_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          project_access_id TEXT REFERENCES project_access(id) ON DELETE SET NULL,
-          chat_id TEXT REFERENCES chats(id) ON DELETE SET NULL,
-          turn_run_id TEXT REFERENCES turn_runs(id) ON DELETE SET NULL,
-          codex_thread_id TEXT NOT NULL,
-          codex_turn_id TEXT NOT NULL,
-          final_item_id TEXT NOT NULL,
-          final_reply_snapshot TEXT NOT NULL,
-          diff_snapshot TEXT NOT NULL DEFAULT '',
-          employee_note TEXT NOT NULL DEFAULT '',
-          snapshot_commit_sha TEXT,
-          snapshot_tree_sha TEXT,
-          delivery_commit_sha TEXT,
-          delivered_at TEXT,
-          verdict TEXT NOT NULL DEFAULT 'pending' CHECK(verdict IN ('pending','passed','rework')),
-          created_at TEXT NOT NULL,
-          reviewed_at TEXT,
-          UNIQUE(task_id, task_version)
-        );
-        INSERT INTO task_submissions
-          (id,task_id,task_version,submitter_user_id,project_access_id,chat_id,turn_run_id,codex_thread_id,codex_turn_id,
-           final_item_id,final_reply_snapshot,diff_snapshot,employee_note,snapshot_commit_sha,snapshot_tree_sha,
-           delivery_commit_sha,delivered_at,verdict,created_at,reviewed_at)
-        SELECT id,task_id,task_version,submitter_user_id,project_access_id,chat_id,turn_run_id,codex_thread_id,codex_turn_id,
-           final_item_id,final_reply_snapshot,diff_snapshot,employee_note,snapshot_commit_sha,snapshot_tree_sha,
-           delivery_commit_sha,delivered_at,verdict,created_at,reviewed_at
-        FROM task_submissions_legacy;
-        DROP TABLE task_submissions_legacy;
-        CREATE INDEX task_submissions_task_idx ON task_submissions(task_id, created_at DESC);
-      `);
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
+    ensureSubmissionSchema(this.db);
   }
 
   #repairOrphanedSubmissionsOnce() {
@@ -452,6 +402,11 @@ export class HarnessDatabase {
       values.push(key === 'networkAccess' ? (patch[key] ? 1 : 0) : patch[key]);
     }
     if (!fields.length) return this.getUserById(id);
+    const current = this.db.prepare('SELECT * FROM users WHERE id=?').get(id);
+    if ('passwordHash' in patch || ('status' in patch && patch.status !== current?.status)
+      || ('networkAccess' in patch && Boolean(patch.networkAccess) !== Boolean(current?.network_access))) {
+      fields.push('workflow_policy_epoch = workflow_policy_epoch + 1');
+    }
     fields.push('updated_at = ?');
     values.push(now(), id);
     this.db.prepare(`UPDATE users SET ${fields.join(', ')} WHERE id = ?`).run(...values);
@@ -682,6 +637,7 @@ export class HarnessDatabase {
     return row ? {
       id: row.id, projectId: row.project_id, userId: row.user_id, title: row.title,
       codexThreadId: row.codex_thread_id, status: row.status,
+      purpose: row.purpose || 'normal', workflowJobId: row.workflow_job_id || null,
       preferredMode: row.preferred_mode || 'execute',
       preferredModel: row.preferred_model || null,
       sourceChatId: row.source_chat_id || null, sharedAt: row.shared_at || null,
@@ -954,7 +910,8 @@ export class HarnessDatabase {
   mapRoadmap(row) {
     return row ? {
       id: row.id, projectId: row.project_id, title: row.title, status: row.status,
-      version: row.version, createdAt: row.created_at, updatedAt: row.updated_at,
+      version: row.version, kind: row.kind || 'linear', currentWorkflowId: row.current_workflow_id || null,
+      createdAt: row.created_at, updatedAt: row.updated_at,
       steps: row.steps || [],
     } : null;
   }
@@ -973,6 +930,11 @@ export class HarnessDatabase {
   mapTask(row) {
     return row ? {
       id: row.id, roadmapId: row.roadmap_id, projectId: row.project_id,
+      workflowRunId: row.workflow_run_id || null, nodeKey: row.node_key || null,
+      checklist: json(row.checklist_json, []), checklistRevision: row.checklist_revision || 1,
+      dueAt: row.due_at || null, blockedReason: row.blocked_reason || null,
+      inputManifest: json(row.input_manifest_json, []), inputBaseSha: row.input_base_sha || null,
+      assignedAccessId: row.assigned_access_id || null, foreignWorkSeen: Boolean(row.foreign_work_seen),
       assigneeUserId: row.assignee_user_id, position: row.position, title: row.title,
       acceptance: row.acceptance, status: row.status, version: row.version,
       createdAt: row.created_at, updatedAt: row.updated_at,
@@ -1017,6 +979,7 @@ export class HarnessDatabase {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const roadmap = this.db.prepare('SELECT * FROM roadmaps WHERE id=?').get(id);
+      if (roadmap?.kind === 'dag') throw new Error('DAG 必须通过工作图启动接口激活。');
       if (!roadmap || !['draft', 'ready'].includes(roadmap.status)) throw new Error('路线图状态不允许激活。');
       const inaccessible = this.db.prepare(`SELECT t.id FROM tasks t
         WHERE t.roadmap_id=? AND NOT EXISTS (
@@ -1133,37 +1096,52 @@ export class HarnessDatabase {
     return this.getApproval(id);
   }
 
-  submitTask({ taskId, taskVersion, submitterUserId, projectAccessId, chatId, turnRunId, itemId, note = '', snapshotCommitSha, snapshotTreeSha }) {
+  submitTask({ taskId, taskVersion, submitterUserId, projectAccessId, chatId = null, turnRunId = null, itemId = null,
+    note = '', snapshotCommitSha, snapshotTreeSha, kind = 'codex', resultSummary = '', checklistSnapshot = [],
+    outputsManifest = [], idempotencyKey = null, afterSubmit = null }) {
     const timestamp = now();
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const task = this.db.prepare('SELECT * FROM tasks WHERE id=?').get(taskId);
       if (!task || task.assignee_user_id !== submitterUserId) throw new Error('任务不存在或不属于当前员工。');
+      if (idempotencyKey) {
+        const prior = this.db.prepare('SELECT id FROM task_submissions WHERE task_id=? AND idempotency_key=?').get(taskId, idempotencyKey);
+        if (prior) { this.db.exec('COMMIT'); return this.getSubmission(prior.id); }
+      }
       if (!['active', 'rework'].includes(task.status) || task.version !== taskVersion) throw new Error('任务版本已变化，请刷新后重新提交。');
-      const run = this.db.prepare(`SELECT r.*,c.project_access_id AS chat_project_access_id FROM turn_runs r
+      if (task.workflow_run_id && this.db.prepare('SELECT status FROM workflow_runs WHERE id=?').get(task.workflow_run_id)?.status !== 'running') {
+        throw new Error('工作图已暂停或结束，不能提交任务。');
+      }
+      if (!['codex', 'manual'].includes(kind)) throw new Error('提交来源无效。');
+      const run = kind === 'codex' ? this.db.prepare(`SELECT r.*,c.project_access_id AS chat_project_access_id FROM turn_runs r
         JOIN chats c ON c.id=r.chat_id WHERE r.id=? AND r.chat_id=? AND r.user_id=? AND r.task_id=?
         AND r.task_version=? AND r.status='completed' AND r.final_item_id=?`).get(
         turnRunId, chatId, submitterUserId, taskId, taskVersion, itemId,
-      );
-      if (!run || !run.final_reply_snapshot || !run.codex_thread_id || !run.codex_turn_id) throw new Error('只能提交该任务对话中已完成的最终 Codex 回复。');
+      ) : null;
+      if (kind === 'codex' && (!run || !run.final_reply_snapshot || !run.codex_thread_id || !run.codex_turn_id)) throw new Error('只能提交该任务对话中已完成的最终 Codex 回复。');
+      if (kind === 'manual' && (!String(resultSummary).trim() || chatId || turnRunId || itemId)) throw new Error('人工交付须有成果说明且不得伪造 Codex 身份。');
       if (!/^[0-9a-f]{40,64}$/i.test(String(snapshotCommitSha || ''))
         || !/^[0-9a-f]{40,64}$/i.test(String(snapshotTreeSha || ''))) throw new Error('任务提交必须绑定有效的 Git commit 和 tree 快照。');
-      if (run.chat_project_access_id !== projectAccessId) throw new Error('任务对话的项目授权已变化。');
+      if (run && run.chat_project_access_id !== projectAccessId) throw new Error('任务对话的项目授权已变化。');
+      if (task.assigned_access_id && task.assigned_access_id !== projectAccessId) throw new Error('任务绑定的项目授权已变化。');
       const access = this.db.prepare("SELECT id FROM project_access WHERE id=? AND project_id=? AND user_id=? AND status='active'")
         .get(projectAccessId, task.project_id, submitterUserId);
       if (!access) throw new Error('任务提交对应的项目授权已失效。');
       const id = randomUUID();
       this.db.prepare(`INSERT INTO task_submissions
         (id,task_id,task_version,submitter_user_id,project_access_id,chat_id,turn_run_id,codex_thread_id,codex_turn_id,final_item_id,
-         final_reply_snapshot,diff_snapshot,employee_note,snapshot_commit_sha,snapshot_tree_sha,created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-        id, taskId, taskVersion, submitterUserId, projectAccessId, chatId, turnRunId, run.codex_thread_id, run.codex_turn_id,
-        run.final_item_id, run.final_reply_snapshot, run.diff_snapshot || '', note, snapshotCommitSha, snapshotTreeSha, timestamp,
+         final_reply_snapshot,diff_snapshot,employee_note,snapshot_commit_sha,snapshot_tree_sha,created_at,
+         kind,result_summary,checklist_snapshot_json,outputs_manifest_json,idempotency_key)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        id, taskId, taskVersion, submitterUserId, projectAccessId, chatId, turnRunId, run?.codex_thread_id || null, run?.codex_turn_id || null,
+        run?.final_item_id || null, run?.final_reply_snapshot || resultSummary, run?.diff_snapshot || '', note, snapshotCommitSha, snapshotTreeSha, timestamp,
+        kind, resultSummary, JSON.stringify(checklistSnapshot), JSON.stringify(outputsManifest), idempotencyKey,
       );
       const changed = this.db.prepare("UPDATE tasks SET status='submitted',updated_at=? WHERE id=? AND version=? AND status IN ('active','rework')")
         .run(timestamp, taskId, taskVersion);
       if (Number(changed.changes) !== 1) throw new Error('任务状态已变化，请刷新后重新提交。');
-      if (task.roadmap_id) this.db.prepare("UPDATE roadmaps SET status='submitted',updated_at=? WHERE id=?").run(timestamp, task.roadmap_id);
+      if (task.roadmap_id && !task.workflow_run_id) this.db.prepare("UPDATE roadmaps SET status='submitted',updated_at=? WHERE id=?").run(timestamp, task.roadmap_id);
+      if (afterSubmit) afterSubmit(this.getSubmission(id));
       this.db.exec('COMMIT');
       return this.getSubmission(id);
     } catch (error) {
@@ -1174,6 +1152,9 @@ export class HarnessDatabase {
 
   mapSubmission(row) {
     return row ? {
+      kind: row.kind || 'codex', resultSummary: row.result_summary || '',
+      checklistSnapshot: json(row.checklist_snapshot_json, []), outputsManifest: json(row.outputs_manifest_json, []),
+      idempotencyKey: row.idempotency_key || null,
       id: row.id, taskId: row.task_id, taskVersion: row.task_version, submitterUserId: row.submitter_user_id,
       projectAccessId: row.project_access_id, chatId: row.chat_id, turnRunId: row.turn_run_id, codexThreadId: row.codex_thread_id,
       codexTurnId: row.codex_turn_id, finalItemId: row.final_item_id, finalReplySnapshot: row.final_reply_snapshot,
@@ -1207,6 +1188,7 @@ export class HarnessDatabase {
       const submission = this.db.prepare('SELECT * FROM task_submissions WHERE id=?').get(submissionId);
       if (!submission || submission.verdict !== 'pending') throw new Error('待审核提交不存在。');
       const task = this.db.prepare('SELECT * FROM tasks WHERE id=?').get(submission.task_id);
+      if (task?.workflow_run_id) throw new Error('DAG 必须通过工作图审核服务推进。');
       if (!task || task.status !== 'submitted' || task.version !== submission.task_version) throw new Error('任务版本或状态已变化。');
       if (verdict === 'passed' && (!submission.project_access_id || !submission.snapshot_commit_sha || !submission.snapshot_tree_sha)) {
         throw new Error('历史提交缺少 Git 快照，不能直接审核通过；请要求返工并重新提交。');
