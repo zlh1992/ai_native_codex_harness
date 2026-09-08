@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { invariant } from './errors.mjs';
 
 export class ProjectShareService {
-  constructor({ db, workspace, worktrees, codex, store }) { Object.assign(this, { db, workspace, worktrees, codex, store }); }
+  constructor({ db, workspace, worktrees, codex, store, memory = null }) { Object.assign(this, { db, workspace, worktrees, codex, store, memory }); }
 
   usage(userId) { return this.workspace.usageForUser(userId, this.db.listProjectsForUser(userId)); }
   checkQuota(project, user, treePath) {
@@ -11,7 +11,7 @@ export class ProjectShareService {
     invariant(this.usage(user.id).bytes + bytes <= user.maxStorageBytes, 413, 'STORAGE_QUOTA', '授权工作树将超过员工存储配额。');
   }
 
-  async grant({ project, userId, authorize, scope = 'files_and_history' }) {
+  async grant({ project, userId, authorize, scope = 'files_and_history', memoryConfirmationToken = null }) {
     invariant(['files_only', 'files_and_history'].includes(scope), 400, 'INVALID_SHARE_SCOPE', '分享范围无效。');
     const check = () => {
       authorize();
@@ -30,8 +30,10 @@ export class ProjectShareService {
     invariant(!this.codex.workspaceBusy(project.accessId), 409, 'WORKSPACE_BUSY', '项目正在执行或共享，请稍后重试。');
     this.codex.sharingAccesses.add(project.accessId);
     const accessId = randomUUID();
-    let tree; let access;
+    let tree; let access; let memoryAuthorization;
     try {
+      if (scope === 'files_and_history') memoryAuthorization = this.memory?.authorizeHistoryShare({ projectId: project.id,
+        ownerUserId: project.userId, recipientUserId: userId, confirmationToken: memoryConfirmationToken });
       const sources = scope === 'files_and_history' ? this.db.listChats({ projectId: project.id, userId: project.userId }) : [];
       tree = this.worktrees.createShare({ projectRoot: this.workspace.projectRoot(project), projectId: project.id, accessId });
       const shared = { ...project, accessKind: 'shared', accessUserId: userId, accessId, treePath: tree.treePath };
@@ -39,6 +41,9 @@ export class ProjectShareService {
         ? await this.codex.prepareSharedChats({ sources, project: shared, user: target, authorize: check }) : [];
       const current = check();
       this.checkQuota(project, current, tree.treePath);
+      if (memoryAuthorization?.required) this.memory.consumeHistoryShare({ projectId: project.id,
+        ownerUserId: project.userId, recipientUserId: userId,
+        confirmationToken: memoryAuthorization.confirmationToken, snapshotHash: memoryAuthorization.snapshotHash });
       access = this.db.grantProjectAccessWithChats({ id: accessId, projectId: project.id, userId,
         treePath: tree.treePath, branchName: tree.branchName, baseSha: tree.baseSha }, snapshots);
       return { access, restored: false, copiedChats: snapshots.length, includedLocalChanges: tree.includedLocalChanges,

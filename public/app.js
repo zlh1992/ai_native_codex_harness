@@ -12,6 +12,7 @@ const state = {
   pendingTextAction: null, pendingConfirmAction: null,
   eventCursors: new Map(), inputQueues: new Map(), queueRuns: new Map(),
   queueRefreshing: false, queueHistoryPending: false, queueSending: false, queueEdit: null, pendingInput: null,
+  memories: [], memoryStatus: null,
 };
 const workGraphUI = new WorkGraphUI({ api, toast, openTask, refreshTasks: loadTasks,
   openFile: async (projectId, relative) => {
@@ -65,19 +66,23 @@ function toast(message, kind = '') {
   setTimeout(() => element.remove(), 4200);
 }
 
-function openTextDialog({ eyebrow, title, label, value, submitLabel, onSubmit }) {
+function openTextDialog({ eyebrow, title, label, value, submitLabel, onSubmit, multiline = false }) {
   const form = $('#text-form');
   form.reset();
   $('.form-error', form).textContent = '';
   $('#text-dialog-eyebrow').textContent = eyebrow;
   $('#text-dialog-title').textContent = title;
   $('#text-dialog-label').textContent = label;
-  $('#text-dialog-input').value = value;
+  const input = $('#text-dialog-input'); const textarea = $('#text-dialog-textarea');
+  input.hidden = multiline; input.required = !multiline; input.name = multiline ? '' : 'value';
+  textarea.hidden = !multiline; textarea.required = multiline; textarea.name = multiline ? 'value' : '';
+  const field = multiline ? textarea : input;
+  field.value = value;
   $('#text-dialog-submit').textContent = submitLabel;
   state.pendingTextAction = onSubmit;
   $('#text-dialog').showModal();
-  $('#text-dialog-input').focus();
-  $('#text-dialog-input').select();
+  field.focus();
+  field.select();
 }
 
 function openConfirmDialog({ eyebrow, title, message, submitLabel, onConfirm }) {
@@ -177,6 +182,7 @@ async function bootstrap() {
   $('#codex-status').classList.toggle('online', data.codex.ready);
   $('#boss-nav').classList.toggle('hidden', data.user.role !== 'admin');
   state.codexCapacity = data.codex;
+  state.memoryStatus = data.memory;
   state.maxConcurrentTurns = data.codex.maxRootTurns || 11;
   updateConcurrencyIndicator();
   updateCapacity(data.codex);
@@ -214,6 +220,35 @@ async function loadTasks() {
   state.tasks = data.tasks || [];
   renderTasks();
   if (workGraphUI.initialized && state.me?.role === 'admin') await workGraphUI.refresh();
+}
+
+async function loadMemories() {
+  const data = await api('/api/memories');
+  state.memories = data.memories || []; state.memoryStatus = data.status;
+  const index = data.status?.index;
+  $('#memory-index-state').textContent = index?.available ? '索引进程已启动' : '关键词搜索降级';
+  $('#memory-index-state').classList.toggle('online', Boolean(index?.available));
+  const root = $('#memory-list');
+  if (!state.memories.length) { root.className = 'memory-list empty-state'; root.textContent = '暂无记忆。可手动添加，或让 Codex 在对话中搜索、新增、修改和删除记忆；工具成功后会显示在这里。'; return; }
+  root.className = 'memory-list';
+  root.innerHTML = state.memories.map((item) => `<article class="memory-card" data-id="${item.id}" data-version="${item.version}">
+    <header><span class="memory-source">${item.sourceKind === 'manual' ? '手动添加' : '来自对话'} · V${item.version} · ${formatDate(item.updatedAt, true)}</span>
+    <span class="memory-card-actions"><button class="secondary" data-memory-edit>编辑</button><button class="danger-button" data-memory-delete>删除</button></span></header>
+    <p>${escapeHtml(item.body)}</p></article>`).join('');
+}
+
+async function refreshChatMemory(turnRunId = null) {
+  const chat = state.selectedChat;
+  $('#use-memory').disabled = !chat; $('#save-memory').disabled = !chat;
+  if (!chat) { $('#memory-ref-panel').classList.add('hidden'); updateInsightsVisibility(); return; }
+  const data = await api(`/api/chats/${chat.id}/memory`);
+  if (state.selectedChat?.id !== chat.id) return;
+  $('#use-memory').checked = data.settings.useMemory; $('#save-memory').checked = data.settings.saveMemory;
+  const refs = (data.references || []).filter((ref) => !turnRunId || ref.turnRunId === turnRunId);
+  const panel = $('#memory-ref-panel');
+  panel.classList.toggle('hidden', !refs.length);
+  $('div', panel).innerHTML = refs.map((ref) => `<article class="memory-ref"><small>${ref.crossProject ? '跨项目引用' : '当前项目 / 全局记忆'} · V${ref.memoryVersion}</small><p>${ref.available ? escapeHtml(ref.body) : '来源权限已失效或记忆已删除；继续前需重置线程。'}</p></article>`).join('');
+  updateInsightsVisibility();
 }
 
 function taskStatusLabel(status) {
@@ -290,12 +325,13 @@ async function selectProject(project, clearChat = true) {
   $('#project-kicker').textContent = project.username ? `${project.username.toUpperCase()} / ${project.slug}` : project.slug;
   $('#chat-title').textContent = project.name;
   await Promise.all([loadChats(), loadFiles(), refreshUsage()]);
-  if (clearChat) renderMessages([]);
+  if (clearChat) { renderMessages([]); await refreshChatMemory(); }
 }
 
 function resetProject() {
   state.selectedProject = null; state.selectedChat = null; state.selectedTask = null; closeViewer();
   renderProjects(); renderChats(); renderMessages([]);
+  refreshChatMemory();
   $('#file-tree').className = 'file-tree empty-state'; $('#file-tree').textContent = '选择项目后浏览文件';
 }
 
@@ -349,7 +385,7 @@ async function selectChat(chat) {
   }
   if (running) renderLiveTurn(running, shouldAppendLivePrompt(data.messages, running));
   renderActivity(running);
-  await refreshTurnInsights();
+  await Promise.all([refreshTurnInsights(), refreshChatMemory(data.latestTurnRun?.id || null)]);
   setComposer(true);
   await refreshInputQueue();
 }
@@ -440,7 +476,8 @@ function renderActivity(entry) {
 
 function updateInsightsVisibility() {
   const visible = !$('#goal-card').classList.contains('hidden') || $('#approval-list').children.length
-    || !$('#plan-panel').classList.contains('hidden') || !$('#diff-panel').classList.contains('hidden');
+    || !$('#plan-panel').classList.contains('hidden') || !$('#diff-panel').classList.contains('hidden')
+    || !$('#memory-ref-panel').classList.contains('hidden');
   $('#turn-insights').classList.toggle('hidden', !visible);
 }
 
@@ -498,10 +535,12 @@ function applyJournalEvent(entry, event) {
   else if (event.eventType === 'turn_queued') entry.statusText = `${data.mode || entry.mode.toUpperCase()} 正在排队 · 前方 ${Math.max(0, Number(data.position || 1) - 1)} 个任务`;
   else if (event.eventType === 'turn_status') entry.statusText = data.status === 'running' ? `Codex 正在执行 · ${entry.mode.toUpperCase()}` : 'Codex 正在启动…';
   else if (event.eventType === 'tool_started') {
-    if (!entry.events.some((item) => item.callId === data.callId)) entry.events.push({ callId: data.callId, name: data.name || '工具调用', done: false });
+    const existing = entry.events.find((item) => item.callId === data.callId);
+    if (existing) Object.assign(existing, { name: data.name || existing.name, toolName: data.name, done: false });
+    else entry.events.push({ callId: data.callId, name: data.name || '工具调用', toolName: data.name, done: false });
   } else if (event.eventType === 'tool_completed') {
     const tool = entry.events.find((item) => item.callId === data.callId);
-    if (tool) tool.done = true;
+    if (tool) Object.assign(tool, { done: true, name: data.name || tool.name, toolName: data.name || tool.toolName });
     else entry.events.push({ callId: data.callId, name: data.name || '工具调用', done: true });
   } else if (event.eventType === 'approval_required') {
     entry.statusText = '等待你批准操作…';
@@ -515,7 +554,7 @@ function applyJournalEvent(entry, event) {
   } else if (event.eventType === 'native_item') {
     const callId = data.item?.id || `native:${event.id}`;
     const existing = entry.events.find((item) => item.callId === callId);
-    const value = { callId, name: data.item?.type || '原生操作', done: data.phase === 'completed' };
+    const value = { callId, name: existing?.toolName || data.item?.type || '原生操作', done: data.phase === 'completed' };
     if (existing) Object.assign(existing, value); else entry.events.push(value);
   } else if (event.eventType === 'turn_error') {
     entry.statusText = data.message || 'Codex 任务已中断';
@@ -915,7 +954,9 @@ async function writeFile(filePath, content, successMessage = '', { overwrite = t
 function switchView(view) {
   $('#tasks-view').classList.toggle('hidden', view !== 'tasks');
   $('#workbench-view').classList.toggle('hidden', view !== 'workbench');
+  $('#memories-view').classList.toggle('hidden', view !== 'memories');
   $$('.nav-button').forEach((button) => button.classList.toggle('active', button.dataset.view === view));
+  if (view === 'memories') void loadMemories().catch((error) => toast(error.message, 'error'));
 }
 
 function clamp(value, minimum, maximum) {
@@ -999,6 +1040,50 @@ $('#logout-button').addEventListener('click', async () => { try { await api('/ap
 $('#boss-nav').addEventListener('click', () => location.assign('/boss'));
 $$('[data-view]').forEach((button) => button.addEventListener('click', () => switchView(button.dataset.view)));
 $('#refresh-tasks').addEventListener('click', () => Promise.all([loadTasks(), loadProjects()]).then(renderTasks).catch((error) => toast(error.message, 'error')));
+
+$('#memory-create-form').addEventListener('submit', async (event) => {
+  event.preventDefault(); const submit = event.submitter; submit.disabled = true;
+  try {
+    await api('/api/memories', { method: 'POST', body: { body: $('#memory-create-body').value } });
+    $('#memory-create-body').value = ''; await loadMemories(); toast('记忆已保存。');
+  } catch (error) { toast(error.message, 'error'); } finally { submit.disabled = false; }
+});
+
+$('#memory-list').addEventListener('click', async (event) => {
+  const card = event.target.closest('.memory-card'); if (!card) return;
+  const item = state.memories.find((memory) => memory.id === card.dataset.id); if (!item) return;
+  try {
+    if (event.target.closest('[data-memory-edit]')) {
+      openTextDialog({ eyebrow: 'EDIT MEMORY', title: '编辑私有记忆', label: '修改后，引用旧版本的对话必须重置原生线程',
+        value: item.body, submitLabel: '保存修改', multiline: true, onSubmit: async (body) => {
+          if (body.trim() === item.body) return;
+          const result = await api(`/api/memories/${item.id}`, { method: 'PATCH', body: { body, version: item.version } });
+          await loadMemories(); toast(`记忆已更新${result.resetChats ? `，${result.resetChats} 个对话需重置` : ''}。`);
+        } });
+    } else if (event.target.closest('[data-memory-delete]')) {
+      openConfirmDialog({ eyebrow: 'FORGET MEMORY', title: '删除私有记忆',
+        message: '删除会立即停止后续召回；引用过它的对话需要重置原生线程。', submitLabel: '确认删除',
+        onConfirm: async () => {
+          const result = await api(`/api/memories/${item.id}`, { method: 'DELETE', body: { version: item.version } });
+          await loadMemories(); toast(`记忆已删除${result.resetChats ? `，${result.resetChats} 个对话需重置` : ''}。`);
+        } });
+    }
+  } catch (error) { toast(error.message, 'error'); }
+});
+
+for (const id of ['use-memory', 'save-memory']) {
+  $(`#${id}`).addEventListener('change', async () => {
+    const chatId = state.selectedChat?.id; if (!chatId) return;
+    const body = { useMemory: $('#use-memory').checked, saveMemory: $('#save-memory').checked };
+    $('#use-memory').disabled = true; $('#save-memory').disabled = true;
+    try {
+      const data = await api(`/api/chats/${chatId}/memory`, { method: 'PATCH', body });
+      if (state.selectedChat?.id === chatId) Object.assign(state.selectedChat, data.chat);
+      toast('对话记忆设置已保存。');
+    } catch (error) { toast(error.message, 'error'); }
+    finally { if (state.selectedChat?.id === chatId) { $('#use-memory').disabled = false; $('#save-memory').disabled = false; } }
+  });
+}
 
 $('#mode-select').addEventListener('change', async (event) => {
   if (!state.selectedChat) return;

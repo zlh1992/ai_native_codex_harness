@@ -14,6 +14,15 @@ const reasons = { PREPARING: '正在准备成员共享', WAITING_DEPENDENCIES: '
   DELIVERY_SCOPE_REVIEW_REQUIRED: '存在无关工作，请核对交付范围', MODEL_BUDGET_EXCEEDED: '已到模型调用预算' };
 const reason = (code) => reasons[code] || (code ? '等待处理，请查看后台任务' : '');
 const date = (value) => value ? new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
+const GRAPH_NODE_WIDTH = 264;
+const GRAPH_NODE_HEIGHT = 176;
+const GRAPH_COLUMN_STEP = 320;
+const GRAPH_ROW_STEP = 200;
+const viewHelp = {
+  graph: '依赖图：按前后置关系排列任务，连线表示必须先完成的依赖；可横向、纵向滚动和缩放。',
+  list: '状态列表：不画依赖连线，按任务卡片集中查看负责人、状态和截止信息。',
+  events: '事件记录：按时间倒序查看工作图的状态变化与推进原因。',
+};
 
 export function graphLayout(nodes) {
   const levels = new Map();
@@ -25,10 +34,10 @@ export function graphLayout(nodes) {
   const rows = new Map();
   const positions = new Map(nodes.map((node) => {
     const depth = levels.get(node.key) || 0; const row = rows.get(depth) || 0; rows.set(depth, row + 1);
-    return [node.key, { x: 24 + depth * 320, y: 24 + row * 168 }];
+    return [node.key, { x: 24 + depth * GRAPH_COLUMN_STEP, y: 24 + row * GRAPH_ROW_STEP }];
   }));
-  return { positions, width: Math.max(340, (Math.max(0, ...levels.values()) + 1) * 320),
-    height: Math.max(220, Math.max(1, ...rows.values()) * 168 + 48) };
+  return { positions, width: Math.max(340, (Math.max(0, ...levels.values()) + 1) * GRAPH_COLUMN_STEP),
+    height: Math.max(260, Math.max(1, ...rows.values()) * GRAPH_ROW_STEP + 48) };
 }
 
 export class WorkGraphUI {
@@ -69,7 +78,7 @@ export class WorkGraphUI {
       <small>启动将向参与员工分享项目文件，并按所选方式持续验收。规划对话不会复制给员工。</small></details></form>
       <div id="graph-generation-status" role="status"></div><div class="graph-toolbar"><div><p class="eyebrow">WORK GRAPH</p><select id="graph-select" aria-label="选择工作图"></select></div>
       <div class="graph-view-actions"><button class="secondary" data-view-mode="graph">依赖图</button><button class="secondary" data-view-mode="list">状态列表</button><button class="secondary" data-view-mode="events">事件记录</button><button class="secondary" data-zoom="-1" aria-label="缩小依赖图">−</button><button class="secondary" data-zoom="1" aria-label="放大依赖图">＋</button><button class="secondary" data-refresh-graph>刷新</button></div></div>
-      <div id="graph-run-bar"></div><div id="graph-board"></div><div id="graph-job-list"></div>`;
+      <p id="graph-view-help" class="graph-view-help" aria-live="polite"></p><div id="graph-run-bar"></div><div id="graph-board"></div><div id="graph-job-list"></div>`;
     $('#graph-generate-form').addEventListener('submit', (event) => { event.preventDefault(); this.generate(event).catch((e) => this.toast(e.message, 'error')); });
     await this.selectProject($('#graph-project').value);
   }
@@ -96,11 +105,13 @@ export class WorkGraphUI {
     }, 5000);
   }
   subscribe(id) {
-    const cursorKey = `work-graph-cursor:${this.user.id}:${id}`;
-    this.source = new EventSource(`/api/projects/${id}/events?after=${Number(sessionStorage.getItem(cursorKey)) || 0}`);
+    this.source = new EventSource(`/api/projects/${id}/events?after=0`);
+    const source = this.source;
     this.source.addEventListener('project_event', (event) => {
-      const data = JSON.parse(event.data); sessionStorage.setItem(cursorKey, String(data.id));
-      this.events.push(data); this.events = this.events.slice(-100);
+      if (this.source !== source || this.projectId !== id) return;
+      const data = JSON.parse(event.data);
+      if (!this.events.some((entry) => entry.id === data.id)) this.events.push(data);
+      this.events.sort((a, b) => a.id - b.id);
       clearTimeout(this.refreshTimer); this.refreshTimer = setTimeout(() => this.refresh().catch(() => {}), 150);
     });
   }
@@ -138,6 +149,12 @@ export class WorkGraphUI {
       `${nodes.filter((n) => n.status === 'passed').length} / ${nodes.length}`];
     ['task-active-count', 'task-submitted-count', 'task-passed-count', 'visible-project-count'].forEach((id, index) => { $(`#${id}`).textContent = counts[index]; });
     const run = graph?.run; const canEdit = !run || ['passed', 'cancelled', 'superseded'].includes(run.status);
+    $('#graph-view-help').textContent = viewHelp[this.mode];
+    all('[data-view-mode]', this.panel).forEach((button) => {
+      const active = button.dataset.viewMode === this.mode;
+      button.classList.toggle('is-active', active); button.setAttribute('aria-pressed', String(active));
+    });
+    all('[data-zoom]', this.panel).forEach((button) => { button.disabled = this.mode !== 'graph'; });
     $('#graph-run-bar').innerHTML = graph ? `<span class="status-tag ${escape(run?.status || 'draft')}">${labels[run?.status || 'draft']}</span>
       <span>最近检查 ${date(run?.lastCheckedAt)} · 下次 ${date(run?.nextCheckAt)}</span>
       ${canEdit ? '<button class="secondary" data-edit-plan>编辑计划</button><button class="primary" data-start-graph>启动此版本</button>'
@@ -146,23 +163,21 @@ export class WorkGraphUI {
     if (!graph) { board.className = 'graph-empty'; board.textContent = '输入项目目标，生成团队的第一张工作图。'; }
     else if (this.mode === 'events') {
       board.className = 'graph-events';
-      board.innerHTML = this.events.slice().reverse().map((e) => `<article><time>${date(e.createdAt)}</time><b>${escape(e.type)}</b><span>${escape(reason(e.payload.reason) || labels[e.payload.status] || '')}</span></article>`).join('') || '等待项目事件。';
+      board.innerHTML = this.events.slice().reverse().map((e) => `<article><time>${date(e.createdAt)}</time><b>${escape(e.type)}</b><span>${escape(reason(e.payload.reason) || labels[e.payload.status] || '')}</span></article>`).join('') || '正在读取项目事件；暂无记录时等待新事件。';
     } else {
       const related = new Set([this.selectedKey, ...(nodes.find(n => n.key === this.selectedKey)?.dependsOn || []), ...nodes.filter(n => n.dependsOn.includes(this.selectedKey)).map(n => n.key)]);
       const layout = graphLayout(nodes); board.className = this.mode === 'list' ? 'graph-list' : 'graph-scroll';
-      const card = (node, positioned) => {
-        const p = layout.positions.get(node.key);
-        return `<button class="graph-node status-${escape(node.status)} ${related.has(node.key) ? 'graph-related' : ''}" data-node="${escape(node.key)}" >
-          <span class="graph-node-heading"><span>${escape(node.assigneeName)}</span><span>V${node.version}</span></span><strong>${escape(node.title)}</strong>
+      const card = (node) => `<button class="graph-node status-${escape(node.status)} ${related.has(node.key) ? 'graph-related' : ''}" data-node="${escape(node.key)}" title="${escape(node.title)}">
+          <span class="graph-node-heading"><span>${escape(node.assigneeName)}</span><span>V${node.version}</span></span><strong class="graph-node-title">${escape(node.title)}</strong>
           <span class="graph-node-status">${labels[node.status]}${node.completionGate ? ' · 最终交付' : ''}</span><small>${escape(reason(node.blockedReason)) || `截止 ${date(node.dueAt)}`}</small></button>`;
-      };
-      if (this.mode === 'list') board.innerHTML = nodes.map((n) => card(n, false)).join('');
+      if (this.mode === 'list') board.innerHTML = nodes.map((n) => card(n)).join('');
       else {
         const lines = nodes.flatMap((node) => node.dependsOn.map((parent) => {
           const from = layout.positions.get(parent); const to = layout.positions.get(node.key); if (!from || !to) return '';
-          return `<path d="M${from.x + 264},${from.y + 66} C${from.x + 292},${from.y + 66} ${to.x - 28},${to.y + 66} ${to.x - 4},${to.y + 66}" marker-end="url(#graph-arrow)"/>`;
+          const centerY = GRAPH_NODE_HEIGHT / 2;
+          return `<path d="M${from.x + GRAPH_NODE_WIDTH},${from.y + centerY} C${from.x + 292},${from.y + centerY} ${to.x - 28},${to.y + centerY} ${to.x - 4},${to.y + centerY}" marker-end="url(#graph-arrow)"/>`;
         })).join('');
-        board.innerHTML = `<div class="graph-canvas" ><svg width="${layout.width}" height="${layout.height}" aria-label="任务依赖连线"><defs><marker id="graph-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8"/></marker></defs>${lines}</svg>${nodes.map((n) => card(n, true)).join('')}</div>`;
+        board.innerHTML = `<div class="graph-canvas" ><svg width="${layout.width}" height="${layout.height}" aria-label="任务依赖连线"><defs><marker id="graph-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8"/></marker></defs>${lines}</svg>${nodes.map((n) => card(n)).join('')}</div>`;
         const canvas = $('.graph-canvas', board);
         canvas.style.zoom = String(this.zoom);
         canvas.style.width = `${layout.width}px`; canvas.style.height = `${layout.height}px`;

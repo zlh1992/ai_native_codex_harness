@@ -223,6 +223,104 @@ test('fixed Portal release gate', { timeout: 60_000 }, async (t) => {
     await request(second, `/api/projects/${project.id}/file?path=employee-one-only.txt`, { expect: 404 });
   });
 
+  await t.test('Portal memory is user-isolated, source-aware, inspectable, and confirmation-gated on history share', async () => {
+    const me = await json(boss, '/api/me');
+    assert.equal(me.memory.nativeCodexMemory, false);
+    const manual = (await json(boss, '/api/memories', {
+      method: 'POST', body: { body: '手动长期偏好' }, expect: 201,
+    })).memory;
+    const edited = (await json(boss, `/api/memories/${manual.id}`, {
+      method: 'PATCH', body: { version: manual.version, body: '更新后的手动长期偏好' },
+    })).memory;
+    assert.equal(edited.version, 2);
+    await json(boss, `/api/memories/${manual.id}`, { method: 'DELETE', body: { version: edited.version } });
+
+    const sourceProject = (await json(boss, '/api/projects', {
+      method: 'POST', body: { name: 'Memory source project' }, expect: 201,
+    })).project;
+    const sourceChat = (await json(boss, `/api/projects/${sourceProject.id}/chats`, {
+      method: 'POST', body: { title: 'Memory source chat' }, expect: 201,
+    })).chat;
+    await request(boss, `/api/chats/${sourceChat.id}/turns`, {
+      method: 'POST', body: { prompt: '请记住：以后默认蓝色主题', mode: 'edit' },
+    });
+    assert.equal((await json(boss, '/api/memories')).memories.length, 0, 'no keyword-based extraction');
+    await request(boss, `/api/chats/${sourceChat.id}/turns`, {
+      method: 'POST', body: { prompt: '[[memory-tools]]' + JSON.stringify([{ name: 'memory_add', args: { body: '发布说明统一使用克制语气' } }]), mode: 'edit' },
+    });
+    await waitUntil(async () => (await json(boss, '/api/memories')).memories
+      .some((item) => item.body === '发布说明统一使用克制语气'), 'memory_add did not save the record');
+    const saved = (await json(boss, '/api/memories')).memories
+      .find((item) => item.body === '发布说明统一使用克制语气');
+    assert.equal(saved.sourceKind, 'turn');
+    const toolTurn = async (calls) => request(boss, `/api/chats/${sourceChat.id}/turns`, {
+      method: 'POST', body: { prompt: '[[memory-tools]]' + JSON.stringify(calls), mode: 'edit' },
+    });
+    await toolTurn([{ name: 'memory_add', args: { body: '工具修改删除测试偏好' } }]);
+    const mutable = (await json(boss, '/api/memories')).memories.find((item) => item.body === '工具修改删除测试偏好');
+    assert.ok(mutable);
+    await toolTurn([{ name: 'memory_update', args: { id: mutable.id, version: 1, body: '修改后的偏好' } }]);
+    assert.equal((await json(boss, '/api/memories')).memories.find((item) => item.id === mutable.id).version, 2);
+    await toolTurn([{ name: 'memory_delete', args: { id: mutable.id, version: 2 } }]);
+    assert.equal((await json(boss, '/api/memories')).memories.some((item) => item.id === mutable.id), false);
+
+    const targetProject = (await json(boss, '/api/projects', {
+      method: 'POST', body: { name: 'Memory target project' }, expect: 201,
+    })).project;
+    const targetChat = (await json(boss, `/api/projects/${targetProject.id}/chats`, {
+      method: 'POST', body: { title: 'Memory target chat' }, expect: 201,
+    })).chat;
+    await request(boss, `/api/chats/${targetChat.id}/turns`, {
+      method: 'POST', body: { prompt: '[[memory-tools]]' + JSON.stringify([{ name: 'memory_search', args: { query: '发布说明语气' } }]), mode: 'edit' },
+    });
+    const target = await json(boss, `/api/chats/${targetChat.id}`);
+    const references = (await json(boss,
+      `/api/chats/${targetChat.id}/turn-runs/${target.latestTurnRun.id}/memory-references`)).references;
+    assert.equal(references.some((ref) => ref.memoryId === saved.id && ref.available), true);
+    assert.equal(references.find((ref) => ref.memoryId === saved.id).sourceProjectId, sourceProject.id);
+    await json(boss, `/api/chats/${targetChat.id}/memory`, {
+      method: 'PATCH', body: { useMemory: false, saveMemory: false },
+    });
+    const settings = await json(boss, `/api/chats/${targetChat.id}/memory`);
+    assert.deepEqual(settings.settings, { useMemory: false, saveMemory: false });
+
+    const challenge = await json(boss, `/api/admin/projects/${targetProject.id}/shares`, {
+      method: 'POST', body: { userId: firstUser.id, scope: 'files_and_history' }, expect: 409,
+    });
+    assert.equal(challenge.error.code, 'MEMORY_SHARE_CONFIRMATION_REQUIRED');
+    assert.equal(challenge.error.details.memoryCount, 1);
+    const grant = await json(boss, `/api/admin/projects/${targetProject.id}/shares`, {
+      method: 'POST', body: { userId: firstUser.id, scope: 'files_and_history',
+        memoryConfirmationToken: challenge.error.details.confirmationToken }, expect: 201,
+    });
+    const first = await login('gatefirst', passwords.first);
+    assert.equal((await json(first, '/api/memories')).memories.length, 0);
+    await request(first, `/api/chats/${targetChat.id}`, { expect: 403 });
+
+    await toolTurn([
+      { name: 'memory_search', args: { query: '发布说明语气' } },
+      { name: 'memory_update', args: { id: saved.id, version: 1, body: '发布说明使用精炼语气' } },
+      { name: 'workspace_write_file', args: { path: 'after-invalid-memory.txt', content: 'must be denied' } },
+    ]);
+    const invalidated = await json(boss, `/api/chats/${sourceChat.id}`);
+    assert.equal(invalidated.chat.threadState, 'resume_failed');
+    assert.equal(invalidated.latestTurnRun.status, 'failed', 'further tools must be denied after invalidation');
+    assert.equal((await json(boss, '/api/memories')).memories.find((item) => item.id === saved.id).version, 2,
+      'successful mutation persists even when subsequent turn fails');
+    const retry = await json(boss, `/api/chats/${sourceChat.id}/thread-recovery`, {
+      method: 'POST', body: { action: 'retry' }, expect: 409,
+    });
+    assert.equal(retry.error.code, 'MEMORY_CONTEXT_INVALIDATED');
+    await json(boss, `/api/chats/${sourceChat.id}/thread-recovery`, {
+      method: 'POST', body: { action: 'reset', acknowledgeHistoryBreak: true },
+    });
+
+    await request(boss, `/api/admin/projects/${targetProject.id}/shares/${grant.access.id}`, { method: 'DELETE' });
+    await request(boss, `/api/projects/${targetProject.id}`, { method: 'DELETE' });
+    await request(boss, `/api/projects/${sourceProject.id}`, { method: 'DELETE' });
+    assert.equal((await json(boss, '/api/memories')).memories.some((item) => item.id === saved.id), false);
+  });
+
   await t.test('running input queue supports edit, cancel, steer, serial dispatch and private replay', async () => {
     const chat = (await json(boss, `/api/projects/${project.id}/chats`, {
       method: 'POST', body: { title: 'Input queue contract' }, expect: 201,

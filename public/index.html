@@ -39,6 +39,7 @@
       <nav>
         <button id="tasks-nav" class="nav-button active" data-view="tasks">任务首页</button>
         <button class="nav-button" data-view="workbench">工作台</button>
+        <button class="nav-button" data-view="memories">我的记忆</button>
         <button id="boss-nav" class="nav-button hidden">驾驶舱</button>
       </nav>
       <div class="topbar-right">
@@ -66,6 +67,16 @@
       <section id="work-graph-panel" class="hidden" aria-label="团队项目工作图"></section>
     </section>
 
+    <section id="memories-view" class="memory-home hidden">
+      <div class="memory-hero"><div><p class="eyebrow">PRIVATE USER MEMORY</p><h1>我的记忆</h1><p>只属于当前 Portal 账号；可跨你当前有权访问的项目召回。Codex 原生长期记忆已固定关闭。</p></div><span id="memory-index-state" class="status-pill">正在检查索引</span></div>
+      <form id="memory-create-form" class="memory-create-card">
+        <label for="memory-create-body">新增长期事实、偏好或约定</label>
+        <textarea id="memory-create-body" maxlength="4000" rows="4" required placeholder="例如：所有客户报告默认使用中文，并在结论前列出数据口径。"></textarea>
+        <div><small>请勿保存密码、token 或私钥。</small><button class="primary" type="submit">保存记忆</button></div>
+      </form>
+      <div id="memory-list" class="memory-list empty-state">暂无记忆</div>
+    </section>
+
     <section id="workbench-view" class="workbench hidden">
       <aside class="project-rail panel">
         <div class="rail-heading">
@@ -90,6 +101,8 @@
         <div class="stage-header">
           <div><p id="project-kicker" class="eyebrow">SELECT A PROJECT</p><h2 id="chat-title">欢迎使用 Codex Harness</h2></div>
           <div class="turn-controls">
+            <label title="允许 Codex 按需调用 memory_search"><input id="use-memory" type="checkbox" checked disabled>搜索记忆</label>
+            <label title="允许 Codex 自主新增、修改和删除当前账号记忆"><input id="save-memory" type="checkbox" checked disabled>管理记忆</label>
             <label>模式<select id="mode-select"><option value="execute">EXECUTE · 文件＋命令</option><option value="edit">EDIT · 仅文件读写</option></select></label>
             <label>推理强度<select id="effort-select"></select></label>
             <button id="stop-turn" class="danger-button hidden">停止</button>
@@ -108,6 +121,7 @@
           <div id="approval-list" class="approval-list"></div>
           <details id="plan-panel" class="insight-card hidden"><summary>执行计划</summary><div></div></details>
           <details id="diff-panel" class="insight-card hidden"><summary>本轮 diff</summary><pre></pre></details>
+          <details id="memory-ref-panel" class="insight-card hidden"><summary>本轮引用</summary><div></div></details>
         </section>
         <form id="composer" class="composer">
           <section id="input-queue" class="input-queue hidden" aria-label="待发送消息"></section>
@@ -162,7 +176,7 @@
   <dialog id="text-dialog">
     <form method="dialog" id="text-form" class="dialog-form">
       <div class="dialog-title"><span class="mark small">C</span><div><p id="text-dialog-eyebrow" class="eyebrow">NEW ITEM</p><h2 id="text-dialog-title">新建</h2></div></div>
-      <label><span id="text-dialog-label">名称</span><input id="text-dialog-input" name="value" maxlength="500" required autocomplete="off"></label>
+      <label><span id="text-dialog-label">名称</span><input id="text-dialog-input" name="value" maxlength="4000" required autocomplete="off"><textarea id="text-dialog-textarea" maxlength="4000" rows="8" hidden></textarea></label>
       <p class="form-error" role="alert"></p>
       <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button id="text-dialog-submit" value="default" class="primary">确认</button></div>
     </form>

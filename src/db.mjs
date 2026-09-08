@@ -84,6 +84,7 @@ export class HarnessDatabase {
         codex_thread_id TEXT UNIQUE,
         status TEXT NOT NULL DEFAULT 'idle',
         preferred_mode TEXT NOT NULL DEFAULT 'execute' CHECK(preferred_mode IN ('edit','execute')),
+        memory_context_reset_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -246,6 +247,63 @@ export class HarnessDatabase {
       );
       CREATE INDEX IF NOT EXISTS turn_events_run_idx ON turn_events(turn_run_id, id);
       CREATE INDEX IF NOT EXISTS turn_events_chat_idx ON turn_events(chat_id, id);
+      CREATE TABLE IF NOT EXISTS user_memories (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        body TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','deleted')),
+        source_kind TEXT NOT NULL CHECK(source_kind IN ('manual','turn')),
+        source_chat_id TEXT REFERENCES chats(id) ON DELETE SET NULL,
+        source_turn_run_id TEXT REFERENCES turn_runs(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        deleted_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS user_memories_owner_idx ON user_memories(user_id,status,updated_at DESC);
+      CREATE TABLE IF NOT EXISTS user_memory_sources (
+        memory_id TEXT NOT NULL REFERENCES user_memories(id) ON DELETE CASCADE,
+        project_id TEXT NOT NULL,
+        chat_id TEXT,
+        turn_run_id TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(memory_id,project_id,chat_id,turn_run_id)
+      );
+      CREATE INDEX IF NOT EXISTS user_memory_sources_project_idx ON user_memory_sources(project_id,memory_id);
+      CREATE TABLE IF NOT EXISTS turn_memory_refs (
+        turn_run_id TEXT NOT NULL REFERENCES turn_runs(id) ON DELETE CASCADE,
+        memory_id TEXT NOT NULL REFERENCES user_memories(id) ON DELETE CASCADE,
+        memory_version INTEGER NOT NULL,
+        source_project_id TEXT,
+        referenced_at TEXT NOT NULL,
+        PRIMARY KEY(turn_run_id,memory_id)
+      );
+      CREATE INDEX IF NOT EXISTS turn_memory_refs_memory_idx ON turn_memory_refs(memory_id,turn_run_id);
+      CREATE TABLE IF NOT EXISTS memory_extraction_jobs (
+        id TEXT PRIMARY KEY,
+        turn_run_id TEXT NOT NULL UNIQUE REFERENCES turn_runs(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+        project_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','completed','failed')),
+        error_code TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS memory_extraction_jobs_status_idx ON memory_extraction_jobs(status,created_at);
+      CREATE TABLE IF NOT EXISTS memory_share_confirmations (
+        id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        project_id TEXT NOT NULL,
+        recipient_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        snapshot_hash TEXT NOT NULL,
+        memory_count INTEGER NOT NULL,
+        expires_at TEXT NOT NULL,
+        used_at TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS memory_share_confirmations_lookup_idx
+        ON memory_share_confirmations(owner_user_id,project_id,recipient_user_id,expires_at);
       DROP INDEX IF EXISTS project_access_one_share_idx;
     `);
     this.#ensureColumn('projects', 'repo_kind', "TEXT NOT NULL DEFAULT 'directory'");
@@ -258,6 +316,9 @@ export class HarnessDatabase {
     this.#ensureColumn('chats', 'thread_state', "TEXT NOT NULL DEFAULT 'ready'");
     this.#ensureColumn('chats', 'thread_error', 'TEXT');
     this.#ensureColumn('chats', 'preferred_model', 'TEXT');
+    this.#ensureColumn('chats', 'use_memory', 'INTEGER NOT NULL DEFAULT 1');
+    this.#ensureColumn('chats', 'save_memory', 'INTEGER NOT NULL DEFAULT 1');
+    this.#ensureColumn('chats', 'memory_context_reset_at', 'TEXT');
     this.#ensureColumn('chats', 'preferred_mode', "TEXT NOT NULL DEFAULT 'execute' CHECK(preferred_mode IN ('edit','execute'))");
     this.#ensureColumn('project_access', 'base_sha', 'TEXT');
     this.#ensureColumn('task_submissions', 'project_access_id', 'TEXT REFERENCES project_access(id) ON DELETE SET NULL');
@@ -640,6 +701,9 @@ export class HarnessDatabase {
       purpose: row.purpose || 'normal', workflowJobId: row.workflow_job_id || null,
       preferredMode: row.preferred_mode || 'execute',
       preferredModel: row.preferred_model || null,
+      useMemory: row.use_memory === undefined ? true : Boolean(row.use_memory),
+      saveMemory: row.save_memory === undefined ? true : Boolean(row.save_memory),
+      memoryContextResetAt: row.memory_context_reset_at || null,
       sourceChatId: row.source_chat_id || null, sharedAt: row.shared_at || null,
       threadState: row.thread_state || 'ready', threadError: row.thread_error || null,
       projectAccessId: row.project_access_id, treePath: row.tree_path,
@@ -673,8 +737,12 @@ export class HarnessDatabase {
       ['title', 'title'], ['codexThreadId', 'codex_thread_id'], ['status', 'status'],
       ['taskId', 'task_id'], ['taskVersion', 'task_version'], ['threadState', 'thread_state'],
       ['threadError', 'thread_error'], ['preferredMode', 'preferred_mode'], ['preferredModel', 'preferred_model'],
+      ['useMemory', 'use_memory'], ['saveMemory', 'save_memory'],
     ]) {
-      if (key in patch) { fields.push(`${column}=?`); values.push(patch[key]); }
+      if (key in patch) {
+        fields.push(`${column}=?`);
+        values.push(['useMemory', 'saveMemory'].includes(key) ? (patch[key] ? 1 : 0) : patch[key]);
+      }
     }
     fields.push('updated_at=?'); values.push(now(), id);
     this.db.prepare(`UPDATE chats SET ${fields.join(',')} WHERE id=?`).run(...values);
@@ -753,8 +821,8 @@ export class HarnessDatabase {
       const chat = this.db.prepare('SELECT * FROM chats WHERE id=?').get(chatId);
       if (!chat) throw new Error('对话不存在。');
       if ((chat.codex_thread_id || null) !== (expectedThreadId || null)) throw new Error('对话线程已变化，请刷新后重试。');
-      this.db.prepare(`UPDATE chats SET codex_thread_id=?,thread_state='ready',thread_error=NULL,updated_at=? WHERE id=?`)
-        .run(newThreadId, timestamp, chatId);
+      this.db.prepare(`UPDATE chats SET codex_thread_id=?,thread_state='ready',thread_error=NULL,
+        memory_context_reset_at=?,updated_at=? WHERE id=?`).run(newThreadId, timestamp, timestamp, chatId);
       this.db.prepare(`INSERT INTO chat_thread_recoveries (chat_id,old_thread_id,new_thread_id,reason,created_at)
         VALUES (?,?,?,?,?)`).run(chatId, chat.codex_thread_id, newThreadId, String(reason).slice(0, 4000), timestamp);
       this.db.exec('COMMIT');

@@ -1,6 +1,6 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { me: null, csrf: '', data: null, pendingRevoke: null };
+const state = { me: null, csrf: '', data: null, pendingRevoke: null, pendingMemoryShare: null };
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[char]);
@@ -39,6 +39,7 @@ async function api(url, options = {}) {
     if (response.status === 401) location.replace('/boss/login');
     const error = new Error(payload?.error?.message || `请求失败 (${response.status})`);
     error.code = payload?.error?.code;
+    error.details = payload?.error?.details;
     throw error;
   }
   return payload;
@@ -165,12 +166,28 @@ async function openUser(user = null) {
   } catch (error) { $('.form-error', form).textContent = error.message; }
 }
 
-async function grant(projectId, fixedUserId = '') {
+async function grant(projectId, fixedUserId = '', memoryConfirmationToken = null) {
   const select = $(`[data-share-user="${projectId}"]`);
   const userId = fixedUserId || select?.value;
   if (!userId) return toast('先选择一名员工。', 'error');
   try {
-    const result = await api(`/api/admin/projects/${projectId}/shares`, { method: 'POST', body: { userId } });
+    const body = { userId, scope: 'files_and_history', ...(memoryConfirmationToken ? { memoryConfirmationToken } : {}) };
+    let result;
+    try {
+      result = await api(`/api/admin/projects/${projectId}/shares`, { method: 'POST', body });
+    } catch (error) {
+      if (error.code !== 'MEMORY_SHARE_CONFIRMATION_REQUIRED') throw error;
+      const employee = employees().find((user) => user.id === userId);
+      state.pendingMemoryShare = { projectId, userId, token: error.details?.confirmationToken };
+      state.pendingRevoke = null;
+      $('#confirm-form .eyebrow').textContent = 'SHARE PRIVATE CONTEXT';
+      $('#confirm-form h2').textContent = '确认分享跨项目记忆上下文';
+      $('#confirm-message').textContent = `待分享对话包含 ${error.details?.memoryCount || 0} 条来自其他项目的私有记忆引用。接收者：${employee?.displayName || employee?.username || userId}。继续将分享当前对话快照；内容变化后必须重新确认。`;
+      $('#confirm-dialog-submit').textContent = '确认分享';
+      $('.form-error', $('#confirm-form')).textContent = '';
+      $('#confirm-dialog').showModal();
+      return;
+    }
     toast(result.restored ? '已恢复该员工原有 worktree、对话与授权。' : `已从 Git 基线 ${String(result.access?.baseSha || '').slice(0, 12)} 创建独立 worktree，已复制 ${result.copiedChats || 0} 段对话。`);
     await load();
   } catch (error) { toast(error.message, 'error'); }
@@ -178,6 +195,11 @@ async function grant(projectId, fixedUserId = '') {
 
 function requestRevoke(projectId, accessId) {
   state.pendingRevoke = { projectId, accessId };
+  state.pendingMemoryShare = null;
+  $('#confirm-form .eyebrow').textContent = 'REVOKE ACCESS';
+  $('#confirm-form h2').textContent = '撤销项目访问';
+  $('#confirm-message').textContent = '员工将立即失去访问权；未提交的脏工作树会保留。';
+  $('#confirm-dialog-submit').textContent = '确认撤权';
   $('.form-error', $('#confirm-form')).textContent = '';
   $('#confirm-dialog').showModal();
 }
@@ -206,17 +228,20 @@ $('#confirm-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (event.submitter?.value === 'cancel') {
     state.pendingRevoke = null;
+    state.pendingMemoryShare = null;
     $('#confirm-dialog').close();
     return;
   }
-  if (!state.pendingRevoke) return;
+  if (!state.pendingRevoke && !state.pendingMemoryShare) return;
   const target = event.currentTarget;
   const pending = state.pendingRevoke;
+  const pendingShare = state.pendingMemoryShare;
   const submit = event.submitter || $('#confirm-dialog-submit');
   submit.disabled = true;
   try {
-    await revoke(pending.projectId, pending.accessId);
-    state.pendingRevoke = null;
+    if (pendingShare) await grant(pendingShare.projectId, pendingShare.userId, pendingShare.token);
+    else await revoke(pending.projectId, pending.accessId);
+    state.pendingRevoke = null; state.pendingMemoryShare = null;
     $('#confirm-dialog').close();
   } catch (error) {
     $('.form-error', target).textContent = error.message;

@@ -5,10 +5,14 @@
 | 数据 | 事实源 | 用途 |
 | --- | --- | --- |
 | 用户、ACL、项目、task、run、approval、lease、submission、审计 | SQLite | 业务授权与状态机 |
+| 用户记忆、来源、版本、提取任务、每轮引用与分享确认 | SQLite | 长期记忆的权威正文、可见性和失效证据 |
 | 完整原生 transcript、thread/turn/item | Codex `CODEX_HOME` | 高保真对话历史与原生恢复 |
 | 项目文件与 Git 状态 | 主目录/worktree | 共享事实和交付内容 |
+| per-user Markdown/Milvus Lite/embedding | `.data/memory-index` 与模型缓存 | 可删除重建的召回加速层 |
 
 Portal 不把 Codex thread 当唯一业务事实，也不复制完整 transcript 到审计表。`messages` 和 `turn_events` 是在原生历史暂时不可用时维持基本可见性和运行恢复的受限投影。
+
+Portal 也不读取或写入 Codex 原生长期记忆；该能力对 Portal app-server 强制关闭。用户记忆从 SQLite 投影为每用户独立文档和数据库，memsearch 超时或崩溃时退回 SQLite 关键词召回。无论使用哪种召回器，最终候选都重新查询 SQLite 并验证来源 access。
 
 ## Turn event journal
 
@@ -70,6 +74,8 @@ resume_failed --reset + explicit acknowledgement--> ready, new thread id + linea
 5. 把 chat 运行展示状态恢复为 idle；
 6. 幂等修复历史孤儿 submission/task 状态。
 
+随后把遗留 queued/running memory extraction job 标为 failed（`REPLACED_BY_MEMORY_TOOLS`），保留历史但不重放。只由四个记忆工具或人工界面触发 CRUD，工具成功的写入不随 turn 失败回滚。每次 search 返回前记录引用；没有 tool call 就没有自动注入或提取。同一时刻按现有 active 记忆重建每用户派生索引，索引失败不阻止 Portal/Codex ready。
+
 Portal 不尝试在没有可靠 native turn 身份和订阅的情况下把崩溃前 turn 当作继续运行。
 
 ## Submission 保留与代码快照
@@ -80,7 +86,7 @@ submission 的 chat/run 外键使用 `ON DELETE SET NULL`，同时保存不可�
 
 ## 备份与恢复
 
-- 停服备份必须包含 SQLite 主文件、`-wal`、`-shm`，以及 `workspaces/`、`trees/`、`trash/`。
+- 停服备份必须包含 SQLite 主文件、`-wal`、`-shm`，以及 `workspaces/`、`trees/`、`trash/`。`.data/memory-index` 可选，因为能从 SQLite 重建；模型缓存无需备份。
 - 在线备份应使用 SQLite backup API，不能只复制主文件。
 - 恢复 tree 或 trash 文件前必须核对 owner、access、branch 和 ACL，不得按路径猜测归属。
 - `CODEX_HOME` 保存 native thread 与登录，不在 Portal SQLite 备份内；灾难恢复计划必须单独考虑它。
@@ -97,5 +103,7 @@ submission 的 chat/run 外键使用 `ON DELETE SET NULL`，同时保存不可�
 `input_steered` journal 仅含 input/run 标识，不含正文。GET run SSE 还可向已授权在线订阅者传递不持久化的 assistant/reasoning/command delta 与实时 diff；实时帧不推进 journal cursor，重放仍只返回脱敏语义事件。每次投递继续复验用户状态与 access，断线后正文由受 ACL 的消息/run 快照补齐。
 
 ## 工作图恢复
+
+项目事件以 SQLite 为历史源；新页面从零重放当前授权历史，不能只恢复游标而丢弃正文。前端按事件 id 去重、倒序展示，不按最近条数删除历史；项目切换后忽略旧连接回调。连接重试使用 Last-Event-ID 继续接收。
 
 工作图 submission 支持 manual 空原生身份，业务事件采用接收者 ACL。Portal 启动恢复 job；completed 原生运行与持久结构化回执可收敛，其他不确定原生投递需人工确认重试。 详细契约见 [多人 Work Graph](09-human-work-graph.md)，操作见 [工作图指南](../../docs/WORK_GRAPH.md)。

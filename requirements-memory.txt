@@ -1,0 +1,2 @@
+# Separate managed Python 3.12 environment; do not install into the system Python.
+memsearch[onnx]==0.4.19

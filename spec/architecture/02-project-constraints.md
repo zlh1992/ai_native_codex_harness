@@ -10,6 +10,8 @@
 - **PRD-004**：跨人员交付经过 task/submission、显式 share 时的一次性 thread fork 或未来 artifact/handoff；禁止裸 `inject_items`、实时全量 transcript 同步或共用原 thread id。
 - **PRD-005**：当前仅支持一个超级管理员和多个普通员工；不能从现有角色模型推导组织、多老板或细粒度 viewer/reviewer 权限。
 - **PRD-006**：EDIT/EXECUTE 偏好属于 chat，不能由同项目其他 chat 的选择隐式改变；新建和迁移后的 chat 默认 EXECUTE，老板与员工采用同一模式语义和项目内自动放行策略。
+- **PRD-007**：长期记忆以 `user_id` 私有；同一用户只可跨其当前仍有有效 access 的来源项目召回，`admin` 角色不构成员工记忆读取旁路。普通 chat 可独立关闭召回或形成记忆；planner/reviewer 一律不召回、不形成记忆。
+- **PRD-008**：若 owner chat 曾引用可用的跨项目记忆，`files_and_history` 分享必须显式确认并绑定接收者、chat/引用快照；快照变化、重复使用或超时必须拒绝。若引用已因删除或来源撤权而失效，必须先显式重置 chat，不能继续分享其历史。
 
 ## 运行平台约束
 
@@ -18,6 +20,7 @@
 - **RUN-003**：Codex app-server 必须通过后端 stdio JSON-RPC 使用，不得把原始 RPC 或非回环 app-server WebSocket 暴露给浏览器。
 - **RUN-004**：Portal 启动成功的定义是 HTTP、Codex initialize 与 Portal skill 注册同时 ready；`/api/health` 必须区分 `starting`、`failed`、`ready`。
 - **RUN-005**：正式服务与隧道由独立 launchd job 管理，PID 文件只能引用经过命令标记校验的本项目进程。
+- **RUN-006**：Portal 启动的 Codex app-server 必须关闭 `memories` feature，并固定 `memories.generate_memories=false` 与 `memories.use_memories=false`；相同配置必须覆盖 start/resume/fork 与子代理，且 `config/read` 生效值验证通过后才可 ready。浏览器、项目配置和运营开关不得重新开启原生记忆。
 
 ## 协议约束
 
@@ -45,6 +48,8 @@
 - **DAT-005**：服务重启必须把遗留的 queued/starting/running run 转为确定的 interrupted 终态，取消 pending approval，清理 lease 并写恢复事件。
 - **DAT-006**：事件和审计不得记录 prompt、密码、token、命令正文、文件正文、模型逐 token 输出或 raw diff。
 - **DAT-007**：新 task submission 必须绑定原 `project_access.id`、不可变 Git commit 和 tree；`passed` 审核必须先把该快照合入 owner 并记录 delivery commit。merge 失败时 submission 保持 pending，不能只推进任务状态。
+- **DAT-008**：SQLite 是用户记忆、来源与每轮引用的唯一事实源；Markdown、Milvus Lite 和 embedding 都是可重建派生物。每次注入前必须按 owner、active 状态和全部来源项目的当前 access 复验；删除、编辑、撤权或项目删除必须立即阻止旧候选使用，并把已引用旧值的 native chat 标为需要显式 reset。
+- **DAT-009**：普通/task root 由模型自主调用 `memory_search/add/update/delete`；Portal 不再每轮自动注入或按关键词后置提取。身份及来源由服务端绑定；搜索与写入分别受 chat 开关控制，planner/reviewer 与子代理不得调用。写入工具成功即持久化，不依赖最终 turn 成功；更新/删除必须校验版本，秘密模式命中不得保存，不得回填旧历史，正文不得进入 audit、turn event 或服务日志。
 
 ## 容量约束
 
@@ -68,7 +73,7 @@
 - 敌对互联网多租户、组织级数据隔离或按用户独立上游计费。
 - OIDC、MFA、邀请、首次强制改密、用户自助改密、设备会话管理。
 - 每 task/chat 独立 worktree、同文件并发冲突自动解决、PR 或完整代码审核 UI；当前只承诺 access worktree 的提交快照与 `passed` owner merge。
-- 任意顶层 chat 实时互发消息、持续 transcript 同步或跨 chat 共享隐式 memory；显式 share 的一次性完整历史 fork 已纳入支持。
+- 任意顶层 chat 实时互发消息或持续 transcript 同步；同一用户的 Portal 记忆召回和显式 share 的一次性完整历史 fork 已纳入支持，但不构成跨用户记忆共享。
 - Linux/Windows 命令沙箱兼容性。
 
 ## 多人工作图约束

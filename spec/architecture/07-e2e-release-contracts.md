@@ -82,6 +82,7 @@ HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake ap
 - 快速完成竞态：completed 先到时仍保存 native turn id。
 - 事件/消息：journal cursor 有序、敏感正文省略、fallback 幂等、超过 5000 条分页恢复。
 - 协议：精确 CLI 版本、所需方法/事件/字段和固定 Luna 子代理策略存在。
+- 原生记忆：启动参数和每个 thread config 都固定关闭，`config/read` 返回任一开启值时 app-server 不得 ready。
 
 ## 已完成的真实公网冒烟
 
@@ -133,5 +134,15 @@ HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake ap
 `test/e2e/work-graph.test.mjs` 通过真实 HTTP 与 fake 原生业务工具回调验证：三员工资料、生成图、自动 files_only 分享、当前权限裁剪、人工幂等提交、自动打回和版本更新、并行分支、汇合及最终完成。故意调用 workspace 写工具必须失败。旧发布用例全部保留。
 
 `test/work-graph.test.mjs` 补充真实 Git 前序成果同步、固定产物 ACL、配额批量原子性、脏树保留、计划/任务历史、暂停围栏、策略 epoch、租约恢复、模型工作串行与容量等待、取消清理。真实模型质量单独记录于实施报告，不能用 fake 判断代替。
+
+`test/frontend.test.mjs` 固定三种工作图投影的选中态与用途说明、仅依赖图可缩放、长标题不做行数截断，以及依赖图节点和任务列表的纵向滚动契约；布局步长必须容纳固定高度节点，避免同层任务重叠。
+
+## E2E-016 按用户记忆与分享确认
+
+- `/api/me` 明示 Codex 原生记忆关闭；用户可创建、编辑、删除自己的 Portal 记忆并独立设置 chat 召回/形成开关。
+- 普通 turn 通过实际动态工具回调执行 memory_add/update/delete，记录 project/chat/run 来源和版本；关键词本身不触发保存。同一用户在另一个当前授权项目通过 memory_search 召回并查询本轮引用。
+- 另一用户的记忆列表为空，也不能用原 chat id 读取对方历史。
+- owner chat 引用了跨项目记忆后，`files_and_history` 首次分享返回确认挑战；携带绑定当前接收者和快照的单次 token 后才发布 access/history。
+- 单元测试补充来源撤权后的 fail-closed、失效引用正文隐藏、编辑后分享确认失效、token 接收者绑定与单次使用、秘密写入拒绝、工具身份覆盖拒绝、开关与 planner 限制、搜索异步权限复验、旧版本更新/删除拒绝。
 
 本机单元/集成与 HTTP 测试均按文件顺序执行（`--test-concurrency=1`），避免多个真实 Git/Seatbelt 夹具争抢宿主资源影响短时生命周期断言；不修改、跳过或延长既有测试断言。

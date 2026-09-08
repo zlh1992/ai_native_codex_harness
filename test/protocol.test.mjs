@@ -11,7 +11,7 @@ test('generated app-server schema contains every native employee workflow contra
   assert.equal(loadConfig({}).codexCliVersion, version.codexCli);
   assert.ok(read('../src/codex-client.mjs').includes('Codex 协议版本不匹配'));
   const client = read('../protocol/generated/ClientRequest.ts');
-  for (const method of ['thread/fork', 'thread/read', 'thread/goal/set', 'thread/goal/get', 'skills/list', 'turn/start', 'turn/interrupt', 'turn/steer']) {
+  for (const method of ['thread/fork', 'thread/read', 'thread/goal/set', 'thread/goal/get', 'skills/list', 'turn/start', 'turn/interrupt', 'turn/steer', 'config/read']) {
     assert.match(client, new RegExp(`"${method.replace('/', '\\/')}"`));
   }
   assert.ok(read('../protocol/generated/v2/TurnSteerParams.ts').includes('expectedTurnId: string'));
@@ -52,6 +52,10 @@ test('app-server launch policy fixes the native subagent limit and Luna model', 
   assert.ok(source.includes("'HOME', 'PATH', 'TMPDIR'"));
   assert.ok(!source.includes('const childEnv = { ...process.env }'));
   assert.ok(!source.match(/disabledFeatures[\s\S]{0,500}'multi_agent'/));
+  assert.ok(source.includes("'memories'"));
+  assert.ok(source.includes('memories.generate_memories=false'));
+  assert.ok(source.includes('memories.use_memories=false'));
+  assert.ok(read('../src/codex-service.mjs').includes('config: PORTAL_MEMORY_CONFIG'));
 });
 
 test('task turns discover and inject the bundled native skill', () => {

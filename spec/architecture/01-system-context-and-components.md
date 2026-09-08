@@ -10,7 +10,8 @@
 | Portal | 唯一业务授权点与编排者 | 不信任浏览器传入的 owner、cwd、tree、thread 或 RPC method |
 | Codex app-server | 原生 thread/turn/approval/skills/subagent 能力 | 共享本机身份，不是租户授权来源 |
 | 本机文件系统/Git | 项目主目录、共享 worktree、runtime、trash | 符号链接、`.git` 指针、项目自定义 agent 配置 |
-| SQLite | 业务事实、运行 journal、审计 | 是 Portal 的业务事实源，不包含原生完整 transcript |
+| SQLite | 业务事实、用户记忆、运行 journal、审计 | 是 Portal 的授权与记忆事实源，不包含原生完整 transcript |
+| memsearch/ONNX worker | 对每名用户的记忆派生文档做本地语义索引 | 只返回候选，不授予用户或项目权限；失败时可降级 |
 
 ## 请求链路
 
@@ -39,7 +40,10 @@ Browser request
 | `src/capacity-service.mjs` | root turn、用户并发、access 占用跟踪、EXECUTE lease 与排队 | 不替代数据库生命周期检查；不把同 access 的不同 chat 强制串行 |
 | `src/sandbox.mjs` | 最小环境、Seatbelt profile、命令超时和输出限制 | 不继承 Portal/Codex/Cloudflare 秘密；不提供跨项目读取 |
 | `src/codex-client.mjs` | 启停 app-server、JSONL RPC、精确协议版本验证 | 不向浏览器暴露；不做业务 ACL |
-| `src/codex-service.mjs` | thread/turn、事件、审批、动态工具、恢复、子代理政策、运行清理 | 不允许客户端指定原生 thread/cwd；不自动跨 chat 共享历史 |
+| `src/codex-service.mjs` | thread/turn、事件、审批、动态工具、恢复、子代理政策、Portal 记忆注入与运行清理 | 不允许客户端指定原生 thread/cwd；不自动跨 chat 共享历史 |
+| `src/user-memory-service.mjs` | `user_id` 记忆 CRUD、来源 ACL、搜索、引用、分享确认与线程失效 | 不把索引命中当授权；不读取其他用户记忆；不再自动提取 |
+| `src/memory-tools.mjs` | 四个模型自主调用的记忆工具 schema、参数与 chat 开关校验、写入后线程失效 | 身份和来源由 active root 绑定；planner/reviewer 与子代理不可调用 |
+| `src/memory-index-client.mjs` + worker | 管理 per-user memsearch 索引、超时与降级状态 | 不持有权威正文或决定可见性；不继承 Portal/Codex 凭据 |
 | `public/app.js` | 员工/owner 工作台、事件重放、文件与任务交互、受限 HTML 产物 iframe 预览 | 不作为安全边界；所有限制必须由服务端重复执行，项目 HTML 不获得 Portal 同源能力 |
 | `public/boss.js` | 老板元数据与授权工作流 | 不获得员工项目内容旁路 |
 | `bin/*.sh` | 本机 launchd 生命周期、健康检查和隧道 | 不把服务直接监听到非回环地址 |
@@ -53,10 +57,14 @@ Browser request
 .data/runtime/<user-id>/<project-access-id>/ 命令 HOME/TMP 与 access 级运行数据
 .data/runtime/git/                          Portal 受信 Git 服务的独立 HOME
 .data/trash/<actor-id>/                     可恢复删除
+.data/memory-index/users/<user-id>/         SQLite 生成的 per-user Markdown 与 Milvus Lite 派生索引
+.data/memory-model-cache/                   固定 revision 的本地 ONNX 模型缓存
 CODEX_HOME                                  原生 Codex thread/登录；由所有 Portal 用户共享
 ```
 
 `tree_path`、`project_access_id` 和 `codex_thread_id` 只由服务端数据库绑定产生。对外 payload 必须移除物理 `treePath`、branch 内部细节及其他绝对路径。
+
+`CODEX_HOME` 虽共享，但 Portal 启动参数和所有 start/resume/fork 的 thread config 都固定 `features.memories=false`、`memories.generate_memories=false`、`memories.use_memories=false`；初始化后必须用 `config/read` 验证有效值，任一不为 `false` 就拒绝 ready。
 
 ## UI 分工
 

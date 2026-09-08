@@ -7,6 +7,7 @@ User
   1 -> N owned Project
   1 -> N ProjectAccess
   1 -> N private Chat
+  1 -> N UserMemory -> N source Project/Chat/Turn
 
 Project
   1 -> 1 owner ProjectAccess
@@ -24,6 +25,7 @@ Chat
                     -> N TurnApproval
                     -> 0..1 ExecutionLease
   0..N -> ChatThreadRecovery lineage records
+  0..N -> TurnMemoryRef -> UserMemory version
 
 Task + TaskVersion
   0..1 -> task-bound Chat
@@ -60,6 +62,20 @@ Task + TaskVersion
 - reset 必须原子记录 old/new thread lineage，且不假装旧历史已经注入新 thread。
 - task chat 同时绑定 task id 与 task version；任务版本变化后旧 chat 不能继续提交新版本证据。
 - `preferred_mode` 由每个 chat 独立持久化，新建和迁移后的 chat 默认 `execute`；切换另一个 chat 必须恢复该 chat 自己的值。
+- `use_memory` 与 `save_memory` 由每个 chat 独立持久化并默认开启；planner/reviewer 即使字段为真也不得召回或形成记忆。
+
+## 用户记忆与来源
+
+普通/task root 的四个 memory 工具由模型自行选择调用；`use_memory` 控制 search，`save_memory` 控制 add/update/delete。工具新增绑定当前来源；更新以事务追加来源并递增版本，保留全部来源的 ACL 约束；同正文重复新增只返回原记录元数据，不修改来源。搜索结果带 id/version/body 并记录引用，工具新增只返回元数据。
+
+工具修改/删除后，所有旧引用 chat 标记失效并暂停队列，其他活跃 chat 中断并排空；调用者不自等待中断，可以确认结果，但后续动态工具和原生写入批准拒绝，下一轮必须显式 reset。retry 在异步恢复前后复验引用，不允许恢复已失效记忆的旧线程。已经执行中的操作不能被追溯撤销。
+
+- `user_memories.user_id` 是唯一 owner；没有项目来源的手动记忆可用于该用户的所有当前项目，turn 新增或工具更新必须记录来源 project/chat/run。source_kind 表示最初创建方式，后续工具更新仍追加来源 ACL。
+- 跨项目仅表示同一 user 在多个当前有效 access 间召回，不表示另一个用户、老板角色或共享项目成员可读。
+- 语义索引只排序候选。注入前以 SQLite active/version 和每个 `user_memory_sources.project_id` 的当前 access 重新过滤，并限制最多 8 条、约 4000 tokens。
+- 每轮实际注入持久化 `memory_id + memory_version + source_project_id`。记忆编辑、删除或来源授权失效后，旧 native thread 不得静默继续；对应 chat 进入 `resume_failed`，只能由用户明确 reset 后建立空白线程。
+- 手动删除立即清空权威正文并留下 tombstone/version；索引异步重建期间的旧向量命中必须被 SQLite 拒绝。
+- `files_and_history` 分享的确认 token 单次使用、10 分钟过期，并绑定 owner、接收者、目标项目、chat 更新时间及引用记忆当前版本。确认不转移记忆本身，历史 fork 也必须剥离 Portal 注入的隐藏 memory context。用户显式 reset 空白 native thread 时记录 `memory_context_reset_at`；该时间之前的引用保留为历史证据，但不再污染新线程或后续分享快照。
 
 ## TurnRun 状态机
 

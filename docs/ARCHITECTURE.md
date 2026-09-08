@@ -33,10 +33,13 @@ Browser ─HTTPS─> Tunnel ─HTTP loopback─> Harness HTTP Server
 - 老板共享给员工的 tree：`.data/trees/<project-access-uuid>/`
 - 命令 HOME/TMP：`.data/runtime/<user-uuid>/<project-access-uuid>/`
 - 可恢复废纸篓：`.data/trash/<user-uuid>/`
-- 元数据：`.data/harness.sqlite`
+- 元数据与用户记忆事实源：`.data/harness.sqlite`
+- 用户记忆派生索引：`.data/memory-index/users/<user-uuid>/`
 - Codex 原生 thread：由本机 Codex 存储；本项目数据库只保存服务端签发的 chat 与 thread 映射。
 
 每次项目、文件、对话和 Codex 工具调用都重新查询有效 OWNER/SHARED 记录，并使用数据库绑定的 `tree_path`；浏览器提供的 owner、tree、cwd 或 Codex thread id 均不被信任。超级账户没有内容旁路，只能通过专用驾驶舱查询跨用户元数据。
+
+Codex 原生长期记忆在 app-server 进程参数、每个 thread config 和 ready 前有效配置验证三层永久关闭。Portal 自有长期记忆按 `user_id` 隔离，只有同一用户当前仍授权的来源项目才能被召回；本地 memsearch 只排序候选，最终权限仍由 SQLite 判断。操作细节见 [用户记忆运维](MEMORY.md)。
 
 ## 4. 为什么不用 app-server WebSocket / ACP
 
@@ -80,4 +83,4 @@ Browser ─HTTPS─> Tunnel ─HTTP loopback─> Harness HTTP Server
 
 ## 9. 信任与账号边界
 
-所有用户仍共享一个 app-server 进程、一个本机 `CODEX_HOME` 与同一 Codex 登录对应的配额。Portal 对 HTTP、动态工具、cwd、sandbox 和 active root 做业务 ACL，但这不构成敌对租户级的上游身份或进程隔离；当前产品只能定位为内部互信 Pilot。若面向互不信任组织，必须拆成 per-user/per-tenant worker 与独立上游身份。公网输入会发送给该 Codex 登录对应的 OpenAI 服务，不是纯本地推理。
+所有用户仍共享一个 app-server 进程、一个本机 `CODEX_HOME` 与同一 Codex 登录对应的配额。原生记忆关闭消除了一个明确的跨用户串忆入口，但 Portal 对 HTTP、动态工具、cwd、sandbox 和 active root 的业务 ACL 仍不构成敌对租户级的上游身份或进程隔离；当前产品只能定位为内部互信 Pilot。若面向互不信任组织，必须拆成 per-user/per-tenant worker 与独立上游身份。公网输入会发送给该 Codex 登录对应的 OpenAI 服务，不是纯本地推理。

@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { graphLayout } from '../public/work-graph.js';
 
 const app = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
 const boss = fs.readFileSync(new URL('../public/boss.js', import.meta.url), 'utf8');
 const styles = fs.readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
+const workGraph = fs.readFileSync(new URL('../public/work-graph.js', import.meta.url), 'utf8');
 
 function frontendFunction(name) {
   const match = app.match(new RegExp(`function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}`));
@@ -81,6 +83,37 @@ test('destructive and context-reset actions use in-app confirmations', () => {
   assert.ok(boss.includes('pendingRevoke'));
   assert.ok(app.includes("event.submitter || $('#confirm-dialog-submit')"));
   assert.ok(boss.includes("event.submitter || $('#confirm-dialog-submit')"));
+});
+
+test('per-user memory UI exposes chat controls, multiline editing, references, and share confirmation', () => {
+  assert.ok(html.includes('data-view="memories"'));
+  assert.ok(html.includes('id="memory-create-form"'));
+  assert.ok(html.includes('id="use-memory"'));
+  assert.ok(html.includes('id="save-memory"'));
+  assert.ok(html.includes('id="memory-ref-panel"'));
+  assert.ok(html.includes('id="text-dialog-textarea"'));
+  assert.ok(app.includes("multiline: true"));
+  assert.ok(app.includes('/memory-references') || app.includes('/memory`'));
+  assert.ok(boss.includes('MEMORY_SHARE_CONFIRMATION_REQUIRED'));
+  assert.ok(boss.includes('pendingMemoryShare'));
+  assert.ok(boss.includes('memoryConfirmationToken'));
+});
+
+test('work graph keeps long task titles readable and distinguishes its three projections', () => {
+  assert.ok(styles.includes('.graph-canvas .graph-node{position:absolute;height:176px;min-height:0;overflow-y:auto'));
+  assert.ok(styles.includes('.graph-node-title{font-size:15px;line-height:1.45'));
+  assert.ok(styles.includes('.graph-list{display:grid;'));
+  assert.ok(styles.includes('max-height:min(68vh,720px);overflow-y:auto'));
+  assert.equal(styles.includes('-webkit-line-clamp'), false);
+  assert.ok(workGraph.includes('依赖图：按前后置关系排列任务'));
+  assert.ok(workGraph.includes("button.setAttribute('aria-pressed', String(active))"));
+  assert.ok(workGraph.includes("button.disabled = this.mode !== 'graph'"));
+
+  const layout = graphLayout([
+    { key: 'first', dependsOn: [] },
+    { key: 'second', dependsOn: [] },
+  ]);
+  assert.ok(layout.positions.get('second').y - layout.positions.get('first').y >= 176);
 });
 
 test('turn recovery paginates the durable journal instead of skipping to its latest cursor', () => {

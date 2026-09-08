@@ -27,7 +27,7 @@ cd /Users/zlh1992_home/Documents/ChatGPT/codex-harness-remote
 ./bin/start-public.sh
 ```
 
-老板打开 [老板登录](http://127.0.0.1:4310/boss/login)，员工打开 [员工登录](http://127.0.0.1:4310/employee)。`install-mac.sh` 会按 `package-lock.json` 自动安装锁定的 npm 运行依赖，无需另行执行安装命令。
+老板打开 [老板登录](http://127.0.0.1:4310/boss/login)，员工打开 [员工登录](http://127.0.0.1:4310/employee)。`install-mac.sh` 会按 `package-lock.json` 自动安装锁定的 npm 运行依赖，并建立本地 memsearch/ONNX 环境，无需另行执行安装命令。
 
 `install-mac.sh` 会把 `cloudflared` 安装或复制到本项目的 `.tools/cloudflared`；运行时拒绝引用其他项目的可执行文件。公网临时地址：
 
@@ -57,6 +57,7 @@ macOS `launchd` 使用独立标签 `com.codex-harness-remote.server` 与 `com.co
 - 老板项目可同时授权多名员工；每名员工绑定独立 Git worktree。新授权会复制 owner 当前 HEAD、已跟踪修改和未跟踪文件，同时将老板在该项目已有的全部对话一次性 fork 为员工私有副本。双方后续对话互不影响；撤权先排空运行再关闭工作树，脏树保留且同一员工可恢复原授权。
 - API 拒绝绝对路径、`..`、`.git` 等内部路径和越界符号链接；删除操作移动到 `.data/trash`，便于恢复。
 - Codex app-server 只使用 stdio；不向浏览器提供原始 RPC；会话/turn 映射由服务端验证。
+- Portal 启动的 Codex app-server 永久关闭原生长期记忆，并在 ready 前读取有效配置验证；业务长期记忆由 Portal 按用户隔离，Codex 自主调用 `memory_search/add/update/delete`（非关键词自动保存），复用 memsearch/Milvus，支持当前来源授权、引用、chat 开关、人工管理和分享确认。
 - 关闭 Codex 内置 Shell、浏览器、插件、外部 MCP 和电脑控制；保留原生 apply-patch/diff、approval、plan、goal、skills 与子代理。动态 `workspace_*` 工具仍由后端做 ACL 和路径校验；通过校验的项目内文件变更会自动接受。
 - 项目命令使用无秘密环境，并套用 macOS Seatbelt：默认不能读这台 Mac 的用户主目录或其他用户工作区；网络权限由超级管理员按用户开关。
 - 命令超时、输出上限、进程/文件描述符上限、用户并发、全局并发、项目数和存储配额；员工项目硬上限 100，全局 Codex turn 硬上限 40，Portal 同时运行 11 个 root turn，默认 EXECUTE 可使用全部 11 席。
@@ -85,7 +86,7 @@ node src/cli.mjs reset-password --username=superadmin
 
 规范入口：[项目规格](spec/index.md) · [架构规格与强制约束](spec/architecture/index.md) · [实施报告](spec/report/index.md)
 
-操作资料：[架构与安全边界（简版）](docs/ARCHITECTURE.md) · [超级管理员指南](docs/SUPER_ADMIN_GUIDE.md) · [公网部署指南](docs/PUBLIC_DEPLOYMENT.md)
+操作资料：[架构与安全边界（简版）](docs/ARCHITECTURE.md) · [用户记忆运维](docs/MEMORY.md) · [超级管理员指南](docs/SUPER_ADMIN_GUIDE.md) · [公网部署指南](docs/PUBLIC_DEPLOYMENT.md)
 
 ## 多人 Work Graph
 

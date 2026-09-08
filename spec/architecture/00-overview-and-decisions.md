@@ -4,7 +4,7 @@
 
 Codex Harness Remote 把一台已登录 Codex 的 Mac 包装成受控 Web 工作台，让一个老板账号管理多个员工账号、项目授权、任务交付和资源配额，同时把浏览器与本机文件、Codex 原生协议和凭据隔开。
 
-当前产品定位是内部互信 Pilot：Portal 提供可靠的业务 ACL、文件边界、运行调度和审计，但所有用户仍共享一个本机 Codex app-server、`CODEX_HOME`、上游身份和配额。它不是面向恶意、多组织租户的硬隔离平台。
+当前产品定位是内部互信 Pilot：Portal 提供可靠的业务 ACL、文件边界、运行调度、按用户长期记忆和审计，但所有用户仍共享一个本机 Codex app-server、`CODEX_HOME`、上游身份和配额。Portal 启动的 app-server 会强制关闭并验证 Codex 原生长期记忆，避免把共享宿主状态当成业务记忆；这仍不是面向恶意、多组织租户的硬隔离平台。
 
 ## 超级管理员与内容保密边界
 
@@ -24,19 +24,23 @@ Chat          = 私有 transcript + Codex thread 映射 + 独立执行模式
 Task          = 业务目标 + assignee + version + acceptance
 Submission    = 不可变回复/diff + project access + Git commit/tree + owner delivery commit
 Artifact/Handoff（未来） = 跨对话、跨人员的显式共享协议
+UserMemory   = 单用户长期事实 + 来源项目 ACL + 每轮引用证据
 ```
 
 禁止把“同项目”直接解释为“所有对话可以互读互写”。共享完整 transcript 会同时扩大权限、隐私、提示注入、上下文膨胀、撤权和来源追踪问题，而且不能解决文件并发。当前系统共享项目文件、任务事实和提交快照；owner 显式新 share 时也把其该项目所有已有对话一次性 fork 给员工，fork 后双方历史继续私有且互不跟随。任务提交会把 assignee 当前 worktree 固定为 Git commit/tree；老板审核 `passed` 时将该固定 commit 合入 owner 项目，合并冲突则保持 pending，不把状态通过误当成交付完成。
 
 ## 当前物理架构
 
-系统是一个单体 Portal 进程加一个受管 Codex 子进程：
+系统是一个单体 Portal 进程、一个受管 Codex 子进程和一个可降级的本地 memsearch 索引子进程：
 
 ```text
 Browser
   -> HTTPS Tunnel
   -> loopback Portal HTTP/SSE
      -> SQLite
+     -> UserMemoryService
+        -> per-user Markdown projection
+        -> memsearch/ONNX stdio worker（不可用时 SQLite 关键词降级）
      -> Workspace/Worktree/Sandbox services
      -> CodexService
         -> stdio JSON-RPC
@@ -52,7 +56,7 @@ Browser
 | --- | --- | --- |
 | R1 submission 随 chat 删除 | 正确，原实现为 P0 | submission 外键改为 `SET NULL`，保留不可变快照；应用层禁止删除含提交证据的 chat；启动修复历史孤儿状态。 |
 | R2 resume 失败覆盖 thread | 正确，原实现为 P0 | 保留旧 thread id，进入 `resume_failed`；仅重试成功或用户确认上下文断裂后切换，并记录 lineage。 |
-| R3 单 App Server/共享 `CODEX_HOME` | 正确，但不是本轮可局部消除的问题 | 明确内部互信 Pilot；敌对租户需要独立 worker、OS 身份和上游身份。 |
+| R3 单 App Server/共享 `CODEX_HOME` | 正确，可消除原生记忆串忆但不能消除全部共享故障域 | Portal 进程参数、每个 thread 配置和 `config/read` 三重关闭/验证 Codex 原生记忆；敌对租户仍需要独立 worker、OS 身份和上游身份。 |
 | R4 同 tree 多 chat 并发写 | 风险成立，但试用要求并发优先 | 允许同 `project_access/worktree` 的不同 chat 并发；同 chat 仍串行，浏览器写入、submission 和 delivery 仍等待 access 空闲，并明确同文件并发冲突风险。 |
 | R5 单共享员工与多 assignee 冲突 | 正确，原实现为 P1 | 一个项目允许多名员工同时 active，每名员工拥有独立 access、branch 和 worktree。 |
 | R6 SSE 不可恢复 | 正确，原实现为 P1 | 引入持久语义事件 journal、游标重放和前端恢复；敏感大正文不持久化。 |

@@ -20,6 +20,7 @@ import { TaskReviewService } from './task-review-service.mjs';
 import { ProjectContextService } from './project-context-service.mjs';
 import { WorkGraphRuntime } from './work-graph-runtime.mjs';
 import { WorkflowScheduler } from './workflow-scheduler.mjs';
+import { UserMemoryService } from './user-memory-service.mjs';
 import { createWorkGraphRoutes } from './work-graph-routes.mjs';
 import { readBody, readJson, securityHeaders, sendJson, serveStatic, sse, sseHeaders } from './http-utils.mjs';
 
@@ -68,10 +69,11 @@ const db = new HarnessDatabase(config);
 db.recoverInterruptedRuntime();
 const workspace = new WorkspaceService(config);
 const worktrees = new WorktreeService(config);
-const codex = new CodexService({ config, db, workspace });
+const memory = new UserMemoryService({ config, db });
+const codex = new CodexService({ config, db, workspace, memory });
 const graphStore = new WorkGraphStore(db);
 const graphs = new WorkGraphService({ db, store: graphStore, workspace, worktrees, codex });
-const shares = new ProjectShareService({ db, store: graphStore, workspace, worktrees, codex });
+const shares = new ProjectShareService({ db, store: graphStore, workspace, worktrees, codex, memory });
 const reviews = new TaskReviewService({ db, store: graphStore, workspace, worktrees, codex, graphs });
 const graphContext = new ProjectContextService({ db, store: graphStore, workspace, worktrees, graphs });
 const graphRuntime = new WorkGraphRuntime({ db, store: graphStore, codex, graphs, reviews, context: graphContext });
@@ -100,6 +102,7 @@ function log(level, message, detail) {
 }
 
 codex.on('log', (record) => log(record.level || 'info', 'codex', record.message));
+memory.onLog = (record) => log(record.level || 'warn', 'memory-index', record.message);
 
 function clientIp(req) {
   if (config.trustProxy) {
@@ -204,7 +207,7 @@ function accessPayload(access) {
 
 function chatPayload(chat) {
   if (!chat) return null;
-  const { treePath, projectAccessId, ...safe } = chat;
+  const { treePath, projectAccessId, memoryContextResetAt, ...safe } = chat;
   return safe;
 }
 
@@ -289,7 +292,8 @@ async function route(req, res) {
   if (req.method === 'GET' && pathname === '/api/health') {
     const codexStatus = codex.status();
     const codexState = codexStatus.ready ? 'ready' : codexStatus.lastError ? 'failed' : 'starting';
-    sendJson(res, 200, { ok: true, codex: codexStatus.ready, codexState, initialized: db.countAdmins() > 0 }, config);
+    sendJson(res, 200, { ok: true, codex: codexStatus.ready, codexState, initialized: db.countAdmins() > 0,
+      memory: memory.status() }, config);
     return;
   }
   if (req.method === 'POST' && ['/api/login', '/api/boss/login', '/api/employee/login'].includes(pathname)) {
@@ -349,8 +353,53 @@ async function route(req, res) {
       workGraphEnabled: config.workGraphEnabled,
       user: session.user, csrfToken: session.csrfToken, usage,
       model: config.codexModel, models: session.user.role === 'admin' ? ROOT_MODELS : [], defaultEffort: config.codexReasoningEffort,
-      efforts: [...EFFORTS], turnModes: [...TURN_MODES], codex: codex.status(),
+      efforts: [...EFFORTS], turnModes: [...TURN_MODES], codex: codex.status(), memory: memory.status(),
     }, config);
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/memories') {
+    sendJson(res, 200, { memories: memory.list(session.user.id), status: memory.status() }, config);
+    return;
+  }
+  if (req.method === 'POST' && pathname === '/api/memories') {
+    requireMutation(req, session);
+    const body = await readJson(req, 16 * 1024);
+    session = refreshSession(session);
+    const saved = memory.create({ userId: session.user.id, body: body.body, sourceKind: 'manual' });
+    audit(req, session, 'memory.create', 'user_memory', saved.id, { version: saved.version, sourceKind: saved.sourceKind });
+    sendJson(res, 201, { memory: saved }, config);
+    return;
+  }
+  let memoryMatch = pathname.match(/^\/api\/memories\/([^/]+)$/);
+  if (memoryMatch && req.method === 'PATCH') {
+    requireMutation(req, session);
+    const body = await readJson(req, 16 * 1024);
+    session = refreshSession(session);
+    const before = memory.get(memoryMatch[1]);
+    invariant(before?.userId === session.user.id, 404, 'MEMORY_NOT_FOUND', '记忆不存在。');
+    const affected = memory.dependentChatIds(before.id, session.user.id);
+    await Promise.all(affected.map((chatId) => codex.interruptAndWait(chatId)));
+    session = refreshSession(session);
+    const saved = memory.update({ id: before.id, userId: session.user.id, version: body.version, body: body.body });
+    memory.invalidateThreads([before.id]);
+    audit(req, session, 'memory.update', 'user_memory', saved.id, { version: saved.version, affectedChats: affected.length });
+    sendJson(res, 200, { memory: saved, resetChats: affected.length }, config);
+    return;
+  }
+  if (memoryMatch && req.method === 'DELETE') {
+    requireMutation(req, session);
+    const body = await readJson(req, 16 * 1024);
+    session = refreshSession(session);
+    const before = memory.get(memoryMatch[1]);
+    invariant(before?.userId === session.user.id, 404, 'MEMORY_NOT_FOUND', '记忆不存在。');
+    const affected = memory.dependentChatIds(before.id, session.user.id);
+    await Promise.all(affected.map((chatId) => codex.interruptAndWait(chatId)));
+    session = refreshSession(session);
+    const result = memory.delete({ id: before.id, userId: session.user.id, version: body.version });
+    memory.invalidateThreads([before.id]);
+    audit(req, session, 'memory.delete', 'user_memory', before.id, { affectedChats: affected.length });
+    sendJson(res, 200, { ...result, resetChats: affected.length }, config);
     return;
   }
 
@@ -409,7 +458,7 @@ async function route(req, res) {
   }
   if (match && req.method === 'DELETE') {
     requireMutation(req, session);
-    const project = ownerProject(projectFor(session, match[1]));
+    let project = ownerProject(projectFor(session, match[1]));
     invariant(!db.listProjectAccess(project.id, { activeOnly: true }).some((access) => access.accessKind === 'shared'), 409, 'PROJECT_SHARED', '请先撤销员工授权再删除项目。');
     invariant(!db.runtimeForProject(project.id).busy && !codex.workspaceBusy(project.accessId),
       409, 'PROJECT_BUSY', '项目仍有排队、运行或恢复中的任务，不能删除。');
@@ -417,8 +466,16 @@ async function route(req, res) {
       && access.status === 'revoked' && worktrees.isReusableShare({ treePath: access.treePath }));
     invariant(retained.length === 0, 409, 'RETAINED_WORKTREES', '项目仍有撤权后保留的工作树；请先恢复授权并处理其中的修改。');
     invariant(!graphStore.runs({ projectId: project.id }).length, 409, 'PROJECT_WORKFLOW_HISTORY', '项目保留工作图交付历史，不能删除。');
+    const sourceMemories = memory.memoryIdsForSourceProject(project.id, session.user.id);
+    const affectedMemoryChats = [...new Set(sourceMemories.flatMap((id) => memory.dependentChatIds(id, session.user.id)))];
+    await Promise.all(affectedMemoryChats.map((chatId) => codex.interruptAndWait(chatId)));
+    session = refreshSession(session); project = ownerProject(projectFor(session, project.id));
+    invariant(!db.runtimeForProject(project.id).busy && !codex.workspaceBusy(project.accessId),
+      409, 'PROJECT_BUSY', '项目仍有排队、运行或恢复中的任务，不能删除。');
+    memory.invalidateThreads(sourceMemories);
     const trashed = workspace.trashProject(project);
     db.deleteProject(project.id);
+    memory.refreshIndex(session.user.id);
     audit(req, session, 'project.trash', 'project', project.id, { name: project.name, recoverable: trashed.recoverable });
     sendJson(res, 200, { ok: true, recoverable: trashed.recoverable }, config);
     return;
@@ -591,6 +648,33 @@ async function route(req, res) {
     }, config);
     return;
   }
+  match = pathname.match(/^\/api\/chats\/([^/]+)\/memory$/);
+  if (match && req.method === 'GET') {
+    const chat = chatFor(session, match[1]);
+    sendJson(res, 200, { settings: memory.settings(chat), references: memory.refsForChat(chat, session.user.id) }, config);
+    return;
+  }
+  if (match && req.method === 'PATCH') {
+    requireMutation(req, session);
+    let chat = chatFor(session, match[1]);
+    invariant(!codex.chatBusy(chat.id), 409, 'CHAT_RUNNING', '请等待当前任务结束后修改记忆设置。');
+    const body = await readJson(req, 16 * 1024);
+    session = refreshSession(session); chat = chatFor(session, match[1]);
+    invariant(!codex.chatBusy(chat.id), 409, 'CHAT_RUNNING', '请等待当前任务结束后修改记忆设置。');
+    const updated = memory.updateSettings(chat, body);
+    audit(req, session, 'chat.memory_settings', 'chat', chat.id, memory.settings(updated));
+    sendJson(res, 200, { chat: chatPayload(updated), settings: memory.settings(updated) }, config);
+    return;
+  }
+  match = pathname.match(/^\/api\/chats\/([^/]+)\/turn-runs\/([^/]+)\/memory-references$/);
+  if (match && req.method === 'GET') {
+    const chat = chatFor(session, match[1]);
+    const run = db.getTurnRun(match[2]);
+    invariant(run?.chatId === chat.id && run.userId === session.user.id, 403, 'TURN_FORBIDDEN', '运行不存在或不属于你。');
+    sendJson(res, 200, { references: memory.refsForTurn(run.id, session.user.id) }, config);
+    return;
+  }
+  match = pathname.match(/^\/api\/chats\/([^/]+)$/);
   if (match && req.method === 'PATCH') {
     requireMutation(req, session);
     let chat = chatFor(session, match[1]);
@@ -990,7 +1074,7 @@ async function route(req, res) {
     };
     authorize();
     const result = await shares.grant({ project, userId: String(body.userId || ''), authorize,
-      scope: body.scope || 'files_and_history' });
+      scope: body.scope || 'files_and_history', memoryConfirmationToken: body.memoryConfirmationToken || null });
     audit(req, session, result.restored ? 'project.share_restore' : 'project.share_grant', 'project_access', result.access.id,
       { projectId: project.id, employeeId: result.access.userId, baseSha: result.access.baseSha,
         copiedChats: result.copiedChats, scope: body.scope || 'files_and_history' });
@@ -1010,6 +1094,11 @@ async function route(req, res) {
       if (error.code === 'TURN_DRAIN_TIMEOUT') throw new HttpError(409, 'SHARE_DRAIN_TIMEOUT', '撤权已生效，但运行尚未完全排空；工作树已保留，可稍后重试清理。');
       throw error;
     }
+    const sourceMemories = memory.memoryIdsForSourceProject(project.id, access.userId);
+    const affectedMemoryChats = [...new Set(sourceMemories.flatMap((id) => memory.dependentChatIds(id, access.userId)))];
+    await Promise.all(affectedMemoryChats.map((chatId) => codex.interruptAndWait(chatId)));
+    memory.invalidateThreads(sourceMemories);
+    memory.refreshIndex(access.userId);
     invariant(!db.runtimeForAccess(access.id).busy, 409, 'ACCESS_BUSY', '授权仍有未排空的运行时状态，工作树已保留。');
     let cleanup;
     try {
@@ -1140,12 +1229,14 @@ server.listen(config.port, config.host, () => {
   if (db.countAdmins() === 0) log('error', '尚无超级管理员，请另开终端运行 ./bin/create-super-admin.sh');
   if (config.workGraphDispatchEnabled) workflowScheduler.start();
   else workflowScheduler.stop();
+  memory.start();
   codex.start().then(() => log('info', 'Codex app-server 已就绪')).catch((error) => log('error', 'Codex app-server 启动失败；首次对话会重试', { message: error.message }));
 });
 
 function shutdown(signal) {
   log('info', `收到 ${signal}，正在关闭`);
   workflowScheduler.stop();
+  memory.stop();
   codex.stop();
   server.close(async () => {
     await Promise.allSettled([...workflowScheduler.inFlight.values()].map(entry => entry.promise));

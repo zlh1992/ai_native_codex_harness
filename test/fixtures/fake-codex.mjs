@@ -62,9 +62,24 @@ function inputText(params) {
   return (params.input || []).filter((item) => item.type === 'text').map((item) => item.text || '').join('\n');
 }
 
+async function memoryTurn(threadId, turnId, prompt) {
+  try {
+    const calls = JSON.parse(prompt.split('[[memory-tools]]')[1]);
+    for (const { name, args } of calls) {
+      if (!threadTools.get(threadId)?.includes(name)) throw new Error('memory tool not registered');
+      toolData(await callTool(threadId, turnId, name, args));
+    }
+    completeTurn(threadId, turnId, prompt);
+  } catch {
+    notify('turn/completed', { threadId, turn: { id: turnId, status: 'failed', error: { message: 'Memory fixture failed' }, items: [] } });
+  }
+}
+
 function completeTurn(threadId, turnId, prompt, steers = []) {
   const finalItemId = `item-${turnId}`;
-  const reply = `FAKE_CODEX_DONE: ${prompt.replace(/^<!-- portal-mode:(?:EDIT|EXECUTE) -->\n/, '').slice(0, 200)}`;
+  const publicPrompt = prompt.replace(/^<!-- portal-mode:(?:EDIT|EXECUTE) -->\n/, '').replace(/^\$task-execution\n/, '')
+    .replace(/^<!-- portal-memory-context:v1 -->[\s\S]*?<!-- \/portal-memory-context -->\n/, '');
+  const reply = `FAKE_CODEX_DONE: ${publicPrompt.slice(0, 200)}`;
   notify('turn/diff/updated', { threadId, turnId, diff: 'diff --git a/gate.txt b/gate.txt\n+fake secret diff body' });
   notify('item/agentMessage/delta', { threadId, turnId, itemId: finalItemId, delta: reply });
   notify('item/completed', { threadId, turnId, item: { id: finalItemId, type: 'agentMessage', phase: 'final_answer', text: reply } });
@@ -86,6 +101,13 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   if (!method && toolResponses.has(id)) { const resolve = toolResponses.get(id); toolResponses.delete(id); resolve(message); return; }
   if (id === undefined) return;
   if (method === 'initialize') return respond(id, { userAgent: 'codex-cli/0.150.0-alpha.8 fake-e2e' });
+  if (method === 'config/read') return respond(id, { config: {
+    features: { memories: String(process.env.CODEX_HOME || '').includes('fake-native-memory-enabled') },
+    memories: {
+      generate_memories: String(process.env.CODEX_HOME || '').includes('fake-native-memory-enabled'),
+      use_memories: String(process.env.CODEX_HOME || '').includes('fake-native-memory-enabled'),
+    },
+  }, origins: {}, layers: null });
   if (method === 'skills/extraRoots/set' || method === 'thread/name/set' || method === 'thread/goal/set') return respond(id, {});
   if (method === 'skills/list') return respond(id, { data: (params.cwds || []).map((cwd) => ({
     cwd, skills: ['task-execution', 'work-graph-planning', 'work-graph-review'].map((name) => ({ name,
@@ -124,6 +146,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     const prompt = inputText(params);
     respond(id, { turn: { id: turnId, status: 'running' } });
     if (threadTools.get(params.threadId)?.includes('work_graph_context')) { void workflowTurn(params.threadId, turnId, prompt); return; }
+    if (prompt.includes('[[memory-tools]]')) { void memoryTurn(params.threadId, turnId, prompt); return; }
     if (prompt.includes('[[hold]]')) heldTurns.set(turnId, { threadId: params.threadId, prompt, steers: [] });
     else setTimeout(() => completeTurn(params.threadId, turnId, prompt), 15).unref();
     return;

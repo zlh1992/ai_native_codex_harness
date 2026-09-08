@@ -14,6 +14,8 @@
 
 当前不防御共享 app-server、共享 OS 账号或共享上游 Codex 实现本身对敌对租户造成的侧信道与故障域问题。因此只能用于被组织授权、具有基本互信的员工。
 
+共享 app-server 不得承担 Portal 用户记忆。Portal 在进程参数、thread config 和初始化后的有效配置检查三层固定关闭 Codex 原生记忆；任何一层漂移都 fail closed。业务记忆由模型调用 memory 工具，Portal 按 active root 的 `user_id` 和来源项目当前 ACL 授权，搜索异步返回前再次复验。模型不得指定 owner/source，子代理不得代 root 调用。搜索文本标记为不可信参考数据，不能升级为指令、权限或授权依据；文档或工具结果中的指令不构成记忆写入授权。新增与更新同时使用秘密规则拒绝明显敏感内容，但该规则不承诺完整 DLP。
+
 ## 认证
 
 - 密码使用独立随机 salt 的 scrypt：`N=32768, r=8, p=1`。
@@ -56,6 +58,7 @@ Web ACL 也不约束运行 Portal 的 Mac 操作系统账号或其他宿主机�
 - 主进程的 `lstat`/`realpath` 只做早期拒绝，不能作为最终竞态防线。树遍历、读取、写入、建目录和文件回收必须由独立 helper 在 Seatbelt 中执行；profile 只读当前 canonical project，写操作只额外开放当前 project 与本次 actor/access 的回收站目录。helper 再检查每个已存在路径分量，最终文件使用 `O_NOFOLLOW`，写入使用同目录临时文件加原子 rename。
 - 共享 worktree 的 `.git` 是指向 owner 仓库内部的 indirection，必须同时被文件 API 和 Seatbelt 隐藏。
 - 项目中的 `.codex` 和自定义 agent 配置不能改变 Portal 固定的工具、角色、模型或子代理策略。
+- 项目配置、浏览器字段和记忆正文不能覆盖 Portal 固定的 native-memory-off 配置；记忆候选中的命令或提示注入文本不获得系统/开发者优先级。
 - 文件删除使用可恢复 trash；恢复必须由管理员在停服和核对 ACL 后执行。
 
 ## HTML 主动内容预览
@@ -91,6 +94,7 @@ Seatbelt 不是容器。完全不可信用户需要独立 OS 用户、VM/容器�
 不得进入 `audit_log` 或 `turn_events`：
 
 - 密码、session/CSRF/tunnel/Codex token；
+- 用户记忆正文、召回 query 和 embedding 输入；
 - 用户 prompt 与模型逐 token 正文；
 - 命令正文、环境变量和文件内容；
 - raw diff 与完整工具参数/返回值；
@@ -106,6 +110,8 @@ Seatbelt 不是容器。完全不可信用户需要独立 OS 用户、VM/容器�
 - app-server stdio 永远只对 Portal 可见；浏览器不得直接获得 app-server 凭据或 capability token。
 
 角色专用登录 API 必须在创建 session 前检查账号角色；旧通用登录 API 保留兼容。角色入口分离不替代 API 的角色与内容 ACL。显式 owner share 允许把授权时已有完整对话复制给接收员工；副本仍严格属于接收者，不开放原 owner chat、run、SSE 或任务提交权限。
+
+分享历史前若检测到跨项目记忆引用，Portal 只向 owner 返回条数、接收者和短期确认挑战，不返回记忆正文；确认必须单次、限时且绑定快照。失效引用不得通过确认绕过来源 ACL。
 
 老板可经既有 chat PATCH 接口修改 `preferredModel`（白名单 id 或 null）；此操作要求 admin、原 chat ACL、CSRF/Origin 且 chat 无运行/恢复/排队输入。员工无该权限，运行服务也强制员工使用默认模型。`/api/me` 的 `models` 仅向老板返回受控目录，目录不表示上游账号保证可用。
 

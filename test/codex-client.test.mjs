@@ -21,3 +21,20 @@ test('app-server version mismatch is durable and machine-identifiable', async ()
     await exited;
   }
 });
+
+test('app-server refuses ready when native long-term memory remains enabled', async () => {
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = '/tmp/fake-native-memory-enabled';
+  const client = new CodexAppServerClient(loadConfig({ CODEX_BIN: fakeCodex }));
+  try {
+    await assert.rejects(client.start(), (error) => {
+      assert.equal(error.code, 'CODEX_NATIVE_MEMORY_ENABLED');
+      return true;
+    });
+    assert.equal(client.started, false);
+  } finally {
+    if (previous === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previous;
+    client.stop();
+  }
+});

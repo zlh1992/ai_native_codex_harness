@@ -31,6 +31,7 @@
 7. EDIT 只允许项目文件读写，EXECUTE 额外允许项目内命令；chat 独立持久化模式且默认 EXECUTE。通过 ACL、路径和保留目录校验的项目内文件变更与 EXECUTE 命令由 Portal 自动接受，不要求老板或员工逐次点击。
 8. 单 App Server、单 `CODEX_HOME`、单上游 Codex 登录只适用于内部互信 Pilot，不宣称敌对租户级隔离。
 9. App Server 协议使用精确 CLI 版本 pin，并用该版本重新生成 schema；不能靠模糊版本匹配掩盖协议漂移。
+10. Portal 启动的 Codex app-server 原生长期记忆永久关闭并在 ready 前验证；跨项目长期记忆只由 Portal 以 `user_id` 为边界、以当前项目授权为条件显式实现。
 
 ## 变更规则
 

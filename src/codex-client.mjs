@@ -2,6 +2,11 @@ import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import { EventEmitter } from 'node:events';
 
+export const PORTAL_MEMORY_CONFIG = Object.freeze({
+  features: Object.freeze({ memories: false }),
+  memories: Object.freeze({ generate_memories: false, use_memories: false }),
+});
+
 function rpcError(value) {
   const error = new Error(value?.message || 'Codex app-server 请求失败。');
   error.code = value?.code;
@@ -38,7 +43,7 @@ export class CodexAppServerClient extends EventEmitter {
     const disabledFeatures = [
       'apps', 'plugins', 'shell_tool', 'unified_exec', 'view_image', 'browser_use',
       'in_app_browser', 'computer_use', 'image_generation',
-      'workspace_dependencies', 'skill_search', 'web_search',
+      'workspace_dependencies', 'skill_search', 'web_search', 'memories',
     ];
     const args = [
       'app-server', '--stdio',
@@ -48,6 +53,8 @@ export class CodexAppServerClient extends EventEmitter {
       '-c', `agents.max_concurrent_threads_per_session=${this.config.maxSubagentsPerRoot}`,
       '-c', `agents.default_subagent_model="${this.config.subagentModel}"`,
       '-c', 'agents.default_subagent_reasoning_effort="medium"',
+      '-c', 'memories.generate_memories=false',
+      '-c', 'memories.use_memories=false',
     ];
     for (const role of ['default', 'worker', 'explorer']) {
       args.push('-c', `agents.${role}.description="Portal-managed Luna subagent"`);
@@ -99,6 +106,16 @@ export class CodexAppServerClient extends EventEmitter {
       throw error;
     }
     this.notify('initialized', {});
+    const effective = await this.request('config/read', { includeLayers: false }, 15_000);
+    const memories = effective?.config?.memories;
+    const features = effective?.config?.features;
+    if (features?.memories !== false || memories?.generate_memories !== false || memories?.use_memories !== false) {
+      const error = new Error('Codex 原生长期记忆未被完全关闭；Portal 拒绝进入 ready。');
+      error.code = 'CODEX_NATIVE_MEMORY_ENABLED';
+      this.lastError = error;
+      try { this.process?.kill('SIGTERM'); } catch { /* already stopped */ }
+      throw error;
+    }
     this.started = true;
     this.emit('ready');
   }

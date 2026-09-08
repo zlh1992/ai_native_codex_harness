@@ -10,9 +10,11 @@
 ./bin/stop-local.sh
 ```
 
-`start-local.sh` 只有在 Portal HTTP 与 Codex app-server 都 ready 后才写受管 PID 并返回成功。HTTP 先启动时会显示“等待 Codex”；明确失败时立即打印本次启动日志并退出。`status.sh` 区分 Web 未就绪、Codex 正在启动、Codex 失败和完整运行。
+`start-local.sh` 只有在 Portal HTTP 与 Codex app-server 都 ready 后才写受管 PID 并返回成功。Codex ready 还要求 `config/read` 证明原生记忆三项关闭。HTTP 先启动时会显示“等待 Codex”；明确失败时立即打印本次启动日志并退出。`status.sh` 区分 Web 未就绪、Codex 正在启动、Codex 失败和完整运行。
 
 首次安装由 `install-mac.sh` 使用 `package-lock.json` 执行 `npm ci --omit=dev --ignore-scripts`，不能依赖被 Git 忽略的既有 `node_modules`。首次启动必须在读取日志行号前创建权限为 `0600` 的服务日志。
+
+安装脚本同时建立 Python 3.10+ 的 `.tools/memory-venv`，安装固定的 `memsearch[onnx]==0.4.19`，默认预热固定 revision 的 `gpahal/bge-m3-onnx-int8`。可用 `MEMORY_MODEL_WARMUP=0` 跳过预热；索引进程不可用不会打开 Codex 原生记忆，而是显示 degraded 并退回 SQLite 关键词召回。
 
 健康响应的稳定字段：
 
@@ -26,6 +28,8 @@
 ```
 
 `ok` 只表示 Portal HTTP 可响应；发布与隧道前置条件必须检查 `codex=true`。
+
+`/api/me` 和 health 的 memory 状态用于诊断索引进程启动/降级，不等于每用户向量就绪；`nativeCodexMemory` 必须始终为 `false`。`PORTAL_MEMORY_ENABLED=false` 只停用 Portal 记忆 CRUD，不能解除 Codex 原生记忆关闭不变量。四个 memory 动态工具在 thread start/resume 注册，升级应排空运行后重启 Portal；已取消关键词提取及其配置，不重放历史提取任务。
 
 ## Codex 协议升级流程
 
@@ -71,6 +75,7 @@
 - `/api/health` 不返回内部路径或完整 Codex 错误，只返回状态。
 - 管理 audit 记录 actor、动作、资源和脱敏 detail；运行过程由 turn event journal 提供 cursor。
 - 诊断数据库前先检查 integrity、foreign keys、非终态 run、pending approval、有效 lease 和孤儿 submitted task。
+- 记忆诊断只记录状态、job error code、memory id/version 和引用数量，不打印正文或 query；`.data/memory-index` 可停服后删除并从 SQLite 重建。
 
 ## 演进触发条件
 

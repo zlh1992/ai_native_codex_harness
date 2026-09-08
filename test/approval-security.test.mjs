@@ -92,6 +92,13 @@ test('native file changes fail closed for missing or reserved targets and auto-a
   assert.equal(approval.status, 'accepted');
   assert.equal(responses.get(3).decision, 'accept');
   assert.equal(codex.pendingApprovalsForChat(active.chat.id, active.user.id).length, 0);
+  db.markChatThreadError(active.chat.id, 'Memory context invalidated');
+  codex.client.emit('serverRequest', {
+    method: 'item/fileChange/requestApproval', id: 4,
+    params: { threadId: active.threadId, turnId: active.turnId, itemId: 'safe', grantRoot: null },
+  });
+  await waitFor(() => responses.get(4));
+  assert.equal(responses.get(4).decision, 'decline', 'old memory context must not authorize further native writes');
   db.close();
 });
 
