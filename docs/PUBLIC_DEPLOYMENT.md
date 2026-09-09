@@ -53,6 +53,27 @@ PUBLIC_TUNNEL_TOKEN_FILE=.data/cloudflare-tunnel.token
 
 Cloudflare Access 可以作为额外的一层身份门禁，但不能替代 Harness 自己的用户/RBAC。不要在 Cloudflare 配置绕过源站登录的缓存规则。
 
+## 一个 Named Tunnel、两个角色域名
+
+在管理目标域名的同一个 Cloudflare 账号中建立 remotely-managed tunnel，两条 Published application 都指向 `http://127.0.0.1:4310`。源站地址指运行 cloudflared 的 Mac，不能填写家庭公网 IP。备份这两个 hostname 的旧 DNS 记录后，将冲突 A 记录替换为指向该 tunnel UUID 的代理 CNAME；其余 DNS 记录不动。
+
+```dotenv
+PUBLIC_TUNNEL_MODE=named
+PUBLIC_URL=https://workbench1.winy.cc
+PUBLIC_ORIGIN=https://workbench1.winy.cc
+BOSS_PUBLIC_ORIGIN=https://workbench1.winy.cc
+EMPLOYEE_PUBLIC_ORIGIN=https://workbench2.winy.cc
+TRUST_PROXY=true
+TRUST_PROXY_PROVIDER=cloudflare
+COOKIE_SECURE=false
+```
+
+操作顺序：先在控制台准备隧道/域名和证书，将 connector token 用 `./bin/save-cloudflare-tunnel-token.sh` 隐藏输入保存；完成门控并排空运行后重启本地服务，再显式停止旧 quick 隧道并启动 named 隧道。缺 token 或配置不同不会自动停止旧隧道。主域名与两角色域名都通过 ready 健康检查才算隧道启动通过。
+
+老板入口为 `https://workbench1.winy.cc/boss/login`，员工入口为 `https://workbench2.winy.cc/employee`。根路径分别跳到对应登录入口；两个域名独立 Cookie/登录，但后端 ACL 决定权限。通过 `127.0.0.1:4310` 的本机入口仍可用。仅修改 `.env` 不会更新已经运行的 Portal。
+
+此配置无需购买 ECS、家庭公网 IP、DDNS 或路由器入站映射。不要向聊天或日志粘贴 token；交接时将 token 保存到本机私有文件。固定地址只保证名称不随隧道重启变化，不承诺断电、未登录 macOS 或网络故障时在线。
+
 ## Tailscale Funnel
 
 安装并登录 Tailscale 后：

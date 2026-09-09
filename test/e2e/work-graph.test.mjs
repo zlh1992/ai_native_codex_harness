@@ -37,6 +37,7 @@ async function startServer({ failResume = false } = {}) {
     env: {
       ...process.env,
       HOST: '127.0.0.1', PORT: String(port), TRUST_PROXY: 'false', COOKIE_SECURE: 'false', PUBLIC_ORIGIN: '',
+      PUBLIC_ORIGINS: '', BOSS_PUBLIC_ORIGIN: '', EMPLOYEE_PUBLIC_ORIGIN: '', TRUST_PROXY_PROVIDER: 'generic',
       DATA_DIR: base, DATABASE_PATH: path.join(base, 'harness.sqlite'),
       WORKSPACES_ROOT: path.join(base, 'workspaces'), TREES_ROOT: path.join(base, 'trees'),
       RUNTIME_ROOT: path.join(base, 'runtime'), TRASH_ROOT: path.join(base, 'trash'),

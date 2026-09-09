@@ -107,6 +107,8 @@ Seatbelt 不是容器。完全不可信用户需要独立 OS 用户、VM/容器�
 - Portal 必须保持 loopback 监听，Cloudflare/Tailscale 只建立出站隧道。
 - Quick Tunnel 地址是临时运行事实，不是稳定身份或长期访问控制。
 - 固定部署应设置明确 `PUBLIC_ORIGIN`、受管 tunnel token 文件和正确代理信任。
+- 固定多域名可配置 `PUBLIC_ORIGINS`（逗号分隔）、`BOSS_PUBLIC_ORIGIN` 与 `EMPLOYEE_PUBLIC_ORIGIN`；所有值必须是无路径/凭据的 HTTPS origin。配置后只接受这些 Host 及当前端口的回环 Host，写请求 Origin 必须与当前请求 origin 完全匹配，不因另一角色域名已登记而允许跨 origin 写入。Cookie 保持 host-only，两个域名独立登录。
+- `TRUST_PROXY_PROVIDER=cloudflare` 要求固定域名与 `TRUST_PROXY=true`；公网请求须来自回环 peer、声明 HTTPS 并包含有效单个 `CF-Connecting-IP`，否则拒绝。Cloudflare 模式不使用 XFF 第一项，回环 Host 的直接访问不信任转发头。本机可信进程与 Cloudflare 账号管理员仍属于宿主/代理信任边界。
 - app-server stdio 永远只对 Portal 可见；浏览器不得直接获得 app-server 凭据或 capability token。
 
 角色专用登录 API 必须在创建 session 前检查账号角色；旧通用登录 API 保留兼容。角色入口分离不替代 API 的角色与内容 ACL。显式 owner share 允许把授权时已有完整对话复制给接收员工；副本仍严格属于接收者，不开放原 owner chat、run、SSE 或任务提交权限。

@@ -14,6 +14,19 @@ CLOUDFLARED_BIN="${CLOUDFLARED_BIN:-.tools/cloudflared}"
 [[ "$CLOUDFLARED_BIN" = /* ]] || CLOUDFLARED_BIN="$ROOT_DIR/$CLOUDFLARED_BIN"
 LOCAL_CLOUDFLARED="$ROOT_DIR/.tools/cloudflared"
 
+# Validate before touching the running tunnel or its runtime files.
+if [[ "$MODE" == "named" ]]; then
+  TOKEN_FILE="${PUBLIC_TUNNEL_TOKEN_FILE:-.data/cloudflare-tunnel.token}"
+  [[ "$TOKEN_FILE" = /* ]] || TOKEN_FILE="$ROOT_DIR/$TOKEN_FILE"
+  [[ -s "$TOKEN_FILE" ]] || { echo "缺少 named tunnel token；保留现有隧道。" >&2; exit 2; }
+  node --input-type=module -e '
+    const { loadConfig } = await import(process.argv[1]);
+    const config = loadConfig();
+    const target = String(process.env.PUBLIC_URL || "").replace(/\/$/, "");
+    if (!config.publicOrigins.includes(target)) throw new Error("PUBLIC_URL 必须匹配已配置的公网 origin。");
+  ' "file://$ROOT_DIR/src/config.mjs"
+fi
+
 if [[ "$MODE" != "tailscale" ]]; then
   if [[ "$CLOUDFLARED_BIN" != "$LOCAL_CLOUDFLARED" ]]; then
     echo "拒绝使用项目外的 cloudflared：$CLOUDFLARED_BIN" >&2
@@ -27,8 +40,13 @@ if launch_job_exists "$TUNNEL_LABEL"; then
   TUNNEL_PID="$(launch_job_pid "$TUNNEL_LABEL")"
   if [[ -n "$TUNNEL_PID" ]]; then
     ADDRESS="$(sed -n '1p' "$PUBLIC_URL_FILE" 2>/dev/null || true)"
+    RUNNING_MODE="$(sed -n '1p' "$TUNNEL_MODE_FILE" 2>/dev/null || true)"
+    if [[ "$RUNNING_MODE" != "$MODE" || ( "$MODE" == "named" && "$ADDRESS" != "${PUBLIC_URL%/}" ) ]]; then
+      echo "运行中的隧道与目标配置不同；请在切换准备完成后先执行 stop-tunnel.sh。现有隧道保留。" >&2
+      exit 2
+    fi
     echo "公网隧道已运行：${ADDRESS:-地址正在生成}（PID ${TUNNEL_PID}）"
-    [[ -n "$ADDRESS" ]] && print_portal_addresses "$ADDRESS"
+    [[ -n "$ADDRESS" ]] && print_portal_addresses "$ADDRESS" "$MODE"
     exit 0
   fi
   remove_launch_job "$TUNNEL_LABEL"
@@ -91,16 +109,28 @@ if [[ "$MODE" != "tailscale" ]]; then
 fi
 
 public_health() {
-  curl -fsS --max-time 5 "$ADDRESS/api/health" >/dev/null 2>&1 && return 0
+  local base
+  for base in "$ADDRESS" ${BOSS_PUBLIC_ORIGIN:+"$BOSS_PUBLIC_ORIGIN"} ${EMPLOYEE_PUBLIC_ORIGIN:+"$EMPLOYEE_PUBLIC_ORIGIN"}; do
+    public_origin_health "$base" || return 1
+  done
+}
+
+public_origin_health() {
+  local base="$1"
+  curl -fsS --max-time 5 "$base/api/health" 2>/dev/null | ready_json && return 0
   local hostname ip
-  hostname="${ADDRESS#https://}"
+  hostname="${base#https://}"
   hostname="${hostname%%/*}"
   ip="$(dig +time=3 +tries=1 +short A @1.1.1.1 "$hostname" 2>/dev/null | head -n 1 || true)"
   if [[ -z "$ip" ]]; then
     ip="$(dig +time=3 +tries=1 +short A @8.8.8.8 "$hostname" 2>/dev/null | head -n 1 || true)"
   fi
   [[ -n "$ip" ]] || return 1
-  curl -fsS --max-time 5 --resolve "$hostname:443:$ip" "$ADDRESS/api/health" >/dev/null 2>&1
+  curl -fsS --max-time 5 --resolve "$hostname:443:$ip" "$base/api/health" 2>/dev/null | ready_json
+}
+
+ready_json() {
+  node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{try{const x=JSON.parse(s);process.exit(x.ok&&x.codex?0:1)}catch{process.exit(1)}})'
 }
 
 for _ in {1..45}; do
@@ -116,5 +146,5 @@ if ! public_health; then
   exit 1
 fi
 echo "公网隧道已启动：${ADDRESS}${TUNNEL_PID:+（PID ${TUNNEL_PID}）}"
-print_portal_addresses "$ADDRESS"
+print_portal_addresses "$ADDRESS" "$MODE"
 [[ "$MODE" == "quick" ]] && echo "Quick Tunnel 重启后会生成新地址。"

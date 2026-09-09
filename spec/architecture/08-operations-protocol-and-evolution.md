@@ -91,6 +91,8 @@
 
 本地与公网地址输出分别展示 `/boss/login` 与 `/employee`。固定 `PUBLIC_ORIGIN` 仍是无路径的同一 origin；两个角色共用后端、同源 Cookie 与隧道，但登录 API、登录页面和首页分开。
 
+固定双域名部署可以设置 `BOSS_PUBLIC_ORIGIN` 与 `EMPLOYEE_PUBLIC_ORIGIN`，自动纳入 Host 白名单；`PUBLIC_ORIGINS` 可补充其他固定 HTTPS origin，旧 `PUBLIC_ORIGIN` 保留单域名兼容。两个 hostname 均映射到同一 Portal，根路径按角色跳转，Cookie 不共享到父域名。named 的 `PUBLIC_URL` 必须属于已配置 origin；启动时先校验 token 和配置，运行中模式/主域名不一致则拒绝伪报成功且保留旧隧道。新隧道健康检查覆盖主域名及两个角色域名，要求 JSON 的 `ok && codex`，不能只检查 HTTP 200。
+
 若 App 自动更新替换内置二进制，可使用独立安装的官方同版本 CLI 并通过 `CODEX_BIN` 绑定；这不改变协议 pin。重启前应核对实际二进制版本，运行中的旧进程 ready 不能证明磁盘上的新二进制兼容。
 
 输入队列 API：`GET/POST /api/chats/:chatId/queue`，`PATCH/DELETE /api/chats/:chatId/queue/:inputId`，`POST .../:inputId/steer|resume`。POST 新输入携带幂等 `id`、`prompt`、`mode`、`effort`；后续修改携带 `revision`，steer 额外携带 `expectedRunId`，不确定发送的 resume 额外要求 `acknowledgeUncertain=true`。既有 POST turns SSE 保持可用，但存在待处理输入时拒绝绕过 FIFO。协议升级检查增加 `turn/steer` 的 expectedTurnId、clientUserMessageId 与 response turnId；本次不改变精确 CLI pin。

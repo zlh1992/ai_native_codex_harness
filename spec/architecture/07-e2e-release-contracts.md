@@ -109,6 +109,8 @@ HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake ap
 
 ## 修改这些契约
 
+固定域名 HTTP 用例 `test/e2e/public-ingress.test.mjs` 验证两个 hostname 的角色跳转与登录、host-only Secure Cookie、错误角色和未登录拒绝、未知 Host 与无效 Cloudflare 头拒绝、跨 origin 写入拒绝，以及本机 HTTP 登录兼容。云端 DNS、证书与真实隧道仍须单独验证，不能用本机模拟 Host 的测试代替公网验收。
+
 变更 E2E 前必须在对应报告中记录：旧契约、业务理由、安全/数据影响、新契约、替代测试与回滚方式。仅因测试耗时、实现困难或新代码不通过而删除断言，不是可接受理由。
 
 ### E2E-008 角色入口与一次性对话 fork

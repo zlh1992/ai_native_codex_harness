@@ -109,6 +109,11 @@ stop_owned_pid() {
 
 print_portal_addresses() {
   local portal_base="${1%/}"
-  echo "老板登录：${portal_base}/boss/login"
-  echo "员工登录：${portal_base}/employee"
+  local boss_base="$portal_base" employee_base="$portal_base"
+  if [[ "${2:-}" == "named" ]]; then
+    boss_base="${BOSS_PUBLIC_ORIGIN:-$portal_base}"
+    employee_base="${EMPLOYEE_PUBLIC_ORIGIN:-$portal_base}"
+  fi
+  echo "老板登录：${boss_base%/}/boss/login"
+  echo "员工登录：${employee_base%/}/employee"
 }

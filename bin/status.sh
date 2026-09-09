@@ -32,4 +32,4 @@ else
   echo "公网隧道：已停止"
 fi
 
-if [[ -n "$ADDRESS" ]]; then print_portal_addresses "$ADDRESS"; fi
+if [[ -n "$ADDRESS" ]]; then print_portal_addresses "$ADDRESS" "$MODE"; fi

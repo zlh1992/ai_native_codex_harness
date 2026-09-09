@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { ROOT_MODELS, validateModel } from './models.mjs';
+import { requestIngress, validateRequestOrigin } from './public-ingress.mjs';
 
 import fs from 'node:fs';
 import http from 'node:http';
@@ -105,31 +106,15 @@ codex.on('log', (record) => log(record.level || 'info', 'codex', record.message)
 memory.onLog = (record) => log(record.level || 'warn', 'memory-index', record.message);
 
 function clientIp(req) {
-  if (config.trustProxy) {
-    const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-    if (forwarded) return forwarded;
-  }
-  return req.socket.remoteAddress || 'unknown';
-}
-
-function requestOrigin(req) {
-  const proto = config.trustProxy ? String(req.headers['x-forwarded-proto'] || 'http').split(',')[0] : 'http';
-  return `${proto}://${req.headers.host || `${config.host}:${config.port}`}`;
+  return requestIngress(req, config).ip;
 }
 
 function checkOrigin(req) {
-  const origin = String(req.headers.origin || '');
-  if (!origin) return;
-  const allowed = new Set([requestOrigin(req)]);
-  if (config.publicOrigin) allowed.add(config.publicOrigin);
-  invariant(allowed.has(origin), 403, 'ORIGIN_REJECTED', '请求来源不受信任。');
+  validateRequestOrigin(req, config);
 }
 
 function cookie(req, token, maxAge) {
-  const forwardedProto = config.trustProxy
-    ? String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase()
-    : '';
-  const secure = config.cookieSecure || forwardedProto === 'https';
+  const { secure } = requestIngress(req, config);
   return `codex_harness_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure ? '; Secure' : ''}`;
 }
 
@@ -1208,6 +1193,13 @@ db.cleanSessions();
 
 const server = http.createServer(async (req, res) => {
   try {
+    const ingress = requestIngress(req, config);
+    if (req.method === 'GET' && req.url === '/' && ingress.configured) {
+      const destination = ingress.configured === config.bossPublicOrigin ? '/boss/login' : '/employee';
+      res.writeHead(302, { ...securityHeaders(config), location: destination, 'cache-control': 'no-store' });
+      res.end();
+      return;
+    }
     await route(req, res);
   } catch (error) {
     if (res.headersSent) {

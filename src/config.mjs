@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { publicIngressConfig } from './public-ingress.mjs';
 import { fileURLToPath } from 'node:url';
 
 const SOURCE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -28,7 +29,7 @@ export function loadConfig(env = process.env) {
     publicDir: path.join(ROOT_DIR, 'public'),
     host: env.HOST || '127.0.0.1',
     port: integer(env.PORT, 4310, 1),
-    publicOrigin: String(env.PUBLIC_ORIGIN || '').replace(/\/$/, ''),
+    ...publicIngressConfig(env),
     cookieSecure: bool(env.COOKIE_SECURE, false),
     trustProxy: bool(env.TRUST_PROXY, true),
     sessionTtlSeconds: integer(env.SESSION_TTL_SECONDS, 12 * 60 * 60, 300),
