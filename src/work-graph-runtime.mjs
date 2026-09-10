@@ -117,12 +117,18 @@ export class WorkGraphRuntime {
     const result = await this.runModel(job, 'reviewer', '请验收当前固定提交。先调用 work_graph_context，逐项引用成果作判断，再调用 work_graph_submit_review。遗漏、不可读文件或需要独立验证但没有证据时不得声称已验证。');
     const review = this.reviews.get(result.reviewId);
     const task = this.db.getTask(job.taskId);
-    const context = this.context.review(job.submissionId, job.ownerId);
+    this.reviews.context(job.submissionId, job.ownerId);
+    const current = this.store.job(job.id);
+    const evidence = current.payload.reviewEvidence;
+    invariant(evidence?.turnRunId === current.turnRunId && Array.isArray(evidence.coverage),
+      409, 'REVIEW_NEEDS_OWNER', '审核没有读取本轮固定证据，请老板核对。');
     this.store.transaction(() => {
       this.store.assertJob(job.id, job.leaseToken);
+      this.store.sql.prepare('UPDATE task_reviews SET detail_json=? WHERE id=? AND status=\'suggested\'')
+        .run(JSON.stringify({ ...review.detail, coverage: evidence.coverage }), review.id);
       this.store.event({ projectId: job.projectId, runId: job.runId, taskId: task.id, recipientId: job.ownerId,
         type: 'review.suggested', payload: { reviewId: review.id, submissionId: job.submissionId } });
-      if (job.payload.mode === 'auto' && review.verdict !== 'needs_human' && !context.omitted.length) {
+      if (job.payload.mode === 'auto' && review.verdict !== 'needs_human' && evidence.coverage.every(f => f.complete)) {
         this.store.enqueue({ projectId: job.projectId, ownerId: job.ownerId, runId: job.runId, generation: job.generation,
           type: 'review.apply', dedupeKey: `apply:${review.id}:${job.generation}`, taskId: job.taskId,
           taskVersion: job.taskVersion, submissionId: job.submissionId, payload: { reviewId: review.id } });
@@ -141,7 +147,17 @@ export class WorkGraphRuntime {
           WHERE s.task_id=? AND r.status='applied' ORDER BY r.created_at DESC LIMIT 3`).all(task.id).map((r) => JSON.parse(r.detail_json)) };
     }
     const job = this.store.job(active.chat.workflowJobId);
-    if (name === 'work_graph_context') return active.chat.purpose === 'planner' ? job.payload.inputs : this.context.review(job.submissionId, job.ownerId);
+    if (name === 'work_graph_context') {
+      const result = active.chat.purpose === 'planner' ? job.payload.inputs : await this.context.review(job.submissionId, job.ownerId);
+      this.assertContext(active);
+      if (active.chat.purpose === 'reviewer' && threadId === active.threadId) {
+        const current = this.store.job(job.id);
+        this.store.sql.prepare('UPDATE workflow_jobs SET payload_json=? WHERE id=? AND lease_token=?')
+          .run(JSON.stringify({ ...current.payload, reviewEvidence: { turnRunId: current.turnRunId,
+            coverage: result.coverage, readablePaths: result.files.map(f => f.path) } }), job.id, active.workflowLeaseToken);
+      }
+      return result;
+    }
     invariant(threadId === active.threadId, 403, 'WORKFLOW_ROOT_REQUIRED', '业务写工具只允许当前受管 root 调用。');
     if (job.result) return job.result; // Native retry gets the same persisted receipt.
     return this.store.transaction(() => {
@@ -149,9 +165,16 @@ export class WorkGraphRuntime {
       let result;
       if (name === 'work_graph_submit_plan') {
         const { files, ...context } = job.payload.inputs;
-        const plan = this.store.savePlan({ projectId: job.projectId, ownerId: job.ownerId, graph: args.graph, context });
+        // Model output cannot grant itself automatic approval. Only the owner's plan editor can override a node.
+        const graph = { ...args.graph, nodes: args.graph?.nodes?.map(({ reviewMode, ...node }) => node) };
+        const plan = this.store.savePlan({ projectId: job.projectId, ownerId: job.ownerId, graph, context });
         result = { planId: plan.id, roadmapId: plan.roadmapId, version: plan.version };
       } else {
+        invariant(job.payload.reviewEvidence?.turnRunId === job.turnRunId,
+          409, 'REVIEW_CONTEXT_REQUIRED', '请先读取本轮固定交付内容，再提交审核意见。');
+        const available = new Set(['result_summary', 'final_reply', ...job.payload.reviewEvidence.readablePaths]);
+        invariant((args.items || []).every(item => (item.evidence || []).every(ref => available.has(ref))),
+          400, 'INVALID_REVIEW_EVIDENCE', '不能引用本轮没有读取的文件内容。');
         const review = this.reviews.proposal({ submissionId: job.submissionId, ownerId: job.ownerId, source: 'ai',
           verdict: args.verdict, detail: args, dedupeKey: `model:${job.id}` });
         result = { reviewId: review.id };

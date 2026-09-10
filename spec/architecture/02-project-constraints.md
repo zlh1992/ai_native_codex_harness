@@ -31,7 +31,7 @@
 
 ## 文件与执行约束
 
-- **FS-001**：浏览器和 dynamic tool 只能使用项目相对路径；绝对路径、`..`、保留目录和越界符号链接必须拒绝。保留目录匹配必须先规范化并忽略大小写，以覆盖默认大小写不敏感的 macOS 文件系统。实际文件 CRUD 必须在只允许当前项目及本次回收站目标的 Seatbelt helper 中完成，不能依赖主进程“先检查路径、后裸打开”的竞态窗口。
+- **FS-001**：一般浏览器文件接口和 dynamic tool 只能使用项目相对路径；绝对路径、`..`、保留目录和越界符号链接必须拒绝。唯一输入兼容例外是任务交付入口：允许当前任务员工 access 内的绝对文件路径，服务端转换为项目相对路径后继续走普通文件/快照校验，不扩大可访问根。保留目录匹配必须先规范化并忽略大小写，以覆盖默认大小写不敏感的 macOS 文件系统。实际文件 CRUD 必须在只允许当前项目及本次回收站目标的 Seatbelt helper 中完成，不能依赖主进程“先检查路径、后裸打开”的竞态窗口。
 - **FS-002**：`.git`、`.codex` 及共享 worktree 的 Git indirection 不得通过文件 API、workspace tool、原生 file-change approval 或 Seatbelt 暴露；原生 approval 无法取得完整目标集合时必须拒绝。
 - **FS-003**：共享项目必须为每个 active 员工建立独立 `project_access` 和 worktree；同一项目同一员工最多一个 active access。新授权必须先把 owner 当前 Git 可见的 tracked/untracked/删除状态提交为不可变基线，并将 `base_sha` 返回和持久化；不能从旧 HEAD 建树后留下一个未绑定的易变 patch。
 - **FS-004**：同一 chat 任一时刻最多一个 active root turn；同一 access/worktree 的不同 chat 可以并发。浏览器文件修改、submission 快照与 owner delivery 必须等待整个 access/worktree 空闲。浏览器编辑器覆盖既有文件时必须携带读取所得 SHA-256 `If-Match` 版本；stale save 返回 `FILE_VERSION_CONFLICT`，不能静默覆盖另一标签页或先前写入。并发 turn/命令若修改同一文件可能相互观察或覆盖，当前不承诺自动冲突解决。

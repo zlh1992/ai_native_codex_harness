@@ -98,7 +98,7 @@ export function createWorkGraphRoutes({ db, store, graphs, reviews, runtime, sch
       } else return false;
       return true;
     }
-    match = pathname.match(/^\/api\/tasks\/([^/]+)(?:\/(checklist|handoffs|submissions))?$/);
+    match = pathname.match(/^\/api\/tasks\/([^/]+)(?:\/(checklist|handoffs|submissions|delivery-files))?$/);
     if (match && db.getTask(match[1])?.workflowRunId) {
       const task = db.getTask(match[1]);
       invariant(db.getTaskForUser(task.id, session.user.id), 403, 'TASK_FORBIDDEN', '任务不存在或不属于你。');
@@ -111,13 +111,23 @@ export function createWorkGraphRoutes({ db, store, graphs, reviews, runtime, sch
       } else if (req.method === 'POST' && match[2] === 'submissions') {
         const body = await bodyFor(); const submission = graphs.submit(task.id, session.user.id, body);
         scheduler.wake(); reply(201, { submission: graphs.publicSubmission(submission), task: graphs.publicTask(db.getTask(task.id)) });
+      } else if (req.method === 'POST' && match[2] === 'delivery-files') {
+        const body = await bodyFor();
+        reply(200, { files: graphs.deliveryFiles(task.id, session.user.id, body) });
       } else return false;
       return true;
     }
     match = pathname.match(/^\/api\/task-submissions\/([^/]+)\/artifact$/);
     if (match && req.method === 'GET') {
       const file = graphs.artifact(match[1], session.user.id, url.searchParams.get('path'));
-      if (url.searchParams.get('download') === '1') {
+      const imageType = rasterType(file.bytes);
+      if (url.searchParams.get('preview') === '1') {
+        invariant(imageType, 415, 'PREVIEW_UNSUPPORTED', '此文件请下载查看；仅支持安全位图缩略。');
+        res.writeHead(200, { 'content-type': imageType, 'content-length': file.bytes.length,
+          'cache-control': 'no-store', 'x-content-type-options': 'nosniff',
+          'content-security-policy': "default-src 'none'; sandbox", 'content-disposition': 'inline' });
+        res.end(file.bytes);
+      } else if (url.searchParams.get('download') === '1') {
         res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': file.bytes.length,
           'content-disposition': "attachment; filename*=UTF-8''" + encodeURIComponent(file.path.split('/').at(-1)),
           'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; sandbox" });
@@ -164,6 +174,14 @@ export function createWorkGraphRoutes({ db, store, graphs, reviews, runtime, sch
     }
     return false;
   };
+}
+
+function rasterType(bytes) {
+  if (bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) return 'image/png';
+  if (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return 'image/jpeg';
+  if (/^GIF8[79]a$/.test(bytes.subarray(0, 6).toString('ascii'))) return 'image/gif';
+  if (bytes.subarray(0,4).toString() === 'RIFF' && bytes.subarray(8,12).toString() === 'WEBP') return 'image/webp';
+  return null;
 }
 
 function publicJob(job) {

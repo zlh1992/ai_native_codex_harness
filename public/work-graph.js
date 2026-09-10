@@ -14,6 +14,13 @@ const reasons = { PREPARING: '正在准备成员共享', WAITING_DEPENDENCIES: '
   DELIVERY_SCOPE_REVIEW_REQUIRED: '存在无关工作，请核对交付范围', MODEL_BUDGET_EXCEEDED: '已到模型调用预算' };
 const reason = (code) => reasons[code] || (code ? '等待处理，请查看后台任务' : '');
 const date = (value) => value ? new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
+const reviewLabel = mode => mode === 'auto' ? 'AI 自动审核 · 推进 / 打回' : mode === 'manual' ? '老板人工审核（旧模式）' : '老板审核 · AI 提供意见';
+const coverageLabel = code => ({ UNSUPPORTED_FORMAT: '格式暂不支持内容审核', NO_EXTRACTABLE_TEXT: '未提取到正文',
+  DOCX_NON_TEXT_CONTENT: '含图片/嵌入内容或解析警告', PDF_NON_TEXT_CONTENT: '含图片或无文本页',
+  TEXT_LIMIT: '文本超出审核预算', PAGE_LIMIT: '超过页数预算', REVIEW_BUDGET: '超过本轮审核预算',
+  EXTRACTION_FAILED: '解析失败或超时', EXTRACTOR_UNAVAILABLE: '解析器不可用', FILE_LIMIT: '文件超限' })[code] || code;
+const isRaster = name => /\.(png|jpe?g|gif|webp)$/i.test(name);
+const artifactUrl = (id, file) => `/api/task-submissions/${encodeURIComponent(id)}/artifact?path=${encodeURIComponent(file.path)}`;
 const GRAPH_NODE_WIDTH = 264;
 const GRAPH_NODE_HEIGHT = 176;
 const GRAPH_COLUMN_STEP = 320;
@@ -51,6 +58,10 @@ export class WorkGraphUI {
     if (!this.panel || this.initialized) return;
     this.initialized = true;
     this.drawer.addEventListener('click', (event) => this.drawerAction(event).catch((e) => this.toast(e.message, 'error')));
+    this.drawer.addEventListener('cancel', event => { if (this.detail?.submitting) event.preventDefault(); });
+    this.drawer.addEventListener('close', () => {
+      for (const entry of this.detail?.uploads || []) if (entry.preview) URL.revokeObjectURL(entry.preview);
+    });
     this.panel.addEventListener('click', (event) => this.action(event).catch((e) => this.toast(e.message, 'error')));
     this.panel.addEventListener('change', (event) => {
       if (event.target.id === 'graph-project') this.selectProject(event.target.value).catch((e) => this.toast(e.message, 'error'));
@@ -70,8 +81,8 @@ export class WorkGraphUI {
     this.panel.innerHTML = `<div class="graph-project-row"><label>项目<select id="graph-project">${projects.filter((p) => p.accessKind === 'owner')
       .map((p) => `<option value="${escape(p.id)}">${escape(p.name)}</option>`).join('')}</select></label><span>每个项目一张活动工作图 · 员工独立交付</span></div>
       <form id="graph-generate-form" class="graph-generate"><label class="graph-goal">这次想完成什么？<textarea name="prompt" rows="2" maxlength="8000" required placeholder="例如：请团队完成新版产品方案，设计和实现并行，最后汇总验收"></textarea></label>
-      <div class="graph-options"><label>审核方式<select name="reviewMode"><option value="assisted">AI 建议，老板验收</option><option value="auto">自动验收与返工</option><option value="manual">老板人工验收</option></select></label>
-      <label>最终交付<select name="finalMode"><option value="same">跟随审核方式</option><option value="manual">老板最终验收</option></select></label>
+      <div class="graph-options"><label>默认审核方式<select name="reviewMode"><option value="assisted">老板审核 · AI 提供意见</option><option value="auto">AI 自动审核 · 推进 / 打回</option></select></label>
+      <label>最终交付<select name="finalMode"><option value="same">跟随审核方式</option><option value="assisted">老板最终验收 · AI 提供意见</option></select></label>
       <button class="secondary" type="submit" data-preview="true">生成预览</button><button class="primary" type="submit">EXECUTE · 生成并启动</button></div>
       <details class="graph-sources"><summary>参与员工与项目资料</summary><div id="graph-candidates" class="graph-candidates"></div>
       <label>使用的项目文件（每行一个；留空自动选取文本资料）<textarea name="paths" rows="2" placeholder="README.md"></textarea></label>
@@ -169,7 +180,7 @@ export class WorkGraphUI {
       const layout = graphLayout(nodes); board.className = this.mode === 'list' ? 'graph-list' : 'graph-scroll';
       const card = (node) => `<button class="graph-node status-${escape(node.status)} ${related.has(node.key) ? 'graph-related' : ''}" data-node="${escape(node.key)}" title="${escape(node.title)}">
           <span class="graph-node-heading"><span>${escape(node.assigneeName)}</span><span>V${node.version}</span></span><strong class="graph-node-title">${escape(node.title)}</strong>
-          <span class="graph-node-status">${labels[node.status]}${node.completionGate ? ' · 最终交付' : ''}</span><small>${escape(reason(node.blockedReason)) || `截止 ${date(node.dueAt)}`}</small></button>`;
+          <span class="graph-node-status">${labels[node.status]}${node.completionGate ? ' · 最终交付' : ''}</span><small>${escape(reason(node.blockedReason)) || `截止 ${date(node.dueAt)}`}</small><small>${escape(reviewLabel(node.reviewMode))}${node.submissions?.length ? ` · 附件 ${node.submissions.find(s => s.taskVersion === node.version)?.outputsManifest.length || 0}` : ''}</small></button>`;
       if (this.mode === 'list') board.innerHTML = nodes.map((n) => card(n)).join('');
       else {
         const lines = nodes.flatMap((node) => node.dependsOn.map((parent) => {
@@ -189,6 +200,16 @@ export class WorkGraphUI {
     }
     $('#graph-job-list').innerHTML = [...this.jobs, ...(this.generationJob?.status === 'needs_attention' && !this.jobs.some(j => j.id === this.generationJob.id) ? [this.generationJob] : [])].filter((j) => j.status === 'needs_attention').map((j) => `<div class="graph-job"><b>后台任务需要处理</b><span>${escape(reason(j.errorCode))}</span>
       <label><input type="checkbox" data-ack="${escape(j.id)}"> 已核对后台对话，可重新调用</label><button class="secondary" data-retry-job="${escape(j.id)}">重试</button></div>`).join('');
+    if (this.drawer.open && this.detail?.graph.owner && graph?.id === this.detail.graph.id) {
+      const node = graph.nodes.find(n => n.key === this.detail.node.key);
+      if (node && JSON.stringify(node) !== JSON.stringify(this.detail.node)) {
+        const feedback = $('#graph-review-feedback', this.drawer)?.value || '';
+        const scroll = this.drawer.scrollTop;
+        this.showNode(graph, node.key);
+        if ($('#graph-review-feedback', this.drawer)) $('#graph-review-feedback', this.drawer).value = feedback;
+        this.drawer.scrollTop = scroll;
+      }
+    }
   }
   async generate(event) {
     const form = event.currentTarget; const data = new FormData(form);
@@ -199,7 +220,7 @@ export class WorkGraphUI {
     try {
       const { job } = await this.api(`/api/projects/${this.projectId}/work-graphs/generate`, { method: 'POST', body: {
         prompt: data.get('prompt'), candidateIds: data.getAll('candidate'), ...(paths.length ? { paths } : {}),
-        autoStart: !event.submitter?.dataset.preview, reviewPolicy: { mode, finalMode: data.get('finalMode') === 'same' ? mode : 'manual' }, idempotencyKey: this.generationKey } });
+        autoStart: !event.submitter?.dataset.preview, reviewPolicy: { mode, finalMode: data.get('finalMode') === 'same' ? mode : 'assisted' }, idempotencyKey: this.generationKey } });
       this.generationKey = null; this.generationJobId = job.id;
       localStorage.setItem(`work-graph-job:${this.projectId}`, job.id); await this.refresh();
     } finally { buttons.forEach((b) => { b.disabled = false; }); }
@@ -218,7 +239,7 @@ export class WorkGraphUI {
     } else if (button.hasAttribute('data-start-graph')) {
       const form = new FormData($('#graph-generate-form')); const mode = form.get('reviewMode');
       await this.api(`/api/work-graphs/${this.graphId}/start`, { method: 'POST', body: { expectedVersion: this.current.version,
-        idempotencyKey: crypto.randomUUID(), reviewPolicy: { mode, finalMode: form.get('finalMode') === 'same' ? mode : 'manual' } } });
+        idempotencyKey: crypto.randomUUID(), reviewPolicy: { mode, finalMode: form.get('finalMode') === 'same' ? mode : 'assisted' } } });
       await this.refresh();
     } else if (button.dataset.retryJob) {
       await this.api(`/api/work-graph-jobs/${button.dataset.retryJob}/retry`, { method: 'POST', body: {
@@ -231,22 +252,69 @@ export class WorkGraphUI {
     if (graph) this.showNode(graph, graph.nodes.find((n) => n.taskId === task.id).key, native);
   }
   showNode(graph, key, native = null) {
-    const node = graph.nodes.find((n) => n.key === key); this.detail = { graph, node, native };
+    const node = graph.nodes.find((n) => n.key === key); this.detail = { graph, node, native, uploads: [] };
     const task = node.task; const editable = task && ['active', 'rework'].includes(task.status) && graph.run?.status === 'running';
     const latest = node.submissions?.find((s) => s.taskVersion === node.version);
     this.drawer.innerHTML = `<div class="graph-drawer-top"><div><p class="eyebrow">${escape(node.assigneeName)} · V${node.version}</p><h2>${escape(node.title)}</h2></div><button class="secondary" data-close-drawer aria-label="关闭">×</button></div>
       <p><span class="status-tag ${escape(node.status)}">${labels[node.status]}</span> ${escape(reason(node.blockedReason))}</p>
+      <p>${escape(reviewLabel(node.reviewMode))}</p>
+      ${latest ? `<p role="status">AI 审核：${node.reviewJob ? escape(labels[node.reviewJob.status] || node.reviewJob.status) : node.reviewMode === 'manual' ? '旧模式未启用 AI' : '等待调度'}${node.reviewJob?.errorCode ? ` · ${escape(reason(node.reviewJob.errorCode))}` : ''}</p>` : ''}
       ${task ? `<h3>验收标准</h3><p class="graph-preserve">${escape(task.acceptance)}</p><h3>任务清单</h3>
         <div id="graph-checklist">${task.checklist.map((i) => `<label><input type="checkbox" data-item="${escape(i.id)}" ${i.done ? 'checked' : ''} ${!editable || graph.owner ? 'disabled' : ''}> ${escape(i.text)}</label>`).join('')}</div>` : '<p>启动计划后下发任务。</p>'}
       ${(task?.inputManifest || []).map((h) => `<section class="graph-handoff"><h3>上游成果</h3><p class="graph-preserve">${escape(h.summary)}</p>${h.outputs.map((f) => `<button class="text-link" data-open-output="${escape(f.path)}">${escape(f.path)}</button>`).join('')}</section>`).join('')}
-      ${(node.reviews || []).map((r) => `<section class="graph-review"><b>${r.source === 'ai' ? 'AI' : '老板'} · ${r.verdict === 'passed' ? '通过' : r.verdict === 'rework' ? '返工' : '需人工判断'} · ${r.status === 'applied' ? '已应用' : r.status === 'superseded' ? '历史意见' : '建议'}</b><p class="graph-preserve">${escape(r.detail.feedback)}</p>${(r.detail.items || []).map((i) => `<small>${escape(i.status)} · ${escape(i.comment)}</small>`).join('')}</section>`).join('')}
-      ${latest ? `<section class="graph-submission"><h3>本轮提交 · ${latest.kind === 'manual' ? '人工成果' : 'Codex 成果'}</h3><p class="graph-preserve">${escape(latest.resultSummary || latest.finalReplySnapshot)}</p><small>固定快照 ${escape(latest.snapshotCommitSha?.slice(0, 12))}</small><ul>${latest.outputsManifest.map((f) => `<li><button class="text-link" data-preview-submission="${escape(latest.id)}" data-path="${escape(f.path)}">${escape(f.path)}</button> · ${f.size} B</li>`).join('')}</ul></section>` : ''}
+      ${(node.reviews || []).map((r) => `<section class="graph-review"><b>${r.source === 'ai' ? 'AI' : '老板'} · ${r.verdict === 'passed' ? '通过' : r.verdict === 'rework' ? '返工' : '需人工判断'} · ${r.status === 'applied' ? '已应用' : r.status === 'superseded' ? '历史意见' : '建议'}</b><p class="graph-preserve">${escape(r.detail.feedback)}</p>${(r.detail.items || []).map((i) => `<small>${escape(i.status)} · ${escape(i.comment)} · 证据：${escape((i.evidence || []).join('、') || '未引用')}</small>`).join('')}${(r.detail.coverage || []).map(f => `<small>${escape(f.path)}：${f.complete ? '文本已读取' : '需人工查看'}${f.reason ? ` · ${escape(coverageLabel(f.reason))}` : ''}</small>`).join('')}</section>`).join('')}
+      ${latest ? `<section class="graph-submission"><h3>本轮提交 · ${latest.kind === 'manual' ? '人工成果' : 'Codex 成果'}</h3><p class="graph-preserve">${escape(latest.resultSummary || latest.finalReplySnapshot)}</p><p class="graph-preserve">${escape(latest.employeeNote || '')}</p><small>固定快照 ${escape(latest.snapshotCommitSha?.slice(0, 12))} · 附件 ${latest.outputsManifest.length} 个</small><div class="graph-attachments">${latest.outputsManifest.map((f) => `<article class="graph-attachment">${isRaster(f.path) ? `<img loading="lazy" src="${escape(artifactUrl(latest.id, f))}&preview=1" alt="${escape(f.path)}">` : '<span class="graph-file-icon">文件</span>'}<div><button class="text-link" data-preview-submission="${escape(latest.id)}" data-path="${escape(f.path)}">${escape(f.path)}</button><small>${f.size} B · 固定提交版本</small><a class="text-link" href="${escape(artifactUrl(latest.id, f))}&download=1" download>下载</a></div></article>`).join('')}</div></section>` : ''}
+      ${(node.submissions || []).filter(s => s.taskVersion !== node.version).map(s => `<details class="graph-submission"><summary>历史交付 · V${s.taskVersion} · ${s.outputsManifest.length} 个附件</summary><p class="graph-preserve">${escape(s.resultSummary || s.finalReplySnapshot)}</p>${s.outputsManifest.map(f => `<p><button class="text-link" data-preview-submission="${escape(s.id)}" data-path="${escape(f.path)}">${escape(f.path)}</button> · <a href="${escape(artifactUrl(s.id, f))}&download=1" download>下载</a></p>`).join('')}</details>`).join('')}
       ${!graph.owner && editable ? `<form id="graph-submit-form"><label>${native ? '已选择 Codex 最终回复，补充交付说明' : '成果说明'}<textarea name="summary" rows="5" maxlength="8000" ${native ? '' : 'required'}></textarea></label>
-      <label>额外交付文件（每行一个）<textarea name="outputs" rows="2"></textarea></label><label>已知限制 / 备注<textarea name="note" rows="2" maxlength="4000"></textarea></label>
+      <p>必交文件：${escape((node.requiredOutputs || []).join('、') || '无指定文件')}</p>
+      <div id="graph-upload-zone" class="graph-upload-zone"><label>上传交付文件（可多选或拖入）<input id="graph-upload-input" type="file" multiple></label><small>提交时上传；图片显示缩略，其他文件显示卡片。含必交文件最多 30 个、合计 32 MiB。失败时已上传文件保留在项目中，移除已上传项会将该文件移入回收站。</small></div><div id="graph-upload-list" class="graph-attachments"></div>
+      <label>工作区文件路径（每行一个）<textarea name="outputs" rows="3" placeholder="当前员工项目内的绝对路径，或 reports/result.pdf"></textarea></label><small>路径指 Portal 服务器上的当前项目工作区；你电脑上的文件请使用上传。</small><button class="secondary" type="button" data-check-files>校验文件清单</button><div id="graph-files-result" role="status"></div>
+      <label>已知限制 / 备注<textarea name="note" rows="2" maxlength="4000"></textarea></label>
       <p class="form-error" role="alert"></p><div class="dialog-actions"><button class="secondary" type="button" data-open-task>进入任务对话</button><button class="secondary" type="button" data-save-checklist>保存清单</button><button class="primary" type="submit">提交验收</button></div></form>` : ''}
       ${graph.owner && latest?.verdict === 'pending' && graph.run?.status === 'running' ? `<label>审核意见 / 修改要求<textarea id="graph-review-feedback" rows="4" maxlength="8000"></textarea></label><div class="dialog-actions"><button class="secondary" data-verdict="rework">打回重做</button><button class="primary" data-verdict="passed">通过并交付</button></div>` : ''}`;
     if (!this.drawer.open) this.drawer.showModal();
-    $('#graph-submit-form', this.drawer)?.addEventListener('submit', (event) => { event.preventDefault(); this.submitDetail(event.currentTarget).catch((e) => { $('.form-error', event.currentTarget).textContent = e.message; }); });
+    $('#graph-submit-form', this.drawer)?.addEventListener('submit', (event) => {
+      event.preventDefault(); const form = event.currentTarget;
+      $('.form-error', form).textContent = '';
+      this.submitDetail(form).catch((e) => { $('.form-error', form).textContent = e.message; });
+    });
+    const input = $('#graph-upload-input', this.drawer);
+    if (input) input.onchange = () => { this.addUploads([...input.files]); input.value = ''; };
+    const zone = $('#graph-upload-zone', this.drawer);
+    if (zone) {
+      zone.ondragover = event => event.preventDefault();
+      zone.ondrop = event => { event.preventDefault(); this.addUploads([...event.dataTransfer.files]); };
+    }
+  }
+  addUploads(files) {
+    if (this.detail.submitting || this.detail.submissionBody) return;
+    const entries = this.detail.uploads;
+    for (const file of files) {
+      if (entries.length >= 30
+        || entries.reduce((n, e) => n + e.file.size, file.size) > 32 * 1024 * 1024) {
+        this.toast('附件超过 30 个或 32 MiB，请减少文件', 'error'); break;
+      }
+      const name = file.name.normalize('NFKC').replace(/[\\/\x00-\x1f]/g, '_').slice(-160) || 'file';
+      const extraPath = `deliveries/${this.detail.node.task.id}/v${this.detail.node.version}/${crypto.randomUUID()}/${name}`;
+      const matches = (this.detail.node.requiredOutputs || []).filter(p => p.split('/').at(-1) === name);
+      entries.push({ file, extraPath, path: matches.length === 1 ? matches[0] : extraPath,
+        preview: isRaster(file.name) ? URL.createObjectURL(file) : null, uploaded: false, owned: false });
+    }
+    this.renderUploads();
+  }
+  renderUploads() {
+    $('#graph-upload-list', this.drawer).innerHTML = this.detail.uploads.map((e, i) => `<article class="graph-attachment">${e.preview ? `<img src="${escape(e.preview)}" alt="${escape(e.file.name)}">` : '<span class="graph-file-icon">文件</span>'}<div>${escape(e.file.name)}<small>${e.file.size} B · ${e.uploaded ? '已就绪' : '待上传'}</small><label>交付到<select data-upload-target="${i}" ${e.uploaded || this.detail.submitting ? 'disabled' : ''}><option value="${escape(e.extraPath)}" ${e.path === e.extraPath ? 'selected' : ''}>新增附件</option>${(this.detail.node.requiredOutputs || []).map(p => `<option value="${escape(p)}" ${e.path === p ? 'selected' : ''}>必交：${escape(p)}</option>`).join('')}</select></label></div><button type="button" class="secondary" data-remove-upload="${i}" ${this.detail.submitting ? 'disabled' : ''}>移除</button></article>`).join('');
+    all('[data-upload-target]', this.drawer).forEach(select => { select.onchange = () => {
+      if (!this.detail.submitting && !this.detail.submissionBody) this.detail.uploads[Number(select.dataset.uploadTarget)].path = select.value;
+    }; });
+  }
+  async checkDeliveryFiles() {
+    const form = $('#graph-submit-form', this.drawer);
+    const outputs = String(new FormData(form).get('outputs') || '').split('\n').map(s => s.trim()).filter(Boolean);
+    const { files } = await this.api(`/api/tasks/${this.detail.node.task.id}/delivery-files`, { method: 'POST', body: {
+      taskVersion: this.detail.node.version, outputs: [...outputs, ...this.detail.uploads.filter(e => e.uploaded).map(e => e.path)] } });
+    $('#graph-files-result', this.drawer).textContent = files.map(f => `${f.path} · ${f.size} B`).join('\n') || '没有工作区附件';
+    return outputs;
   }
   async saveChecklist() {
     const { node } = this.detail;
@@ -257,23 +325,67 @@ export class WorkGraphUI {
   }
   async submitDetail(form) {
     const data = new FormData(form); const button = $('button[type=submit]', form); button.disabled = true;
+    this.detail.submitting = true;
+    all('input,textarea,button,select', form).forEach(e => { e.disabled = true; });
+    all('[data-item]', this.drawer).forEach(e => { e.disabled = true; });
     try {
+      if (!this.detail.submissionBody) {
+        const outputs = String(data.get('outputs') || '').split('\n').map(s => s.trim()).filter(Boolean);
+        const { task: current } = await this.api(`/api/tasks/${this.detail.node.task.id}`);
+        if (current.version !== this.detail.node.version || !['active', 'rework'].includes(current.status)) throw new Error('任务已变化，请刷新后提交。');
+        if (!this.detail.uploads.length) await this.api(`/api/tasks/${current.id}/delivery-files`, { method: 'POST', body: { taskVersion: current.version, outputs } });
+      }
+      // Keep the same destination on retries; no duplicate uploads or submissions.
+      for (const entry of this.detail.uploads) {
+        if (entry.uploaded) continue;
+        button.textContent = `正在上传 ${entry.file.name}…`;
+        try {
+          await this.api(`/api/projects/${this.detail.graph.projectId}/file?path=${encodeURIComponent(entry.path)}`, { method: 'PUT', body: entry.file });
+          entry.owned = true;
+        } catch (error) {
+          if (error.code !== 'FILE_EXISTS') throw error;
+          const response = await fetch(`/api/projects/${this.detail.graph.projectId}/raw?path=${encodeURIComponent(entry.path)}`, { credentials: 'same-origin' });
+          if (!response.ok) throw error;
+          const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', await entry.file.arrayBuffer()))].map(b => b.toString(16).padStart(2, '0')).join('');
+          const actual = [...new Uint8Array(await crypto.subtle.digest('SHA-256', await response.arrayBuffer()))].map(b => b.toString(16).padStart(2, '0')).join('');
+          if (actual !== hash) throw new Error('目标已存在且内容不同：请选择新增附件，或先在工作区处理该文件。');
+        }
+        entry.uploaded = true; this.renderUploads();
+      }
+      button.textContent = '正在提交验收…';
+      if (!this.detail.submissionBody) await this.api(`/api/tasks/${this.detail.node.task.id}/delivery-files`, { method: 'POST', body: {
+        taskVersion: this.detail.node.version, outputs: [...String(data.get('outputs') || '').split('\n').map(s => s.trim()).filter(Boolean), ...this.detail.uploads.map(e => e.path)] } });
       const task = this.detail.submissionBody ? this.detail.node.task : await this.saveChecklist();
       this.detail.submissionKey ||= crypto.randomUUID();
       this.detail.submissionBody ||= {
         kind: this.detail.native ? 'codex' : 'manual', ...(this.detail.native || {}), taskVersion: task.version,
         checklistRevision: task.checklistRevision, idempotencyKey: this.detail.submissionKey, resultSummary: data.get('summary'),
-        outputs: String(data.get('outputs')).split('\n').map((s) => s.trim()).filter(Boolean), note: data.get('note') };
+        outputs: [...String(data.get('outputs') || '').split('\n').map((s) => s.trim()).filter(Boolean), ...this.detail.uploads.map(e => e.path)], note: data.get('note') };
       await this.api(`/api/tasks/${task.id}/submissions`, { method: 'POST', body: this.detail.submissionBody });
       this.drawer.close(); this.toast('成果已提交，等待验收'); await this.refreshTasks();
     } catch (error) {
       if (error.status && error.status < 500) this.detail.submissionBody = null;
       throw error;
-    } finally { button.disabled = false; }
+    } finally {
+      this.detail.submitting = false;
+      all('input,textarea,button,select', form).forEach(e => { e.disabled = Boolean(this.detail.submissionBody); });
+      all('[data-upload-target]', form).forEach(e => { e.disabled ||= this.detail.uploads[Number(e.dataset.uploadTarget)].uploaded; });
+      all('[data-item]', this.drawer).forEach(e => { e.disabled = Boolean(this.detail.submissionBody); });
+      button.disabled = false; button.textContent = this.detail.submissionBody ? '确认提交结果（重试）' : '提交验收';
+    }
   }
   async drawerAction(event) {
     const button = event.target.closest('button'); if (!button) return;
+    if (this.detail?.submitting) return;
     if (button.hasAttribute('data-close-drawer')) this.drawer.close();
+    else if (button.hasAttribute('data-check-files')) await this.checkDeliveryFiles();
+    else if (button.hasAttribute('data-remove-upload')) {
+      if (this.detail.submissionBody) return;
+      const index = Number(button.dataset.removeUpload); const entry = this.detail.uploads[index];
+      if (entry.uploaded && entry.owned) await this.api(`/api/projects/${this.detail.graph.projectId}/file?path=${encodeURIComponent(entry.path)}`, { method: 'DELETE' });
+      if (entry.preview) URL.revokeObjectURL(entry.preview);
+      this.detail.uploads.splice(index, 1); this.detail.submissionBody = null; this.renderUploads();
+    }
     else if (button.hasAttribute('data-save-checklist')) { await this.saveChecklist(); this.toast('清单已保存'); }
     else if (button.hasAttribute('data-open-task')) { this.drawer.close(); await this.openTaskChat(this.detail.node.task.id); }
     else if (button.dataset.openOutput) { this.drawer.close(); await this.openFile(this.detail.graph.projectId, button.dataset.openOutput); }
@@ -309,6 +421,7 @@ export class WorkGraphUI {
         n.outputs = $('[name=outputs]', field).value.split('\n').map(s => s.trim()).filter(Boolean);
         n.completionGate = $('[name=final]', field).checked;
         n.requiresIndependentValidation = $('[name=independent]', field).checked;
+        n.reviewMode = $('[name=nodeReviewMode]', field).value || null;
         const due = $('[name=due]', field).value; n.dueAt = due ? new Date(due).toISOString() : null;
       }
     };
@@ -320,6 +433,7 @@ export class WorkGraphUI {
         <label>等待哪些任务完成？<select name="depends" multiple>${graph.nodes.filter(p => p.key !== n.key).map(p => `<option value="${escape(p.key)}" ${n.dependsOn.includes(p.key) ? 'selected' : ''}>${escape(p.title)}</option>`).join('')}</select></label>
         <label>验收标准<textarea name="acceptance" required>${escape(n.acceptance)}</textarea></label><label>任务清单（每行一项）<textarea name="checklist" required>${escape(n.checklist.map(i => typeof i === 'string' ? i : i.text).join('\n'))}</textarea></label>
         <label>必需交付文件（每行一个）<textarea name="outputs">${escape(n.outputs.join('\n'))}</textarea></label>
+        <label>本节点验收<select name="nodeReviewMode"><option value="" ${!n.reviewMode ? 'selected' : ''}>继承默认方式</option><option value="auto" ${n.reviewMode === 'auto' ? 'selected' : ''}>AI 自动审核 · 推进 / 打回</option><option value="assisted" ${n.reviewMode === 'assisted' ? 'selected' : ''}>老板审核 · AI 提供意见</option></select></label>
         <label>截止时间<input name="due" type="datetime-local" value="${n.dueAt ? new Date(Date.parse(n.dueAt) - new Date(n.dueAt).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : ''}"></label>
         <label><input name="final" type="checkbox" ${n.completionGate ? 'checked' : ''}> 最终交付节点（整张图仅一个）</label>
         <label><input name="independent" type="checkbox" ${n.requiresIndependentValidation ? 'checked' : ''}> 需要老板核对独立验证</label>

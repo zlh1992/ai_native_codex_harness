@@ -1,5 +1,6 @@
 import { invariant } from './errors.mjs';
-import { graphRelativePath, graphText } from './work-graph-contract.mjs';
+import fs from 'node:fs';
+import { deliveryRelativePath, graphText, nodeReviewMode } from './work-graph-contract.mjs';
 
 export class WorkGraphService {
   constructor({ db, store, workspace, worktrees, codex }) { Object.assign(this, { db, store, workspace, worktrees, codex }); }
@@ -45,6 +46,21 @@ export class WorkGraphService {
     });
   }
 
+  deliveryFiles(taskId, userId, { taskVersion, outputs = [] }) {
+    const { task, project } = this.taskFor(taskId, userId);
+    invariant(task.version === taskVersion && ['active', 'rework'].includes(task.status),
+      409, 'TASK_VERSION_CHANGED', '任务版本或状态已变化。');
+    invariant(Array.isArray(outputs) && outputs.length <= 30, 400, 'INVALID_OUTPUTS', '成果文件最多 30 个。');
+    const root = this.workspace.projectRoot(project);
+    const canonicalRoot = fs.realpathSync(root);
+    const paths = [...new Set([...this.node(task).outputs, ...outputs.map(p => deliveryRelativePath(p, root, canonicalRoot))])];
+    invariant(paths.length <= 30, 400, 'INVALID_OUTPUTS', '含必交成果最多 30 个文件。');
+    const files = paths.map(p => this.workspace.fileMetadata(project, p));
+    invariant(files.reduce((sum, f) => sum + f.size, 0) <= 32 * 1024 * 1024,
+      413, 'CONTEXT_TOO_LARGE', '交付文件总大小最多 32 MiB。');
+    return files;
+  }
+
   submit(taskId, userId, body) {
     const { task, run, project } = this.taskFor(taskId, userId);
     const key = body.idempotencyKey;
@@ -55,13 +71,12 @@ export class WorkGraphService {
       && task.checklistRevision === body.checklistRevision, 409, 'TASK_VERSION_CHANGED', '任务版本或清单已变化。');
     invariant(task.checklist.every((item) => item.done), 409, 'CHECKLIST_INCOMPLETE', '请先完成全部清单项。');
     this.idle(project.accessId);
-    const node = this.node(task);
     const kind = body.kind || 'codex';
     invariant(['codex', 'manual'].includes(kind), 400, 'INVALID_SUBMISSION_KIND', '提交来源无效。');
     const resultSummary = graphText(body.resultSummary || '', '成果说明', 8000, kind === 'codex');
     const note = graphText(body.note || '', '交付备注', 4000, true);
     invariant(!body.outputs || (Array.isArray(body.outputs) && body.outputs.length <= 30), 400, 'INVALID_OUTPUTS', '成果文件最多 30 个。');
-    const paths = [...new Set([...node.outputs, ...(body.outputs || []).map(graphRelativePath)])];
+    const paths = this.deliveryFiles(taskId, userId, body).map(f => f.path);
     invariant(paths.length <= 30, 400, 'INVALID_OUTPUTS', '成果文件最多 30 个。');
     // Validate completed native evidence before creating a Git snapshot.
     if (kind === 'codex') {
@@ -86,7 +101,7 @@ export class WorkGraphService {
   }
 
   scheduleReview(task, run, submission) {
-    const mode = this.node(task).completionGate ? run.reviewPolicy.finalMode : run.reviewPolicy.mode;
+    const mode = nodeReviewMode(this.node(task), run.reviewPolicy);
     if (mode === 'manual') return;
     this.store.enqueue({ projectId: task.projectId, ownerId: run.ownerId, runId: run.id, generation: run.generation,
       taskId: task.id, taskVersion: task.version, submissionId: submission.id, type: 'submission.review',
@@ -214,7 +229,11 @@ export class WorkGraphService {
           assigneeName: this.db.getUserById(node.assigneeUserId)?.displayName || '', dependsOn: node.dependsOn,
           completionGate: node.completionGate, status: task?.status || 'draft', blockedReason: task?.blockedReason || null,
           taskId: task?.id || null, version: task?.version || 1, dueAt: node.dueAt,
+          reviewMode: run ? nodeReviewMode(node, run.reviewPolicy) : node.reviewMode || null,
           ...(owner || task?.assigneeUserId === userId ? { task: task ? this.publicTask(task) : null,
+            requiredOutputs: node.outputs,
+            reviewJob: task ? this.db.db.prepare(`SELECT status,error_code AS errorCode FROM workflow_jobs
+              WHERE task_id=? AND task_version=? AND type='submission.review' ORDER BY created_at DESC LIMIT 1`).get(task.id, task.version) || null : null,
             submissions: task ? this.db.listSubmissionsForTask(task.id).map((s) => this.publicSubmission(s)) : [],
             reviews: task ? this.db.db.prepare('SELECT r.* FROM task_reviews r JOIN task_submissions s ON s.id=r.submission_id WHERE s.task_id=? ORDER BY r.created_at')
               .all(task.id).map((r) => ({ id: r.id, submissionId: r.submission_id, source: r.source, verdict: r.verdict,

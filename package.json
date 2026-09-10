@@ -17,7 +17,10 @@
     "gate": "npm run check && npm run test:e2e"
   },
   "dependencies": {
-    "exceljs": "^4.4.0"
+    "exceljs": "^4.4.0",
+    "jszip": "3.10.1",
+    "mammoth": "1.12.2",
+    "pdfjs-dist": "5.4.624"
   },
   "overrides": {
     "exceljs": {

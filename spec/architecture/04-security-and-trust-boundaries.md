@@ -54,7 +54,7 @@ Web ACL 也不约束运行 Portal 的 Mac 操作系统账号或其他宿主机�
 ## 文件路径与 Git
 
 - 所有客户端路径先转成受控项目相对路径，再在服务端解析 canonical target。
-- 拒绝绝对路径、空目标的危险操作、`..`、NUL、保留目录和越界符号链接；保留目录在 Unicode 规范化和大小写折叠后比较。
+- 一般文件/tool 接口拒绝绝对路径、空目标的危险操作、`..`、NUL、保留目录和越界符号链接；保留目录在 Unicode 规范化和大小写折叠后比较。任务交付入口仅把当前 task assignee/access 根内的绝对路径转换为相对路径，随后用同一 Seatbelt metadata 检查并绑定固定 Git 普通 blob；不接受其他项目或宿主路径。
 - 主进程的 `lstat`/`realpath` 只做早期拒绝，不能作为最终竞态防线。树遍历、读取、写入、建目录和文件回收必须由独立 helper 在 Seatbelt 中执行；profile 只读当前 canonical project，写操作只额外开放当前 project 与本次 actor/access 的回收站目录。helper 再检查每个已存在路径分量，最终文件使用 `O_NOFOLLOW`，写入使用同目录临时文件加原子 rename。
 - 共享 worktree 的 `.git` 是指向 owner 仓库内部的 indirection，必须同时被文件 API 和 Seatbelt 隐藏。
 - 项目中的 `.codex` 和自定义 agent 配置不能改变 Portal 固定的工具、角色、模型或子代理策略。
@@ -120,3 +120,7 @@ Seatbelt 不是容器。完全不可信用户需要独立 OS 用户、VM/容器�
 ## 后台业务工具边界
 
 planner/reviewer 仅暴露受限 work_graph_* 工具，禁止原生写入与命令。后台授权采用 owner/member 策略 epoch、access、job lease 与 generation；自动 files_only 分享不复制 transcript。 详细契约见 [多人 Work Graph](09-human-work-graph.md)，操作见 [工作图指南](../../docs/WORK_GRAPH.md)。
+
+交付文档提取只接收固定 Git blob 的字节，不向解析器提供项目路径。PDF/DOCX 在独立 Seatbelt 子进程中提取文本：仅开放解析器源码/依赖及系统运行库读取，不开放项目、凭据或网络；清空继承环境，限制输入、解压预算、JS 堆、墙钟和输出。解析错误不返回底层异常或文档正文至日志。提取异步返回后复验 owner/access、员工策略、任务版本和 pending 状态；tool 返回前额外复验原 job lease/generation。
+
+reviewer root 必须在当前 turn 读取固定上下文，方可提交审核意见；read proof 只保存本轮标识、文件路径和覆盖元数据。有附件的通过意见须引用已提供的文件内容。解析覆盖不足时不得自动应用，模型生成的计划不能自行指定节点自动验收授权。

@@ -14,11 +14,15 @@ Work Graph 编排真实员工交付，Codex root 内部的子代理不构成员�
 
 员工勾选清单并提交人工成果，或选择本任务版本的 Codex 最终回复。清单全勾不等同验收通过。manual 的原生 thread/turn/item 均为空，codex 必须绑定真实 completed turn；数据库 CHECK 防止两种身份混淆。每个 task/version 仅一个不可变 submission，幂等键防止重复提交。
 
-审核模式为 manual、assisted、auto，最终节点可单独选择。AI 意见逐项给出状态、反馈和来自固定提交的证据引用；assisted 由老板决定，auto 才可自动应用。缺少可读产物、需独立验证、无关工作混入、调用预算或返工上限到达时交给老板。模型声明不能代替独立测试。
+新界面提供 assisted（AI 给意见，老板决定）、auto（AI 自动通过/打回）两种模式，最终节点可单独选择，草稿节点可设置可选 reviewMode 覆盖默认模式。覆盖由老板编辑并在不可变 plan/start 授权中冻结，模型生成计划的同名字段被剥离。旧 manual 数据/接口继续保留原有不调用 AI 的语义；不自动升级既有运行。AI 意见逐项给出状态、反馈和来自固定提交的证据引用；assisted 由老板决定，auto 才可自动应用。缺少可读产物、需独立验证、无关工作混入、调用预算或返工上限到达时交给老板。模型声明不能代替独立测试。
+
+员工可多选/拖拽文件，提交时经原有文件 PUT、配额与工作区空闲屏障写入独立 deliveries/task/version/随机目录，或在卡片中选定的必交文件位置；禁止静默覆盖已有不同内容，相同内容只复用。再与必交文件、逐行工作区路径一起校验、去重，最多 30 个文件和 32 MiB。一般文件 API 保持相对路径，交付校验入口额外接受当前 task access 根内绝对路径并立即转为相对路径。部分上传失败保留成功文件以便重试；移除本次确认新建的上传项使用既有可恢复删除，复用的既有文件不删除。关闭页面不自动删除文件。上传目录不是秘密目录；提交仍固定整个 worktree，manifest 决定展示和审核范围，不改变既有 Git merge 范围。
+
+reviewer 在本轮先获取固定内容，read proof 绑定 job/turn 并只存覆盖元数据。文件内容不写入 job/audit/event。文本和 PDF 文本层、DOCX 正文共享 64 KiB 文本预算；PDF 最多 100 页，文档子进程最多 10 秒、JS 堆 256 MiB，单次上下文约 30 秒提取预算（在当前文件结束后检查）。扫描页、图片/嵌入内容、空文本、解析失败或预算截断记为不完整并转人工；不能把文本提取当作版式、法律正确性或执行结果验证。有附件的 AI 通过意见必须引用本轮读取的文件。覆盖记录进入审核业务详情，自动应用时再次检查完整性。
 
 passed 必须先完成既有 Git owner delivery，再原子写 verdict、handoff、事件与推进意图。rework 增加任务版本，保留旧提交、审核意见，失败清单项复位。下游只有在全部前序 passed 且 handoff 齐全、工作区空闲、员工工作树可从 owner HEAD 干净 fast-forward 后才 active；禁止强制 reset、自动覆盖脏文件或消除分叉。
 
-成果读取绑定 submission 的 commit/hash/manifest，不读取提交者当前文件。owner、提交者及实际收到该 handoff 的下游员工可读；仍要求当前项目访问权。文本预览转义显示，下载为 attachment + octet-stream + nosniff + sandbox CSP，不执行 HTML。无同项目私有 transcript 广播。
+成果读取绑定 submission 的 commit/hash/manifest，不读取提交者当前文件。owner、提交者及实际收到该 handoff 的下游员工可读；仍要求当前项目访问权。提交后老板无需等待通过即可查看附件，只有通过才合入工作区。文本预览转义显示，下载为 attachment + octet-stream + nosniff + sandbox CSP，不执行 HTML。preview=1 仅按文件签名字节识别 PNG/JPEG/GIF/WebP 并以 nosniff + sandbox CSP 输出，SVG/HTML 不进入图片预览面。无同项目私有 transcript 广播。
 
 ## 后台执行与恢复
 
@@ -47,6 +51,7 @@ planner/reviewer purpose 仅提供固定上下文和结构化提交工具；无 
 | `/api/work-graphs/:id/start\|pause\|resume\|cancel` POST | 显式运行状态变化 |
 | `/api/tasks/:id/checklist` PATCH | 任务版本 + 清单 revision |
 | `/api/tasks/:id/submissions` POST | 人工/Codex 幂等提交 |
+| `/api/tasks/:id/delivery-files` POST | 当前 taskVersion 的必交/额外文件校验、绝对转相对、大小与数量检查 |
 | `/api/tasks/:id/handoffs` GET | 当前任务获准上游成果 |
 | `/api/task-submissions/:id/artifact` GET | 固定文件预览/下载 |
 | `/api/admin/task-submissions/:id/review` POST | 老板验收，要求 expectedVersion |

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { invariant } from './errors.mjs';
-import { graphText } from './work-graph-contract.mjs';
+import { graphText, nodeReviewMode } from './work-graph-contract.mjs';
 
 export class TaskReviewService {
   constructor({ db, store, workspace, worktrees, codex, graphs }) { Object.assign(this, { db, store, workspace, worktrees, codex, graphs }); }
@@ -38,6 +38,9 @@ export class TaskReviewService {
       return { id: item.id, status: result.status, comment: graphText(result.comment || '', '逐项意见', 2000, true), evidence };
     });
     invariant(verdict !== 'passed' || criteria.every((i) => i.status === 'passed'), 400, 'REVIEW_NOT_PASSED', '清单存在未通过项。');
+    invariant(source !== 'ai' || verdict !== 'passed' || !submission.outputsManifest.length
+      || criteria.some(i => i.evidence.some(ref => submission.outputsManifest.some(f => f.path === ref))),
+      400, 'REVIEW_FILE_EVIDENCE_REQUIRED', '有附件的通过意见必须引用实际文件，不能只引用成果说明。');
     const key = dedupeKey || `human:${submissionId}:${randomUUID()}`;
     const prior = this.db.db.prepare('SELECT id FROM task_reviews WHERE dedupe_key=?').get(key);
     if (prior) return this.get(prior.id);
@@ -70,8 +73,10 @@ export class TaskReviewService {
     if (job) {
       invariant(job.runId === run.id && job.submissionId === submission.id && job.taskVersion === task.version,
         409, 'REVIEW_JOB_CHANGED', '审核任务关联已变化。');
-      const mode = this.graphs.node(task).completionGate ? run.reviewPolicy.finalMode : run.reviewPolicy.mode;
+      const mode = nodeReviewMode(this.graphs.node(task), run.reviewPolicy);
       invariant(mode === 'auto', 403, 'AUTO_REVIEW_NOT_AUTHORIZED', '该节点未授权自动审核。');
+      invariant(submission.outputsManifest.every(output => review.detail.coverage?.some(f => f.path === output.path && f.complete)),
+        409, 'REVIEW_NEEDS_OWNER', '交付文件未完整读取，请老板核对。');
       invariant(!this.graphs.node(task).requiresIndependentValidation, 409, 'INDEPENDENT_VALIDATION_REQUIRED', '此任务需要老板核对独立验证结果。');
       invariant(review.verdict !== 'passed' || !task.foreignWorkSeen, 409, 'DELIVERY_SCOPE_REVIEW_REQUIRED', '期间存在无关工作，请老板核对交付范围。');
       invariant(review.verdict !== 'rework' || task.version <= run.reviewPolicy.maxRework,

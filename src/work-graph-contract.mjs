@@ -1,4 +1,5 @@
 import { invariant } from './errors.mjs';
+import path from 'node:path';
 
 export const GRAPH_LIMITS = Object.freeze({ nodes: 32, edges: 96, bytes: 256 * 1024 });
 const RESERVED = new Set(['.git', '.codex', '.trash', '.home', '.tmp']);
@@ -32,6 +33,21 @@ export function reviewPolicy(value = {}) {
   return { mode, finalMode, maxRework, maxModelCalls };
 }
 
+// Only the submission boundary accepts absolute paths. Generic file/tools stay relative-only.
+export function deliveryRelativePath(value, root, canonicalRoot = root) {
+  const raw = graphText(value, '交付路径', 2000).replaceAll('\\', '/');
+  invariant(!raw.split('/').includes('..'), 400, 'INVALID_GRAPH_PATH', '交付路径不能包含上级目录。');
+  if (!path.isAbsolute(raw)) return graphRelativePath(raw);
+  const candidates = [root, canonicalRoot].map(base => path.relative(base, raw));
+  const relative = candidates.find(p => p && p !== '..' && !p.startsWith(`..${path.sep}`) && !path.isAbsolute(p));
+  invariant(relative, 400, 'INVALID_GRAPH_PATH', '只允许当前任务工作区内的文件。');
+  return graphRelativePath(relative);
+}
+
+export function nodeReviewMode(node, policy) {
+  return node.reviewMode || (node.completionGate ? policy.finalMode : policy.mode);
+}
+
 export function validateGraph(input, { candidateIds = null, employeeFor = null } = {}) {
   invariant(input && typeof input === 'object' && !Array.isArray(input)
     && Buffer.byteLength(JSON.stringify(input)) <= GRAPH_LIMITS.bytes,
@@ -59,6 +75,8 @@ export function validateGraph(input, { candidateIds = null, employeeFor = null }
     invariant(Array.isArray(node.outputs) && node.outputs.length <= 30,
       400, 'INVALID_OUTPUTS', '成果须为最多 30 个相对文件路径；人工说明任务可为空。');
     const outputs = node.outputs.map(graphRelativePath);
+    invariant(node.reviewMode == null || ['auto', 'assisted'].includes(node.reviewMode),
+      400, 'INVALID_REVIEW_POLICY', '节点审核仅支持自动审核或老板审核。');
     invariant(new Set(outputs).size === outputs.length, 400, 'INVALID_OUTPUTS', '成果路径不能重复。');
     let dueAt = null;
     if (node.dueAt) {
@@ -68,6 +86,7 @@ export function validateGraph(input, { candidateIds = null, employeeFor = null }
     return { key, assigneeUserId, title: graphText(node.title, '任务标题', 160),
       acceptance: graphText(node.acceptance, '验收标准'), dependsOn: [...node.dependsOn], checklist, outputs,
       dueAt, completionGate: node.completionGate === true,
+      ...(node.reviewMode ? { reviewMode: node.reviewMode } : {}),
       requiresIndependentValidation: node.requiresIndependentValidation === true };
   });
   const byKey = new Map(nodes.map((n) => [n.key, n]));

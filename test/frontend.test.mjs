@@ -1,13 +1,40 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { graphLayout } from '../public/work-graph.js';
+import { graphLayout, WorkGraphUI } from '../public/work-graph.js';
 
 const app = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
 const boss = fs.readFileSync(new URL('../public/boss.js', import.meta.url), 'utf8');
 const styles = fs.readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
 const workGraph = fs.readFileSync(new URL('../public/work-graph.js', import.meta.url), 'utf8');
+
+test('delivery drawer exposes multi-upload, confined paths, immutable thumbnails and two node modes', () => {
+  assert.match(workGraph, /id="graph-upload-input" type="file" multiple/);
+  assert.ok(workGraph.includes('zone.ondrop'));
+  assert.ok(workGraph.includes('crypto.subtle.digest'));
+  assert.ok(workGraph.includes('工作区文件路径（每行一个）'));
+  assert.ok(workGraph.includes('name="nodeReviewMode"'));
+  assert.ok(workGraph.includes('AI 自动审核 · 推进 / 打回'));
+  assert.ok(workGraph.includes('老板审核 · AI 提供意见'));
+  assert.ok(workGraph.includes('&preview=1'));
+  assert.ok(workGraph.includes('r.detail.coverage'));
+  assert.ok(workGraph.includes('确认提交结果（重试）'));
+  assert.ok(styles.includes('.graph-attachment img'));
+});
+
+test('selected uploads can fulfill a required file rather than always creating unrelated attachments', () => {
+  const ui = new WorkGraphUI({ toast: () => assert.fail('unexpected upload rejection') });
+  ui.detail = { uploads: [], node: { task: { id: 'task' }, version: 1, requiredOutputs: ['reports/result.pdf'] } };
+  ui.renderUploads = () => {};
+  ui.addUploads([new File(['document'], 'result.pdf'), new File(['notes'], 'notes.txt')]);
+  assert.equal(ui.detail.uploads[0].path, 'reports/result.pdf');
+  assert.match(ui.detail.uploads[1].path, /^deliveries\/task\/v1\//);
+  assert.equal(ui.detail.uploads[0].owned, false);
+  ui.detail.submissionBody = { idempotencyKey: 'uncertain' };
+  ui.addUploads([new File(['later'], 'later.txt')]);
+  assert.equal(ui.detail.uploads.length, 2);
+});
 
 function frontendFunction(name) {
   const match = app.match(new RegExp(`function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}`));

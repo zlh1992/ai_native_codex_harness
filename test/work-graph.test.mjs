@@ -6,7 +6,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { HarnessDatabase } from '../src/db.mjs';
 import { WorkGraphStore } from '../src/work-graph-store.mjs';
-import { validateGraph, graphRelativePath } from '../src/work-graph-contract.mjs';
+import { validateGraph, graphRelativePath, deliveryRelativePath, nodeReviewMode } from '../src/work-graph-contract.mjs';
 import { WorkspaceService } from '../src/fs-service.mjs';
 import { WorktreeService } from '../src/worktree-service.mjs';
 import { ProjectShareService } from '../src/project-share-service.mjs';
@@ -14,6 +14,7 @@ import { WorkGraphService } from '../src/work-graph-service.mjs';
 import { ensureSubmissionSchema } from '../src/work-graph-schema.mjs';
 import { WorkflowScheduler } from '../src/workflow-scheduler.mjs';
 import { TaskReviewService } from '../src/task-review-service.mjs';
+import { ProjectContextService } from '../src/project-context-service.mjs';
 
 function fixture(t) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-work-graph-'));
@@ -56,6 +57,22 @@ test('graph validates a human fan-out/join and rejects cycles, missing employees
   }
 });
 
+test('absolute delivery input is confined to this workspace; node overrides are explicit and validated', (t) => {
+  const f = fixture(t);
+  assert.equal(deliveryRelativePath('/workspace/member/report.pdf', '/workspace/member'), 'report.pdf');
+  assert.equal(deliveryRelativePath('report.pdf', '/workspace/member'), 'report.pdf');
+  assert.equal(deliveryRelativePath('/private/var/work/report.pdf', '/var/work', '/private/var/work'), 'report.pdf');
+  for (const value of ['/workspace/member-other/report.pdf', '/etc/passwd', '/workspace/member/../secret', '/workspace/member/.GiT/config']) {
+    assert.throws(() => deliveryRelativePath(value, '/workspace/member'), { code: 'INVALID_GRAPH_PATH' });
+  }
+  f.graph.nodes[0].reviewMode = 'assisted';
+  const graph = validateGraph(f.graph);
+  assert.equal(nodeReviewMode(graph.nodes[0], { mode: 'auto' }), 'assisted');
+  assert.equal(nodeReviewMode(graph.nodes[1], { mode: 'auto' }), 'auto');
+  f.graph.nodes[0].reviewMode = 'unknown';
+  assert.throws(() => validateGraph(f.graph), { code: 'INVALID_REVIEW_POLICY' });
+});
+
 function services(f) {
   const workspace = new WorkspaceService(f.config);
   const worktrees = new WorktreeService(f.config);
@@ -68,6 +85,31 @@ function services(f) {
   const reviews = new TaskReviewService({ ...f, workspace, worktrees, codex, graphs });
   return { workspace, worktrees, codex, busy, graphs, shares, reviews };
 }
+
+test('delivery validates ordinary files and extraction rechecks authorization after await', async (t) => {
+  const f = fixture(t); const s = services(f); const run = f.start();
+  const preparation = f.store.claimJob(); s.shares.prepareWorkflow(preparation); f.store.finishJob(preparation.id, preparation.leaseToken);
+  s.graphs.reconcile(run.id);
+  let task = f.store.tasks(run.id)[0];
+  const project = f.db.getProjectForUser(f.project.id, task.assigneeUserId);
+  s.workspace.writeFile(project, 'evidence.md', 'fixed text');
+  const absolute = path.join(s.workspace.projectRoot(project), 'evidence.md');
+  assert.equal(s.graphs.deliveryFiles(task.id, task.assigneeUserId, { taskVersion: 1, outputs: [absolute] })[0].path, 'evidence.md');
+  fs.symlinkSync('/etc/passwd', path.join(s.workspace.projectRoot(project), 'outside'));
+  assert.throws(() => s.graphs.deliveryFiles(task.id, task.assigneeUserId, { taskVersion: 1, outputs: ['outside'] }), { code: 'SYMLINK_NOT_ALLOWED' });
+  fs.unlinkSync(path.join(s.workspace.projectRoot(project), 'outside'));
+  task = s.graphs.updateChecklist(task.id, task.assigneeUserId, { taskVersion: 1, revision: task.checklistRevision, items: task.checklist.map(i => ({ id: i.id, done: true })) });
+  s.busy.add(project.accessId);
+  assert.throws(() => s.graphs.submit(task.id, task.assigneeUserId, { taskVersion: 1, checklistRevision: task.checklistRevision, idempotencyKey: randomUUID(), kind: 'manual', resultSummary: 'done' }), { code: 'WORKSPACE_BUSY' });
+  s.busy.clear();
+  const submission = s.graphs.submit(task.id, task.assigneeUserId, { taskVersion: 1, checklistRevision: task.checklistRevision,
+    idempotencyKey: randomUUID(), kind: 'manual', resultSummary: 'done', outputs: [absolute] });
+  const context = new ProjectContextService({ ...f, ...s, extractText: async () => {
+    await Promise.resolve(); f.db.updateUser(f.a.id, { status: 'disabled' });
+    return { content: 'must not escape', complete: true, reason: null };
+  } });
+  await assert.rejects(() => context.review(submission.id, f.boss.id), { code: 'MEMBER_POLICY_CHANGED' });
+});
 
 test('three humans deliver a fan-out/join with rework, fixed evidence, and real downstream Git inputs', (t) => {
   const f = fixture(t); const s = services(f);
