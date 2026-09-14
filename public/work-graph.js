@@ -1,3 +1,5 @@
+import { KanbanBoard, taskColumn, taskColumns } from './kanban.js';
+import { sessionFetch, sessionUrl } from './employee-session.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const all = (selector, root = document) => [...root.querySelectorAll(selector)];
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[c]);
@@ -9,23 +11,40 @@ const reasons = { PREPARING: '正在准备成员共享', WAITING_DEPENDENCIES: '
   INPUT_WORKTREE_DIRTY: '有未提交工作，请先处理', INPUT_BASE_DIVERGED: '输入基线分叉，请处理冲突',
   PROJECT_ACCESS_REVOKED: '项目授权已撤销', MEMBER_POLICY_CHANGED: '员工策略变化，请老板处理',
   CODEX_NOT_READY: '等待 Codex 服务', MODEL_DELIVERY_UNCERTAIN: '上次调用结果不确定，请核对后台对话',
+  PLANNER_TRANSIENT_NETWORK: '模型响应流网络中断，尚未保存计划',
+  WORKFLOW_RESULT_MISSING: '模型已结束，但未提交有效的结构化结果',
   DELIVERY_MERGE_CONFLICT: '成果合并冲突，请处理', WORKFLOW_AUTHORIZATION_CHANGED: '账号策略变化，请恢复授权',
   INDEPENDENT_VALIDATION_REQUIRED: '需要独立验证，请老板验收', REWORK_LIMIT_REACHED: '已到自动返工上限',
   DELIVERY_SCOPE_REVIEW_REQUIRED: '存在无关工作，请核对交付范围', MODEL_BUDGET_EXCEEDED: '已到模型调用预算' };
 const reason = (code) => reasons[code] || (code ? '等待处理，请查看后台任务' : '');
 const date = (value) => value ? new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
+const runLabels = { queued: '等待模型容量', starting: '连接模型', running: '模型生成中', completed: '模型已结束', failed: '模型调用失败', interrupted: '模型已中断' };
+export function jobProgress(job) {
+  const p = job.progress || {};
+  return `配置模型 ${p.configuredModel || '—'} / ${p.configuredEffort || '—'} · 已调用 ${p.modelCalls || 0} 次 · ${runLabels[p.runStatus] || '等待调度'} · ${p.receiptSaved ? '已保存业务结果' : '尚未保存业务结果'}`;
+}
+export function jobAttentionMarkup(job) {
+  const safe = job.recovery === 'retry'; const resume = job.recovery === 'resume';
+  return `<div class="graph-job"><b>${job.type === 'plan.generate' ? '计划生成待恢复' : '后台任务待恢复'}</b><span>${escape(safe && job.errorCode === 'MODEL_DELIVERY_UNCERTAIN' ? reasons.PLANNER_TRANSIENT_NETWORK : reason(job.errorCode))}</span>
+    <p>${escape(jobProgress(job))}</p><p>开始 ${escape(date(job.progress?.startedAt))} · 结束 ${escape(date(job.progress?.completedAt))} · 最近工具活动 ${escape(date(job.progress?.lastToolAt))}</p>
+    <p>${resume ? '已有持久结果，将恢复后续步骤，不重新调用模型。' : safe ? '可重新尝试；保留历史，自动尝试达到上限后停止。重试可能增加模型用量。' : '无法确认先前调用是否生效。请先查看后台记录；重新调用可能重复工作并增加模型用量。'}</p>
+    ${job.chatId ? `<button class="secondary" data-job-chat="${escape(job.chatId)}">查看后台记录</button>` : ''}
+    ${job.recovery === 'confirm' ? `<label><input type="checkbox" data-ack="${escape(job.id)}"> 已查看记录，确认重新调用</label>` : ''}
+    <button class="secondary" data-retry-job="${escape(job.id)}" ${job.recovery === 'blocked' ? 'disabled' : ''}>${resume ? '恢复后续步骤' : '重新尝试'}</button></div>`;
+}
 const reviewLabel = mode => mode === 'auto' ? 'AI 自动审核 · 推进 / 打回' : mode === 'manual' ? '老板人工审核（旧模式）' : '老板审核 · AI 提供意见';
 const coverageLabel = code => ({ UNSUPPORTED_FORMAT: '格式暂不支持内容审核', NO_EXTRACTABLE_TEXT: '未提取到正文',
   DOCX_NON_TEXT_CONTENT: '含图片/嵌入内容或解析警告', PDF_NON_TEXT_CONTENT: '含图片或无文本页',
   TEXT_LIMIT: '文本超出审核预算', PAGE_LIMIT: '超过页数预算', REVIEW_BUDGET: '超过本轮审核预算',
   EXTRACTION_FAILED: '解析失败或超时', EXTRACTOR_UNAVAILABLE: '解析器不可用', FILE_LIMIT: '文件超限' })[code] || code;
 const isRaster = name => /\.(png|jpe?g|gif|webp)$/i.test(name);
-const artifactUrl = (id, file) => `/api/task-submissions/${encodeURIComponent(id)}/artifact?path=${encodeURIComponent(file.path)}`;
+const artifactUrl = (id, file) => sessionUrl(`/api/task-submissions/${encodeURIComponent(id)}/artifact?path=${encodeURIComponent(file.path)}`);
 const GRAPH_NODE_WIDTH = 264;
 const GRAPH_NODE_HEIGHT = 176;
 const GRAPH_COLUMN_STEP = 320;
 const GRAPH_ROW_STEP = 200;
 const viewHelp = {
+  kanban: '任务看板：按真实状态分列；点击卡片查看清单、附件和验收。排序只影响你的显示，不改变任务状态。',
   graph: '依赖图：按前后置关系排列任务，连线表示必须先完成的依赖；可横向、纵向滚动和缩放。',
   list: '状态列表：不画依赖连线，按任务卡片集中查看负责人、状态和截止信息。',
   events: '事件记录：按时间倒序查看工作图的状态变化与推进原因。',
@@ -50,28 +69,38 @@ export function graphLayout(nodes) {
 export class WorkGraphUI {
   constructor({ api, toast, openTask, openFile, refreshTasks }) {
     Object.assign(this, { api, toast, openTaskChat: openTask, openFile, refreshTasks });
-    this.zoom = 1; this.graphs = []; this.mode = globalThis.matchMedia?.('(max-width: 760px)').matches ? 'list' : 'graph'; this.events = []; this.jobs = [];
+    this.zoom = 1; this.graphs = []; this.mode = 'kanban'; this.events = []; this.jobs = []; this.selection = 0;
+  }
+  dispose() {
+    this.selection++; this.source?.close(); this.source = null; clearInterval(this.poller); clearTimeout(this.refreshTimer);
+    this.handlers?.abort(); this.kanban?.destroy(); this.kanban = null;
+    for (const entry of this.detail?.uploads || []) if (entry.preview) URL.revokeObjectURL(entry.preview);
+    this.detail = null; this.current = null; this.events = []; this.graphs = []; this.jobs = []; this.projectId = ''; this.graphId = null;
+    this.initialized = false; this.refreshing = false; this.employeeRefresh = null; this.owner = false;
+    this.panel?.replaceChildren(); this.panel?.classList.add('hidden');
   }
   async initialize(user, projects) {
+    projects = projects.filter(p => p.projectType !== 'local_private');
     this.user = user; this.projects = projects; this.owner = user.role === 'admin';
     this.panel = $('#work-graph-panel'); this.drawer = $('#work-graph-drawer');
     if (!this.panel || this.initialized) return;
     this.initialized = true;
-    this.drawer.addEventListener('click', (event) => this.drawerAction(event).catch((e) => this.toast(e.message, 'error')));
-    this.drawer.addEventListener('cancel', event => { if (this.detail?.submitting) event.preventDefault(); });
+    this.handlers = new AbortController(); const options = { signal: this.handlers.signal };
+    this.drawer.addEventListener('click', (event) => this.drawerAction(event).catch((e) => this.toast(e.message, 'error')), options);
+    this.drawer.addEventListener('cancel', event => { if (this.detail?.submitting) event.preventDefault(); }, options);
     this.drawer.addEventListener('close', () => {
       for (const entry of this.detail?.uploads || []) if (entry.preview) URL.revokeObjectURL(entry.preview);
-    });
-    this.panel.addEventListener('click', (event) => this.action(event).catch((e) => this.toast(e.message, 'error')));
+    }, options);
+    this.panel.addEventListener('click', (event) => this.action(event).catch((e) => this.toast(e.message, 'error')), options);
     this.panel.addEventListener('change', (event) => {
       if (event.target.id === 'graph-project') this.selectProject(event.target.value).catch((e) => this.toast(e.message, 'error'));
       if (event.target.id === 'graph-select') { this.graphId = event.target.value; this.refresh().catch((e) => this.toast(e.message, 'error')); }
-    });
+    }, options);
     if (!this.owner) {
-      this.poller = setInterval(() => { if (document.visibilityState === 'visible') this.refreshTasks().catch(() => {}); }, 5000);
+      this.poller = setInterval(() => { if (document.visibilityState === 'visible') this.refreshEmployee().catch(() => {}); }, 5000);
       return;
     }
-    $('.employee-hero h1').textContent = '项目推进';
+    $('.employee-hero h1').textContent = '团队任务看板';
     $('.employee-hero .eyebrow').textContent = 'TEAM WORK GRAPH';
     $('.employee-hero p:last-child').textContent = '从项目资料与团队能力生成计划，让交付、验收与下一步持续推进。';
     const captions = ['进行中', '待验收', '返工 / 阻塞', '已通过'];
@@ -80,43 +109,68 @@ export class WorkGraphUI {
     this.panel.classList.remove('hidden');
     this.panel.innerHTML = `<div class="graph-project-row"><label>项目<select id="graph-project">${projects.filter((p) => p.accessKind === 'owner')
       .map((p) => `<option value="${escape(p.id)}">${escape(p.name)}</option>`).join('')}</select></label><span>每个项目一张活动工作图 · 员工独立交付</span></div>
-      <form id="graph-generate-form" class="graph-generate"><label class="graph-goal">这次想完成什么？<textarea name="prompt" rows="2" maxlength="8000" required placeholder="例如：请团队完成新版产品方案，设计和实现并行，最后汇总验收"></textarea></label>
+      <details class="graph-generate-details"><summary>＋ 规划新任务 · 设置参与员工与验收方式</summary><form id="graph-generate-form" class="graph-generate"><label class="graph-goal">这次想完成什么？<textarea name="prompt" rows="2" maxlength="8000" required placeholder="例如：请团队完成新版产品方案，设计和实现并行，最后汇总验收"></textarea></label>
       <div class="graph-options"><label>默认审核方式<select name="reviewMode"><option value="assisted">老板审核 · AI 提供意见</option><option value="auto">AI 自动审核 · 推进 / 打回</option></select></label>
       <label>最终交付<select name="finalMode"><option value="same">跟随审核方式</option><option value="assisted">老板最终验收 · AI 提供意见</option></select></label>
       <button class="secondary" type="submit" data-preview="true">生成预览</button><button class="primary" type="submit">EXECUTE · 生成并启动</button></div>
       <details class="graph-sources"><summary>参与员工与项目资料</summary><div id="graph-candidates" class="graph-candidates"></div>
       <label>使用的项目文件（每行一个；留空自动选取文本资料）<textarea name="paths" rows="2" placeholder="README.md"></textarea></label>
-      <small>启动将向参与员工分享项目文件，并按所选方式持续验收。规划对话不会复制给员工。</small></details></form>
+      <small>启动将向参与员工分享项目文件，并按所选方式持续验收。规划对话不会复制给员工。</small></details></form></details>
       <div id="graph-generation-status" role="status"></div><div class="graph-toolbar"><div><p class="eyebrow">WORK GRAPH</p><select id="graph-select" aria-label="选择工作图"></select></div>
-      <div class="graph-view-actions"><button class="secondary" data-view-mode="graph">依赖图</button><button class="secondary" data-view-mode="list">状态列表</button><button class="secondary" data-view-mode="events">事件记录</button><button class="secondary" data-zoom="-1" aria-label="缩小依赖图">−</button><button class="secondary" data-zoom="1" aria-label="放大依赖图">＋</button><button class="secondary" data-refresh-graph>刷新</button></div></div>
+      <div class="graph-view-actions"><button class="secondary" data-view-mode="kanban">任务看板</button><button class="secondary" data-view-mode="graph">依赖图</button><button class="secondary" data-view-mode="list">状态列表</button><button class="secondary" data-view-mode="events">事件记录</button><button class="secondary" data-zoom="-1" aria-label="缩小依赖图">−</button><button class="secondary" data-zoom="1" aria-label="放大依赖图">＋</button><button class="secondary" data-refresh-graph>刷新</button></div></div>
+      <label class="board-search" id="graph-search-label">搜索<input id="graph-search" type="search" placeholder="任务或负责人" aria-label="搜索团队任务"></label>
       <p id="graph-view-help" class="graph-view-help" aria-live="polite"></p><div id="graph-run-bar"></div><div id="graph-board"></div><div id="graph-job-list"></div>`;
     $('#graph-generate-form').addEventListener('submit', (event) => { event.preventDefault(); this.generate(event).catch((e) => this.toast(e.message, 'error')); });
+    $('#graph-search').addEventListener('input', () => this.render());
     await this.selectProject($('#graph-project').value);
   }
   async updateProjects(projects) {
     if (!this.initialized || !this.owner) return;
+    projects = projects.filter(p => p.projectType !== 'local_private');
     this.projects = projects;
     const owned = projects.filter(p => p.accessKind === 'owner');
     $('#graph-project').innerHTML = owned.map(p => `<option value="${escape(p.id)}" ${p.id === this.projectId ? 'selected' : ''}>${escape(p.name)}</option>`).join('');
     if (!owned.some(p => p.id === this.projectId)) await this.selectProject(owned[0]?.id || '');
   }
+  async refreshEmployee() {
+    if (this.employeeRefresh) return;
+    const token = {}; this.employeeRefresh = token;
+    const selection = this.selection;
+    try {
+      await this.refreshTasks();
+      const detail = this.detail;
+      // Never replace an employee's draft, chosen upload, or uncertain submission.
+      if (selection !== this.selection || !this.drawer.open || !detail || detail.graph.owner
+        || detail.submitting || $('#graph-submit-form', this.drawer)) return;
+      const { graph } = await this.api(`/api/work-graphs/${detail.graph.id}`);
+      if (selection !== this.selection || this.detail !== detail || !this.drawer.open) return;
+      const node = graph.nodes.find(node => node.key === detail.node.key);
+      if (node && (JSON.stringify(node) !== JSON.stringify(detail.node) || graph.run?.status !== detail.graph.run?.status)) {
+        const scroll = this.drawer.scrollTop;
+        this.showNode(graph, node.key); this.drawer.scrollTop = scroll;
+      }
+    } finally { if (this.employeeRefresh === token) this.employeeRefresh = null; }
+  }
   async selectProject(id) {
+    const selection = ++this.selection;
+    this.kanban?.destroy(); this.kanban = null; this.current = null;
     this.source?.close(); clearInterval(this.poller); this.projectId = id; this.graphId = null; this.events = []; this.generationJob = null;
     if (!id) { $('#graph-board').textContent = '先在驾驶舱或工作台创建项目。'; return; }
     const data = await this.api(`/api/projects/${id}/work-graphs/candidates`);
-    if (id !== this.projectId) return;
+    if (id !== this.projectId || selection !== this.selection) return;
     this.candidates = data.employees;
     $('#graph-candidates').innerHTML = data.employees.map((u) => `<label><input type="checkbox" name="candidate" value="${escape(u.id)}" ${u.profile.availability === 'unavailable' ? 'disabled' : 'checked'}> ${escape(u.displayName)} <small>${escape(u.profile.jobTitle || '未设置岗位')}</small></label>`).join('') || '请先在驾驶舱创建员工。';
     const pending = localStorage.getItem(`work-graph-job:${id}`); if (pending) this.generationJobId = pending;
     else this.generationJobId = null;
     await this.refresh();
+    if (id !== this.projectId || selection !== this.selection) return;
     this.subscribe(id);
     this.poller = setInterval(() => {
       if (document.visibilityState === 'visible') this.refresh().catch(() => {});
     }, 5000);
   }
   subscribe(id) {
-    this.source = new EventSource(`/api/projects/${id}/events?after=0`);
+    this.source = new EventSource(sessionUrl(`/api/projects/${id}/events?after=0`));
     const source = this.source;
     this.source.addEventListener('project_event', (event) => {
       if (this.source !== source || this.projectId !== id) return;
@@ -127,31 +181,33 @@ export class WorkGraphUI {
     });
   }
   async refresh() {
-    if (!this.owner || !this.projectId || this.refreshing) return;
-    this.refreshing = true;
+    const selection = this.selection;
+    if (!this.owner || !this.projectId || this.refreshing === selection) return;
+    this.refreshing = selection;
     try {
       const projectId = this.projectId;
       const data = await this.api(`/api/projects/${projectId}/work-graphs`);
-      if (projectId !== this.projectId) return;
+      if (projectId !== this.projectId || selection !== this.selection) return;
       this.graphs = data.graphs;
       if (!this.graphs.some((g) => g.id === this.graphId)) this.graphId = this.graphs[0]?.id || null;
       if (this.graphId) {
         const selectedId = this.graphId;
         const detail = await this.api(`/api/work-graphs/${selectedId}`);
-        if (projectId !== this.projectId || selectedId !== this.graphId) return;
+        if (projectId !== this.projectId || selectedId !== this.graphId || selection !== this.selection) return;
         this.jobs = detail.jobs;
         this.current = detail.graph;
       } else { this.current = null; this.jobs = []; }
       $('#graph-select').innerHTML = this.graphs.map((g) => `<option value="${escape(g.id)}" ${g.id === this.graphId ? 'selected' : ''}>${escape(g.title)} · V${g.version}</option>`).join('');
       if (this.generationJobId) {
         const { job } = await this.api(`/api/work-graph-jobs/${this.generationJobId}`);
+        if (selection !== this.selection || projectId !== this.projectId) return;
         this.generationJob = job;
-        $('#graph-generation-status').textContent = `计划生成：${labels[job.status] || job.status}${job.errorCode ? ` · ${reason(job.errorCode)}` : ''}`;
+        $('#graph-generation-status').textContent = `计划生成：${labels[job.status] || job.status} · ${jobProgress(job)}${job.status === 'retry_wait' ? ` · 下次尝试 ${date(job.dueAt)}（调度 ${job.attempt}/${job.maxAttempts}）` : job.status === 'needs_attention' ? ' · 请查看下方恢复卡片' : ''}`;
         if (job.status === 'succeeded') { localStorage.removeItem(`work-graph-job:${projectId}`); this.generationJobId = null; }
         if (job.status === 'needs_attention' && !this.jobs.some((j) => j.id === job.id)) this.jobs.unshift(job);
       }
-      this.render();
-    } finally { this.refreshing = false; }
+      if (selection === this.selection && projectId === this.projectId) this.render();
+    } finally { if (this.refreshing === selection) this.refreshing = false; }
   }
   render() {
     const graph = this.current; const nodes = graph?.nodes || [];
@@ -171,7 +227,20 @@ export class WorkGraphUI {
       ${canEdit ? '<button class="secondary" data-edit-plan>编辑计划</button><button class="primary" data-start-graph>启动此版本</button>'
         : `<button class="secondary" data-control="${run.status === 'paused' ? 'resume' : 'pause'}">${run.status === 'paused' ? '恢复推进' : '暂停'}</button><button class="secondary danger" data-control="cancel">取消运行</button>`}` : '';
     const board = $('#graph-board');
+    $('#graph-search-label').hidden = this.mode !== 'kanban';
+    if (this.mode !== 'kanban') { this.kanban?.destroy(); this.kanban = null; }
+    if (!graph) $('.graph-generate-details').open = true;
     if (!graph) { board.className = 'graph-empty'; board.textContent = '输入项目目标，生成团队的第一张工作图。'; }
+    else if (this.mode === 'kanban') {
+      board.className = '';
+      if (this.kanban?.key !== `portal-board:${this.user.id}:graph:${graph.id}`) { this.kanban?.destroy(); this.kanban = null; }
+      this.kanban ||= new KanbanBoard(board, { key: `${this.user.id}:graph:${graph.id}`, onOpen: key => this.showNode(this.current, key) });
+      this.kanban.render(taskColumns, nodes.map(node => ({ id: node.key, column: taskColumn(node), title: node.title,
+        tag: node.completionGate ? '最终交付' : reviewLabel(node.reviewMode), person: node.assigneeName,
+        description: reason(node.blockedReason) || node.acceptance || '',
+        meta: `V${node.version} · ${node.dueAt ? date(node.dueAt) : '未设截止日期'}`,
+        search: `${node.title} ${node.assigneeName} ${labels[node.status]}` })), $('#graph-search').value);
+    }
     else if (this.mode === 'events') {
       board.className = 'graph-events';
       board.innerHTML = this.events.slice().reverse().map((e) => `<article><time>${date(e.createdAt)}</time><b>${escape(e.type)}</b><span>${escape(reason(e.payload.reason) || labels[e.payload.status] || '')}</span></article>`).join('') || '正在读取项目事件；暂无记录时等待新事件。';
@@ -198,8 +267,10 @@ export class WorkGraphUI {
         });
       }
     }
-    $('#graph-job-list').innerHTML = [...this.jobs, ...(this.generationJob?.status === 'needs_attention' && !this.jobs.some(j => j.id === this.generationJob.id) ? [this.generationJob] : [])].filter((j) => j.status === 'needs_attention').map((j) => `<div class="graph-job"><b>后台任务需要处理</b><span>${escape(reason(j.errorCode))}</span>
-      <label><input type="checkbox" data-ack="${escape(j.id)}"> 已核对后台对话，可重新调用</label><button class="secondary" data-retry-job="${escape(j.id)}">重试</button></div>`).join('');
+    const acknowledged = new Set(all('[data-ack]:checked').map(node => node.dataset.ack));
+    $('#graph-job-list').innerHTML = [...this.jobs, ...(this.generationJob?.status === 'needs_attention' && !this.jobs.some(j => j.id === this.generationJob.id) ? [this.generationJob] : [])].filter((j) => j.status === 'needs_attention').map(jobAttentionMarkup).join('');
+    all('[data-ack]').forEach(node => { node.checked = acknowledged.has(node.dataset.ack); });
+    all('[data-retry-job]').forEach(node => { node.disabled ||= this.retryingJob === node.dataset.retryJob; });
     if (this.drawer.open && this.detail?.graph.owner && graph?.id === this.detail.graph.id) {
       const node = graph.nodes.find(n => n.key === this.detail.node.key);
       if (node && JSON.stringify(node) !== JSON.stringify(this.detail.node)) {
@@ -241,9 +312,22 @@ export class WorkGraphUI {
       await this.api(`/api/work-graphs/${this.graphId}/start`, { method: 'POST', body: { expectedVersion: this.current.version,
         idempotencyKey: crypto.randomUUID(), reviewPolicy: { mode, finalMode: form.get('finalMode') === 'same' ? mode : 'assisted' } } });
       await this.refresh();
+    } else if (button.dataset.jobChat) {
+      const selection = this.selection; const chatId = button.dataset.jobChat;
+      this.detail = null;
+      this.drawer.innerHTML = '<button class="secondary" data-close-drawer>关闭</button><p>正在读取后台记录…</p>';
+      this.drawer.showModal();
+      const pending = this.drawer.firstElementChild;
+      const data = await this.api(`/api/chats/${encodeURIComponent(chatId)}`);
+      if (selection !== this.selection || !this.drawer.open || pending !== this.drawer.firstElementChild) return;
+      this.drawer.innerHTML = `<button class="secondary" data-close-drawer>关闭</button><h2>后台私有记录（只读）</h2><p>记录不是任务成功的保证；结构化结果是否已保存，以恢复卡片为准。</p>${data.messages.map(m => `<section><b>${escape(m.role)}</b><p class="graph-preserve">${escape(m.content)}</p></section>`).join('') || '<p>暂无消息记录。</p>'}`;
     } else if (button.dataset.retryJob) {
-      await this.api(`/api/work-graph-jobs/${button.dataset.retryJob}/retry`, { method: 'POST', body: {
-        acknowledgeUncertain: $(`[data-ack="${button.dataset.retryJob}"]`).checked } }); await this.refresh();
+      if (this.retryingJob) return;
+      this.retryingJob = button.dataset.retryJob; button.disabled = true;
+      try {
+        await this.api(`/api/work-graph-jobs/${button.dataset.retryJob}/retry`, { method: 'POST', body: {
+          acknowledgeUncertain: $(`[data-ack="${button.dataset.retryJob}"]`)?.checked === true } }); await this.refresh();
+      } finally { this.retryingJob = null; button.disabled = false; }
     }
   }
   async inspect(task, native = null) {
@@ -344,7 +428,7 @@ export class WorkGraphUI {
           entry.owned = true;
         } catch (error) {
           if (error.code !== 'FILE_EXISTS') throw error;
-          const response = await fetch(`/api/projects/${this.detail.graph.projectId}/raw?path=${encodeURIComponent(entry.path)}`, { credentials: 'same-origin' });
+          const response = await sessionFetch(`/api/projects/${this.detail.graph.projectId}/raw?path=${encodeURIComponent(entry.path)}`, { credentials: 'same-origin' });
           if (!response.ok) throw error;
           const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', await entry.file.arrayBuffer()))].map(b => b.toString(16).padStart(2, '0')).join('');
           const actual = [...new Uint8Array(await crypto.subtle.digest('SHA-256', await response.arrayBuffer()))].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -390,7 +474,7 @@ export class WorkGraphUI {
     else if (button.hasAttribute('data-open-task')) { this.drawer.close(); await this.openTaskChat(this.detail.node.task.id); }
     else if (button.dataset.openOutput) { this.drawer.close(); await this.openFile(this.detail.graph.projectId, button.dataset.openOutput); }
     else if (button.dataset.previewSubmission) {
-      const endpoint = `/api/task-submissions/${encodeURIComponent(button.dataset.previewSubmission)}/artifact?path=${encodeURIComponent(button.dataset.path)}`;
+      const endpoint = sessionUrl(`/api/task-submissions/${encodeURIComponent(button.dataset.previewSubmission)}/artifact?path=${encodeURIComponent(button.dataset.path)}`);
       const { file } = await this.api(endpoint);
       let preview = $('#graph-artifact-preview', this.drawer);
       if (!preview) { preview = document.createElement('section'); preview.id = 'graph-artifact-preview'; this.drawer.append(preview); }

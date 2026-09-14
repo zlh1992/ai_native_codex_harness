@@ -86,7 +86,7 @@ node src/cli.mjs reset-password --username=superadmin
 
 规范入口：[项目规格](spec/index.md) · [架构规格与强制约束](spec/architecture/index.md) · [实施报告](spec/report/index.md)
 
-操作资料：[架构与安全边界（简版）](docs/ARCHITECTURE.md) · [用户记忆运维](docs/MEMORY.md) · [超级管理员指南](docs/SUPER_ADMIN_GUIDE.md) · [公网部署指南](docs/PUBLIC_DEPLOYMENT.md)
+操作资料：[架构与安全边界（简版）](docs/ARCHITECTURE.md) · [用户记忆运维](docs/MEMORY.md) · [本地隐私项目](docs/LOCAL_PRIVATE_PROJECTS.md) · [超级管理员指南](docs/SUPER_ADMIN_GUIDE.md) · [公网部署指南](docs/PUBLIC_DEPLOYMENT.md)
 
 ## 多人 Work Graph
 

@@ -1,5 +1,7 @@
 # 06 持久化、事件与恢复
 
+隐私项目增加 DSH JSONL 与 local_session_id（不向浏览器公开），使用独立 user/project/chat 容器；记录正文仅可经 chat ACL 读取，不进入全局 journal/日志。空白会话须先物化，恢复失败保留映射，显式 reset 记录 engine=deepseek 的 lineage；重启不重放遗留 inbox 或审批。详见 [第 10 章](10-local-private-projects.md)，备份不能只复制 SQLite 而遗漏本地 session。
+
 ## 三类事实源
 
 | 数据 | 事实源 | 用途 |
@@ -30,6 +32,14 @@ Portal 也不读取或写入 Codex 原生长期记忆；该能力对 Portal app-
 
 ## SSE 重放
 
+### 工具明细业务快照
+
+`tool_details` 独立于 `turn_events/audit_log`，只存当前 chat/run 的工具输入、结果、状态、退出码、起止时间和可选摘要；正文不进入 journal。GET `/api/chats/:id/tool-calls?runId=...&after=revision` 经原 chat owner 与当前 access 授权；默认最新 run，按 revision 增量每页最多 5 条。run 必须属于同 chat/user；无管理员旁路，不随项目分享复制，chat/run 删除级联清理。前端在新 run 重置 cursor，结束后继续读取迟到摘要，切换/注销清除旧投影并废弃旧响应。
+
+明细展示工具实际返回的输入/输出，不代表无限终端录制；每个输入/输出最多 4 Mi 字符，超限显式标注；秘密按字段和常见文本模式脱敏（不承诺完整 DLP）。记忆工具正文不另复制，避免记忆删除/失效后的持久旁路。命令退出码非零、超时、error 均呈现失败；未返回结果不能显示成功。旧运行缺失明细不回填。重启把未完成工具标为 interrupted、待摘要标为 unavailable，不重放工具或云端请求。
+
+普通项目完成工具的摘要是尽力而为的后台工作：固定 Luna-low、250ms 合并同一 run 最多 6 条、全局单并发、待处理最多 64 条、每条输入1200/输出1800字符、25秒超时、不重试，不占 EXECUTE lease，不阻塞下一工具或 turn 结束。失败/队满仍保留原始明细；摘要不能改变执行成功状态。隐私项目和记忆工具硬跳过云端摘要。
+
 - POST turn 的 SSE frame 带 `id:`。
 - GET run events 同时校验当前 user、chat、run 和 active project access。
 - 客户端可用 `Last-Event-ID`，或用 `after` 查询参数回退。
@@ -37,6 +47,14 @@ Portal 也不读取或写入 Codex 原生长期记忆；该能力对 Portal app-
 - 历史按最多 5000 条分页；前端循环读取到 `latestEventId`，不能只拉最后一页。
 - 收到终态事件后关闭；401/403 不重试，暂时网络错误按 1、2、5 秒退避。
 - 用户被停用或 access 被撤销后，即使已有 SSE 连接也必须终止或拒绝继续重放。
+- GET run SSE 与旧 POST turn SSE 每次投递及心跳复验原 Web session；注销立即关闭该 session 的 turn 流。旧 POST 流保留固定 `AUTH_REQUIRED` 结束事件，不向失效会话释放后台错误或任务正文。断开 Web 流不等于取消 Codex 运行，其他有效 session 仍可恢复该任务；真正中断走现有 interrupt API。
+
+## 浏览器导航与临时状态
+
+- 视图、当前项目及对话写入受限 URL 参数，浏览器前进/后退恢复对应位置。项目、对话、文件和历史恢复使用选择世代，避免 A→B→A 的旧响应覆盖新选择。
+- 输入草稿及发送重试 ID 按 chat 保存于当前页面内存；切换后恢复，注销清空，不把正文写入 localStorage。离开整个页面时对未发草稿提供浏览器提示，不承诺刷新后的持久草稿。
+- 文件编辑以已保存内容为基线；切项目、换文件或离开页面时保护未保存修改，确认放弃后才丢弃。
+- 看板个人排序仅存当前用户命名空间的卡片 ID，不保存正文或令牌，不修改服务器状态与其他用户顺序。
 
 ## 确定性消息 fallback
 
@@ -107,3 +125,5 @@ submission 的 chat/run 外键使用 `ON DELETE SET NULL`，同时保存不可�
 项目事件以 SQLite 为历史源；新页面从零重放当前授权历史，不能只恢复游标而丢弃正文。前端按事件 id 去重、倒序展示，不按最近条数删除历史；项目切换后忽略旧连接回调。连接重试使用 Last-Event-ID 继续接收。
 
 工作图 submission 支持 manual 空原生身份，业务事件采用接收者 ACL。Portal 启动恢复 job；completed 原生运行与持久结构化回执可收敛，其他不确定原生投递需人工确认重试。 详细契约见 [多人 Work Graph](09-human-work-graph.md)，操作见 [工作图指南](../../docs/WORK_GRAPH.md)。
+
+在线规划的明确终态网络失败可按第 09 章的窄条件恢复，不改变进程重启/失租约时的保守策略；手动重试不能丢弃已持久回执。旧 turn 留存用于计数与核对，不重置原生 thread 映射。

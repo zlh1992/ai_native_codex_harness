@@ -15,6 +15,77 @@ import { ensureSubmissionSchema } from '../src/work-graph-schema.mjs';
 import { WorkflowScheduler } from '../src/workflow-scheduler.mjs';
 import { TaskReviewService } from '../src/task-review-service.mjs';
 import { ProjectContextService } from '../src/project-context-service.mjs';
+import { WorkGraphRuntime } from '../src/work-graph-runtime.mjs';
+import { createWorkGraphRoutes, workflowJobView } from '../src/work-graph-routes.mjs';
+import { Readable } from 'node:stream';
+
+test('planner network retries drain, preserve history, respect attempt budget and reuse saved receipts', async t => {
+  const f = fixture(t); let calls = 0;
+  const queued = f.store.enqueue({ projectId: f.project.id, ownerId: f.boss.id, type: 'plan.generate', dedupeKey: 'network-test',
+    maxAttempts: 2, payload: { ownerEpoch: f.store.policyEpoch(f.boss.id) } });
+  const codex = { status: () => ({ ready: true }), runTurn: async ({ chat, project, user }) => {
+    calls++;
+    const run = f.db.createTurnRun({ chat, project, userId: user.id, mode: 'edit' });
+    f.store.sql.prepare('UPDATE workflow_jobs SET turn_run_id=? WHERE id=?').run(run.id, queued.id);
+    f.db.updateTurnRun(run.id, { status: 'failed', codexTurnId: `native-${calls}`,
+      errorMessage: 'stream disconnected before completion: Transport error: network error: error decoding response body' });
+    throw new Error('synthetic upstream failure');
+  } };
+  const runtime = new WorkGraphRuntime({ ...f, codex });
+  const scheduler = new WorkflowScheduler({ store: f.store, handlers: { 'plan.generate': j => runtime.runModel(j, 'planner', 'synthetic') } });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    f.store.sql.prepare('UPDATE workflow_jobs SET due_at=0 WHERE id=?').run(queued.id);
+    await scheduler.execute(f.store.claimJob());
+  }
+  assert.equal(calls, 2);
+  assert.equal(f.store.job(queued.id).status, 'needs_attention');
+  assert.equal(f.store.job(queued.id).errorCode, 'PLANNER_TRANSIENT_NETWORK');
+  const view = workflowJobView(f.store.job(queued.id), f.db, { codexModel: 'gpt-5.6-sol', codexReasoningEffort: 'high' });
+  assert.equal(view.progress.modelCalls, 2); assert.equal(view.recovery, 'retry');
+  assert.equal(JSON.stringify(view).includes('response body'), false);
+  const saved = f.plan();
+  f.store.sql.prepare("UPDATE workflow_jobs SET status='queued',due_at=0,result_json=? WHERE id=?")
+    .run(JSON.stringify({ planId: saved.id }), queued.id);
+  const leased = f.store.claimJob();
+  assert.deepEqual(await runtime.runModel(leased, 'planner', 'synthetic'), { planId: saved.id });
+  assert.equal(calls, 2);
+  f.store.sql.prepare('UPDATE workflow_jobs SET lease_until=0 WHERE id=?').run(queued.id);
+  await assert.rejects(runtime.runModel(leased, 'planner', 'synthetic'));
+});
+
+test('job retry route preserves receipts, refuses active/unknown results and enforces owner access', async t => {
+  const f = fixture(t);
+  const job = f.store.enqueue({ projectId: f.project.id, ownerId: f.boss.id, type: 'plan.generate', dedupeKey: 'route-test' });
+  const project = f.store.owner(f.project.id, f.boss.id);
+  const chat = f.db.createChat({ projectId: project.id, userId: f.boss.id, projectAccessId: project.accessId, treePath: project.treePath, title: 'Synthetic planner' });
+  f.store.sql.prepare("UPDATE chats SET purpose='planner',workflow_job_id=? WHERE id=?").run(job.id, chat.id);
+  const run = f.db.createTurnRun({ chat, project: f.project, userId: f.boss.id, mode: 'edit' });
+  const route = createWorkGraphRoutes({ ...f, config: { codexModel: 'gpt-5.6-sol' }, scheduler: { wake() {} },
+    requireMutation() {}, refreshSession: session => session });
+  const invoke = async (body = {}, user = f.boss) => {
+    const req = Readable.from([Buffer.from(JSON.stringify(body))]); req.method = 'POST'; req.headers = {};
+    let result;
+    await route(req, { writeHead() {}, end: b => { result = JSON.parse(b); } }, new URL(`http://localhost/api/work-graph-jobs/${job.id}/retry`), { user });
+    return result;
+  };
+  const set = (status, result = null) => {
+    f.db.updateTurnRun(run.id, { status });
+    f.store.sql.prepare("UPDATE workflow_jobs SET status='needs_attention',turn_run_id=?,result_json=? WHERE id=?")
+      .run(run.id, result ? JSON.stringify(result) : null, job.id);
+  };
+  set('running'); await assert.rejects(invoke({ acknowledgeUncertain: true }), { code: 'WORKFLOW_RECOVERY_BLOCKED' });
+  set('failed'); await assert.rejects(invoke(), { code: 'MODEL_DELIVERY_UNCERTAIN' });
+  await assert.rejects(invoke({ acknowledgeUncertain: true }, f.a));
+  set('failed', { planId: 'receipt' });
+  const resumed = await invoke();
+  assert.equal(resumed.job.status, 'queued');
+  assert.deepEqual(f.store.job(job.id).result, { planId: 'receipt' });
+  assert.equal(f.store.job(job.id).turnRunId, run.id);
+  set('failed');
+  f.db.updateTurnRun(run.id, { codexTurnId: 'native', errorMessage: 'stream disconnected before completion: Transport error: network error: synthetic' });
+  await invoke();
+  assert.equal(f.store.job(job.id).turnRunId, null);
+});
 
 function fixture(t) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-work-graph-'));
@@ -109,6 +180,65 @@ test('delivery validates ordinary files and extraction rechecks authorization af
     return { content: 'must not escape', complete: true, reason: null };
   } });
   await assert.rejects(() => context.review(submission.id, f.boss.id), { code: 'MEMBER_POLICY_CHANGED' });
+});
+
+test('review includes frozen upstream bytes, qualified citations and complete auto-apply coverage', async (t) => {
+  const f = fixture(t); const s = services(f);
+  f.graph.nodes = [f.graph.nodes[0], { ...f.graph.nodes[1], completionGate: true }];
+  for (const node of f.graph.nodes) node.outputs = ['report.md'];
+  const plan = f.plan();
+  const run = f.store.start({ roadmapId: plan.roadmapId, ownerId: f.boss.id, expectedVersion: 1,
+    idempotencyKey: randomUUID(), policy: { mode: 'auto', finalMode: 'auto' } });
+  const prepare = f.store.claimJob(); s.shares.prepareWorkflow(prepare); f.store.finishJob(prepare.id, prepare.leaseToken);
+  s.graphs.reconcile(run.id);
+  const submit = (index, content) => {
+    let task = f.store.tasks(run.id)[index];
+    s.workspace.writeFile(f.db.getProjectForUser(f.project.id, task.assigneeUserId), 'report.md', content);
+    task = s.graphs.updateChecklist(task.id, task.assigneeUserId, { taskVersion: 1, revision: task.checklistRevision,
+      items: task.checklist.map(item => ({ id: item.id, done: true })) });
+    return s.graphs.submit(task.id, task.assigneeUserId, { kind: 'manual', taskVersion: 1,
+      checklistRevision: task.checklistRevision, resultSummary: 'delivery', idempotencyKey: randomUUID() });
+  };
+  const source = submit(0, 'approved source');
+  const first = s.reviews.proposal({ submissionId: source.id, ownerId: f.boss.id, verdict: 'passed' });
+  s.reviews.apply(first.id, { ownerId: f.boss.id }); s.graphs.reconcile(run.id);
+  const final = submit(1, 'integrated result');
+  const task = f.db.getTask(final.taskId);
+  // Neither a later owner edit nor either employee working copy is review evidence.
+  s.workspace.writeFile(f.db.getProjectForUser(f.project.id, f.boss.id), 'report.md', 'owner changed');
+  s.workspace.writeFile(f.db.getProjectForUser(f.project.id, f.a.id), 'report.md', 'source changed');
+  s.workspace.writeFile(f.db.getProjectForUser(f.project.id, f.b.id), 'report.md', 'result changed');
+  const context = new ProjectContextService({ ...f, ...s });
+  const evidence = await context.review(final.id, f.boss.id);
+  const ref = `upstream:${source.id}:report.md`;
+  assert.deepEqual(evidence.files.map(file => [file.evidenceRef || file.path, file.content]),
+    [['report.md', 'integrated result'], [ref, 'approved source']]);
+  assert.ok(evidence.coverage.every(file => file.complete));
+  const detail = { feedback: 'Compared immutable outputs', items: task.checklist.map(item => ({ id: item.id,
+    status: 'passed', comment: 'Compared', evidence: ['report.md', ref] })) };
+  assert.throws(() => s.reviews.proposal({ submissionId: final.id, ownerId: f.boss.id, source: 'ai', verdict: 'passed',
+    detail: { ...detail, items: [{ ...detail.items[0], evidence: ['upstream:unrelated:report.md'] }] } }), { code: 'INVALID_REVIEW_EVIDENCE' });
+  const review = s.reviews.proposal({ submissionId: final.id, ownerId: f.boss.id, source: 'ai', verdict: 'passed', detail });
+  const job = { runId: run.id, generation: run.generation, submissionId: final.id, taskVersion: 1 };
+  const assertJob = f.store.assertJob; f.store.assertJob = () => job;
+  try {
+    for (const coverage of [evidence.coverage.slice(0, 1), evidence.coverage.slice(1)]) {
+      f.db.db.prepare('UPDATE task_reviews SET detail_json=? WHERE id=?').run(JSON.stringify({ ...detail, coverage }), review.id);
+      assert.throws(() => s.reviews.apply(review.id, { ownerId: f.boss.id, job }), { code: 'REVIEW_NEEDS_OWNER' });
+    }
+  } finally { f.store.assertJob = assertJob; }
+  assert.equal(f.db.getSubmission(final.id).verdict, 'pending');
+  const bounded = new ProjectContextService({ ...f, ...s, extractText: async () => ({ content: 'x'.repeat(64 * 1024), complete: true }) });
+  const limited = await bounded.review(final.id, f.boss.id);
+  assert.deepEqual(limited.omitted, [ref]);
+  assert.equal(limited.coverage[1].reason, 'REVIEW_BUDGET');
+  assert.throws(() => s.graphs.reviewInputs({ ...task, inputManifest: [] }), { code: 'UPSTREAM_EVIDENCE_CHANGED' });
+  assert.throws(() => s.graphs.reviewInputs({ ...task, projectId: 'unrelated' }), { code: 'UPSTREAM_EVIDENCE_CHANGED' });
+  const raced = new ProjectContextService({ ...f, ...s, extractText: async () => {
+    f.db.db.prepare("UPDATE task_submissions SET verdict='rework' WHERE id=?").run(source.id);
+    return { content: 'must not escape', complete: true };
+  } });
+  await assert.rejects(() => raced.review(final.id, f.boss.id), { code: 'UPSTREAM_EVIDENCE_CHANGED' });
 });
 
 test('three humans deliver a fan-out/join with rework, fixed evidence, and real downstream Git inputs', (t) => {

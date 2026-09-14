@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { HttpError, invariant } from './errors.mjs';
 import { MemoryIndexClient } from './memory-index-client.mjs';
+import { isPrivateProject } from './private-projects.mjs';
 
 const SECRET_CUE = /(?:password|passwd|密码|secret|token|bearer|credential|access[_ -]?key|api[_ -]?key|private[_ -]?key|BEGIN [A-Z ]*PRIVATE KEY|\bsk-[A-Za-z0-9_-]{12,}|\bgh[oprsu]_[A-Za-z0-9]{12,}|\bAKIA[A-Z0-9]{12,})/i;
 
@@ -23,7 +24,7 @@ export class UserMemoryService {
     if (!this.config.memoryEnabled) return;
     this.index.start();
     const users = this.db.db.prepare("SELECT DISTINCT user_id FROM user_memories WHERE status='active'").all();
-    for (const row of users) this.#queueIndex(row.user_id);
+    for (const row of users) this.refreshIndex(row.user_id);
     this.db.db.prepare("UPDATE memory_extraction_jobs SET status='failed',error_code='REPLACED_BY_MEMORY_TOOLS',updated_at=? WHERE status IN ('queued','running')").run(now());
   }
 
@@ -45,24 +46,40 @@ export class UserMemoryService {
       projectId: source.project_id, chatId: source.chat_id, turnRunId: source.turn_run_id, createdAt: source.created_at,
     }));
     return { id: row.id, userId: row.user_id, body: row.body, version: row.version, status: row.status,
+      scopeProjectId: row.scope_project_id || null,
       sourceKind: row.source_kind, sourceChatId: row.source_chat_id, sourceTurnRunId: row.source_turn_run_id,
       createdAt: row.created_at, updatedAt: row.updated_at, deletedAt: row.deleted_at, sources };
   }
 
   get(id) { return this.#row(this.db.db.prepare('SELECT * FROM user_memories WHERE id=?').get(id)); }
 
-  #accessible(memory, userId) {
-    return memory?.userId === userId && memory.status === 'active'
-      && memory.sources.every((source) => Boolean(this.db.getProjectForUser(source.projectId, userId)));
+  scopeForProject(userId, projectId) {
+    if (!projectId) return null;
+    const project = this.db.getProjectForUser(projectId, userId);
+    invariant(project, 404, 'PROJECT_NOT_FOUND', '项目不存在或不可访问。');
+    return isPrivateProject(project) ? project.id : null;
   }
 
-  list(userId, { includeDeleted = false } = {}) {
+  #accessible(memory, userId, scopeProjectId = null) {
+    return memory?.userId === userId && memory.status === 'active'
+      && memory.scopeProjectId === scopeProjectId
+      && (!scopeProjectId || Boolean(this.db.getProjectForUser(scopeProjectId, userId)))
+      && memory.sources.every((source) => {
+        const project = this.db.getProjectForUser(source.projectId, userId);
+        return project && (scopeProjectId ? project.id === scopeProjectId : !isPrivateProject(project));
+      });
+  }
+
+  list(userId, { includeDeleted = false, scopeProjectId = null } = {}) {
+    if (scopeProjectId) invariant(this.scopeForProject(userId, scopeProjectId) === scopeProjectId, 404, 'PROJECT_NOT_FOUND', '隐私项目不存在。');
     return this.db.db.prepare(`SELECT * FROM user_memories WHERE user_id=? ${includeDeleted ? '' : "AND status='active'"}
       ORDER BY updated_at DESC,id`).all(userId).map((row) => this.#row(row))
-      .filter((memory) => memory.status === 'deleted' || this.#accessible(memory, userId));
+      .filter((memory) => memory.scopeProjectId === scopeProjectId && ((includeDeleted && memory.status === 'deleted') || this.#accessible(memory, userId, scopeProjectId)));
   }
 
-  create({ userId, body, sourceKind = 'manual', sourceProjectId = null, sourceChatId = null, sourceTurnRunId = null }) {
+  create({ userId, body, sourceKind = 'manual', sourceProjectId = null, sourceChatId = null, sourceTurnRunId = null, scopeProjectId = null }) {
+    if (sourceProjectId) scopeProjectId = this.scopeForProject(userId, sourceProjectId);
+    if (scopeProjectId) invariant(this.scopeForProject(userId, scopeProjectId) === scopeProjectId, 404, 'PROJECT_NOT_FOUND', '隐私项目不存在。');
     const text = String(body || '').trim();
     invariant(this.config.memoryEnabled, 409, 'MEMORY_DISABLED', 'Portal 用户记忆已由运维关闭。');
     invariant(text.length > 0 && text.length <= 4000, 400, 'INVALID_MEMORY', '记忆长度必须为 1–4000 个字符。');
@@ -72,9 +89,9 @@ export class UserMemoryService {
       invariant(sourceProjectId && sourceChatId && sourceTurnRunId, 400, 'INVALID_MEMORY_SOURCE', '自动记忆必须绑定项目、对话和运行。');
       invariant(this.db.getProjectForUser(sourceProjectId, userId), 403, 'PROJECT_FORBIDDEN', '记忆来源项目已不可访问。');
     }
-    const duplicate = this.db.db.prepare("SELECT * FROM user_memories WHERE user_id=? AND status='active' AND body=?").get(userId, text);
+    const duplicate = this.db.db.prepare("SELECT * FROM user_memories WHERE user_id=? AND scope_project_id IS ? AND status='active' AND body=?").get(userId, scopeProjectId, text);
     if (duplicate) {
-      invariant(this.#accessible(this.#row(duplicate), userId), 404, 'MEMORY_NOT_FOUND', '同内容旧记忆的来源已不可访问。');
+      invariant(this.#accessible(this.#row(duplicate), userId, scopeProjectId), 404, 'MEMORY_NOT_FOUND', '同内容旧记忆的来源已不可访问。');
       // Exact duplicates do not change the original record or its provenance.
       return this.get(duplicate.id);
     }
@@ -82,23 +99,24 @@ export class UserMemoryService {
     this.db.db.exec('BEGIN IMMEDIATE');
     try {
       this.db.db.prepare(`INSERT INTO user_memories
-        (id,user_id,body,version,status,source_kind,source_chat_id,source_turn_run_id,created_at,updated_at)
-        VALUES (?,?,?,1,'active',?,?,?,?,?)`).run(id, userId, text, sourceKind, sourceChatId, sourceTurnRunId, timestamp, timestamp);
+        (id,user_id,body,version,status,source_kind,source_chat_id,source_turn_run_id,created_at,updated_at,scope_project_id)
+        VALUES (?,?,?,1,'active',?,?,?,?,?,?)`).run(id, userId, text, sourceKind, sourceChatId, sourceTurnRunId, timestamp, timestamp, scopeProjectId);
       if (sourceProjectId) this.db.db.prepare(`INSERT INTO user_memory_sources
         (memory_id,project_id,chat_id,turn_run_id,created_at) VALUES (?,?,?,?,?)`)
         .run(id, sourceProjectId, sourceChatId, sourceTurnRunId, timestamp);
       this.db.db.exec('COMMIT');
     } catch (error) { this.db.db.exec('ROLLBACK'); throw error; }
-    this.#queueIndex(userId);
+    this.#queueIndex(userId, scopeProjectId);
     return this.get(id);
   }
 
-  update({ id, userId, version, body, sourceProjectId = null, sourceChatId = null, sourceTurnRunId = null }) {
+  update({ id, userId, version, body, sourceProjectId = null, sourceChatId = null, sourceTurnRunId = null, scopeProjectId = null }) {
+    if (sourceProjectId) scopeProjectId = this.scopeForProject(userId, sourceProjectId);
     const text = String(body || '').trim();
     invariant(text.length > 0 && text.length <= 4000, 400, 'INVALID_MEMORY', '记忆长度必须为 1–4000 个字符。');
     invariant(this.config.memoryEnabled, 409, 'MEMORY_DISABLED', 'Portal 记忆已关闭。');
     invariant(!SECRET_CUE.test(text), 400, 'MEMORY_SECRET_REJECTED', '不能保存密码、token 或密钥。');
-    invariant(this.#accessible(this.get(id), userId), 404, 'MEMORY_NOT_FOUND', '记忆不存在或来源项目已不可访问。');
+    invariant(this.#accessible(this.get(id), userId, scopeProjectId), 404, 'MEMORY_NOT_FOUND', '记忆不存在或来源项目已不可访问。');
     if (sourceProjectId) invariant(sourceChatId && sourceTurnRunId && this.db.getProjectForUser(sourceProjectId, userId),
       403, 'PROJECT_FORBIDDEN', '记忆来源项目已不可访问。');
     this.db.db.exec('BEGIN IMMEDIATE');
@@ -111,18 +129,18 @@ export class UserMemoryService {
         .run(id, sourceProjectId, sourceChatId, sourceTurnRunId, now());
       this.db.db.exec('COMMIT');
     } catch (error) { this.db.db.exec('ROLLBACK'); throw error; }
-    this.#queueIndex(userId);
+    this.#queueIndex(userId, scopeProjectId);
     return this.get(id);
   }
 
-  delete({ id, userId, version }) {
+  delete({ id, userId, version, scopeProjectId = null }) {
     invariant(this.config.memoryEnabled, 409, 'MEMORY_DISABLED', 'Portal 记忆已关闭。');
-    invariant(this.#accessible(this.get(id), userId), 404, 'MEMORY_NOT_FOUND', '记忆不存在或来源项目已不可访问。');
+    invariant(this.#accessible(this.get(id), userId, scopeProjectId), 404, 'MEMORY_NOT_FOUND', '记忆不存在或来源项目已不可访问。');
     const timestamp = now();
     const result = this.db.db.prepare(`UPDATE user_memories SET status='deleted',body='',version=version+1,deleted_at=?,updated_at=?
       WHERE id=? AND user_id=? AND status='active' AND version=?`).run(timestamp, timestamp, id, userId, Number(version));
     invariant(result.changes === 1, 409, 'MEMORY_CHANGED', '记忆已变化、已删除或不属于你，请刷新后重试。');
-    this.#queueIndex(userId);
+    this.#queueIndex(userId, scopeProjectId);
     return { id, deleted: true };
   }
 
@@ -138,11 +156,12 @@ export class UserMemoryService {
 
   async recall({ userId, chat, projectId, turnRunId, query, authorize = () => {} }) {
     if (!this.config.memoryEnabled || chat.useMemory === false || ['planner', 'reviewer'].includes(chat.purpose)) return [];
-    const active = this.list(userId);
+    const scopeProjectId = this.scopeForProject(userId, projectId);
+    const active = this.list(userId, { scopeProjectId });
     if (!active.length) return [];
     let orderedIds = [];
     try {
-      const response = await this.index.search(userId, query, Math.min(50, this.config.memoryRecallLimit * 3));
+      const response = await this.index.search(this.#indexKey(userId, scopeProjectId), query, Math.min(50, this.config.memoryRecallLimit * 3));
       for (const result of response?.results || []) {
         const match = `${result.heading || ''}\n${result.content || ''}`.match(/memory:([A-Za-z0-9-]{1,80})/);
         if (match && !orderedIds.includes(match[1])) orderedIds.push(match[1]);
@@ -164,7 +183,7 @@ export class UserMemoryService {
       return chars <= 12_000;
     });
     const bounded = boundedCandidates.map((candidate) => ({ candidate, current: this.get(candidate.id) }))
-      .filter(({ candidate, current }) => current?.version === candidate.version && this.#accessible(current, userId))
+      .filter(({ candidate, current }) => current?.version === candidate.version && this.#accessible(current, userId, scopeProjectId))
       .map(({ current }) => current);
     const insert = this.db.db.prepare(`INSERT OR IGNORE INTO turn_memory_refs
       (turn_run_id,memory_id,memory_version,source_project_id,referenced_at) VALUES (?,?,?,?,?)`);
@@ -174,11 +193,14 @@ export class UserMemoryService {
   }
 
   refsForTurn(turnRunId, userId) {
+    const run = this.db.getTurnRun(turnRunId);
+    if (!run || run.userId !== userId) return [];
+    const scopeProjectId = run ? this.scopeForProject(userId, this.db.getChat(run.chatId)?.projectId) : null;
     return this.db.db.prepare(`SELECT r.turn_run_id,r.memory_id,r.memory_version,r.source_project_id,r.referenced_at
       FROM turn_memory_refs r JOIN user_memories m ON m.id=r.memory_id WHERE r.turn_run_id=? AND m.user_id=? ORDER BY r.referenced_at,r.memory_id`)
       .all(turnRunId, userId).map((row) => {
         const memory = this.get(row.memory_id);
-        const available = this.#accessible(memory, userId);
+        const available = this.#accessible(memory, userId, scopeProjectId);
         return { turnRunId: row.turn_run_id, memoryId: row.memory_id,
           memoryVersion: row.memory_version, sourceProjectId: row.source_project_id, referencedAt: row.referenced_at,
           body: available && memory.version === row.memory_version ? memory.body : '', available };
@@ -186,11 +208,12 @@ export class UserMemoryService {
   }
 
   refsForChat(chat, userId) {
+    const scopeProjectId = this.scopeForProject(userId, chat.projectId);
     return this.db.db.prepare(`SELECT DISTINCT r.turn_run_id,r.memory_id,r.memory_version,r.source_project_id,r.referenced_at
       FROM turn_memory_refs r JOIN turn_runs t ON t.id=r.turn_run_id WHERE t.chat_id=? ORDER BY r.referenced_at DESC`)
       .all(chat.id).filter((row) => !chat.memoryContextResetAt || row.referenced_at > chat.memoryContextResetAt).map((row) => {
         const memory = this.get(row.memory_id);
-        const available = this.#accessible(memory, userId);
+        const available = this.#accessible(memory, userId, scopeProjectId);
         return { turnRunId: row.turn_run_id, memoryId: row.memory_id, memoryVersion: row.memory_version,
           currentMemoryVersion: memory?.version || null,
           sourceProjectId: row.source_project_id, referencedAt: row.referenced_at,
@@ -218,7 +241,10 @@ export class UserMemoryService {
       WHERE m.user_id=? AND m.status='active' AND s.project_id=?`).all(userId, projectId).map((row) => row.id);
   }
 
-  refreshIndex(userId) { this.#queueIndex(userId); }
+  refreshIndex(userId) {
+    this.#queueIndex(userId);
+    for (const row of this.db.db.prepare('SELECT DISTINCT scope_project_id FROM user_memories WHERE user_id=? AND scope_project_id IS NOT NULL').all(userId)) this.#queueIndex(userId, row.scope_project_id);
+  }
 
   invalidateThreads(memoryIds, reason = '引用的 Portal 记忆或来源权限已变化；继续前必须明确重置原生线程。') {
     const ids = [...new Set(memoryIds)];
@@ -230,27 +256,30 @@ export class UserMemoryService {
       .all(...ids).map((row) => row.id);
     for (const chatId of chats) {
       const chat = this.db.getChat(chatId);
-      if (chat?.codexThreadId) this.db.markChatThreadError(chatId, reason);
+      if (chat?.codexThreadId || chat?.localSessionId) this.db.markChatThreadError(chatId, reason);
       this.db.pauseChatInputs(chatId, 'MEMORY_CONTEXT_INVALIDATED');
     }
     return chats;
   }
 
-  #queueIndex(userId) {
-    if (!safeUserId(userId) || this.indexTimers.has(userId)) return;
+  #indexKey(userId, scopeProjectId) { return scopeProjectId ? `private-${digest(`${userId}:${scopeProjectId}`)}` : userId; }
+
+  #queueIndex(userId, scopeProjectId = null) {
+    const key = this.#indexKey(userId, scopeProjectId);
+    if (!safeUserId(userId) || this.indexTimers.has(key)) return;
     const timer = setTimeout(() => {
-      this.indexTimers.delete(userId);
-      try { this.#writeDocument(userId); } catch (error) { this.index.state = 'degraded'; this.index.lastError = error; return; }
-      this.index.index(userId).catch((error) => { this.index.state = 'degraded'; this.index.lastError = error; });
+      this.indexTimers.delete(key);
+      try { this.#writeDocument(userId, scopeProjectId); } catch (error) { this.index.state = 'degraded'; this.index.lastError = error; return; }
+      this.index.index(key).catch((error) => { this.index.state = 'degraded'; this.index.lastError = error; });
     }, 50);
-    timer.unref?.(); this.indexTimers.set(userId, timer);
+    timer.unref?.(); this.indexTimers.set(key, timer);
   }
 
-  #writeDocument(userId) {
-    const root = path.join(this.config.memoryIndexRoot, 'users', userId, 'documents');
+  #writeDocument(userId, scopeProjectId = null) {
+    const root = path.join(this.config.memoryIndexRoot, 'users', this.#indexKey(userId, scopeProjectId), 'documents');
     fs.mkdirSync(root, { recursive: true, mode: 0o700 });
     const target = path.join(root, 'memories.md'); const temporary = path.join(root, `.memories-${process.pid}.tmp`);
-    const body = this.list(userId).map((memory) => `## memory:${memory.id}\n\n${memory.body}\n`).join('\n');
+    const body = this.list(userId, { scopeProjectId }).map((memory) => `## memory:${memory.id}\n\n${memory.body}\n`).join('\n');
     fs.writeFileSync(temporary, body, { mode: 0o600 }); fs.renameSync(temporary, target); fs.chmodSync(target, 0o600);
   }
 

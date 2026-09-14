@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { publicIngressConfig } from './public-ingress.mjs';
+import { localModelUrl } from './private-projects.mjs';
 import { fileURLToPath } from 'node:url';
 
 const SOURCE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -26,6 +27,14 @@ export function loadConfig(env = process.env) {
   const portalMaxActiveRootTurns = Math.min(11, integer(env.PORTAL_MAX_ACTIVE_ROOT_TURNS, 11, 1));
   return Object.freeze({
     rootDir: ROOT_DIR,
+    localDeepSeekEnabled: bool(env.LOCAL_DEEPSEEK_ENABLED, false),
+    localDeepSeekBaseUrl: localModelUrl(env.LOCAL_DEEPSEEK_BASE_URL),
+    localDeepSeekModel: String(env.LOCAL_DEEPSEEK_MODEL || 'deepseek-v4-flash'),
+    localDeepSeekContextWindow: integer(env.LOCAL_DEEPSEEK_CONTEXT_WINDOW, 100000, 4096),
+    localDeepSeekMaxTokens: integer(env.LOCAL_DEEPSEEK_MAX_TOKENS, 8192, 256),
+    localDeepSeekTimeoutMs: integer(env.LOCAL_DEEPSEEK_TIMEOUT_MS, 20 * 60 * 1000, 1000),
+    localSearchTimeoutMs: integer(env.LOCAL_SEARCH_TIMEOUT_MS, 120000, 1000),
+    localSessionsRoot: path.join(dataDir, 'local-sessions'),
     publicDir: path.join(ROOT_DIR, 'public'),
     host: env.HOST || '127.0.0.1',
     port: integer(env.PORT, 4310, 1),

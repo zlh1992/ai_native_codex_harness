@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 import { ROOT_MODELS, validateModel } from './models.mjs';
+import { DEFAULT_SESSION_COOKIE, validSessionSelector, selectedCookieName, requestSessionCookieName } from './session-selection.mjs';
 import { requestIngress, validateRequestOrigin } from './public-ingress.mjs';
+import { pageRoute } from './page-routes.mjs';
+import { createStaticAssets } from './static-assets.mjs';
 
 import fs from 'node:fs';
 import http from 'node:http';
@@ -9,7 +12,9 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { digestToken, hashPassword, newCsrfToken, newSessionToken, parseCookies, safeEqual, verifyPassword } from './auth.mjs';
 import { loadConfig } from './config.mjs';
-import { CodexService, EFFORTS, TURN_MODES } from './codex-service.mjs';
+import { EFFORTS, TURN_MODES } from './codex-service.mjs';
+import { AgentRuntimeService } from './agent-runtime-service.mjs';
+import { assertStandardProject, isPrivateProject } from './private-projects.mjs';
 import { HarnessDatabase } from './db.mjs';
 import { HttpError, invariant } from './errors.mjs';
 import { WorkspaceService, slugify } from './fs-service.mjs';
@@ -23,7 +28,7 @@ import { WorkGraphRuntime } from './work-graph-runtime.mjs';
 import { WorkflowScheduler } from './workflow-scheduler.mjs';
 import { UserMemoryService } from './user-memory-service.mjs';
 import { createWorkGraphRoutes } from './work-graph-routes.mjs';
-import { readBody, readJson, securityHeaders, sendJson, serveStatic, sse, sseHeaders } from './http-utils.mjs';
+import { parseByteRange, readBody, readJson, securityHeaders, sendJson, serveStatic, sse, sseHeaders } from './http-utils.mjs';
 
 const CURRENT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const INLINE_MIME = new Map([
@@ -59,6 +64,7 @@ function loadDotEnv(file = path.resolve(CURRENT_DIR, '..', '.env')) {
 loadDotEnv();
 process.umask(0o077);
 const config = loadConfig();
+const staticAssets = createStaticAssets(config);
 if (!['127.0.0.1', 'localhost', '::1'].includes(config.host)) {
   throw new Error(`安全策略拒绝非回环监听 HOST=${config.host}；请使用 HTTPS 出站隧道。`);
 }
@@ -71,7 +77,7 @@ db.recoverInterruptedRuntime();
 const workspace = new WorkspaceService(config);
 const worktrees = new WorktreeService(config);
 const memory = new UserMemoryService({ config, db });
-const codex = new CodexService({ config, db, workspace, memory });
+const codex = new AgentRuntimeService({ config, db, workspace, memory });
 const graphStore = new WorkGraphStore(db);
 const graphs = new WorkGraphService({ db, store: graphStore, workspace, worktrees, codex });
 const shares = new ProjectShareService({ db, store: graphStore, workspace, worktrees, codex, memory });
@@ -113,13 +119,13 @@ function checkOrigin(req) {
   validateRequestOrigin(req, config);
 }
 
-function cookie(req, token, maxAge) {
+function cookie(req, token, maxAge, name = DEFAULT_SESSION_COOKIE) {
   const { secure } = requestIngress(req, config);
-  return `codex_harness_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure ? '; Secure' : ''}`;
+  return `${name}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure ? '; Secure' : ''}`;
 }
 
 function sessionFor(req) {
-  const token = parseCookies(req.headers.cookie).codex_harness_session;
+  const token = parseCookies(req.headers.cookie)[requestSessionCookieName(req)];
   return token ? db.getSession(digestToken(token)) : null;
 }
 
@@ -127,6 +133,16 @@ function requireSession(req) {
   const session = sessionFor(req);
   invariant(session, 401, 'AUTH_REQUIRED', '请先登录。');
   return session;
+}
+
+const sessionStreams = new Map();
+function registerSessionStream(session, close) {
+  if (!sessionStreams.has(session.tokenHash)) sessionStreams.set(session.tokenHash, new Set());
+  const entries = sessionStreams.get(session.tokenHash); entries.add(close);
+  return () => { entries.delete(close); if (!entries.size) sessionStreams.delete(session.tokenHash); };
+}
+function closeSessionStreams(tokenHash) {
+  for (const close of [...(sessionStreams.get(tokenHash) || [])]) close();
 }
 
 function refreshSession(session) {
@@ -192,7 +208,7 @@ function accessPayload(access) {
 
 function chatPayload(chat) {
   if (!chat) return null;
-  const { treePath, projectAccessId, memoryContextResetAt, ...safe } = chat;
+  const { treePath, projectAccessId, memoryContextResetAt, localSessionId, ...safe } = chat;
   return safe;
 }
 
@@ -278,7 +294,7 @@ async function route(req, res) {
     const codexStatus = codex.status();
     const codexState = codexStatus.ready ? 'ready' : codexStatus.lastError ? 'failed' : 'starting';
     sendJson(res, 200, { ok: true, codex: codexStatus.ready, codexState, initialized: db.countAdmins() > 0,
-      memory: memory.status() }, config);
+      memory: memory.status(), localDeepSeek: codex.local.status() }, config);
     return;
   }
   if (req.method === 'POST' && ['/api/login', '/api/boss/login', '/api/employee/login'].includes(pathname)) {
@@ -299,6 +315,9 @@ async function route(req, res) {
     }
     const expectedRole = pathname === '/api/boss/login' ? 'admin' : pathname === '/api/employee/login' ? 'user' : null;
     invariant(!expectedRole || row.role === expectedRole, 403, 'LOGIN_ROLE_MISMATCH', '该账号不属于此登录入口，请使用对应的老板或员工入口。');
+    const selector = body.sessionSelector;
+    invariant(selector === undefined || (pathname === '/api/employee/login' && validSessionSelector(selector)),
+      400, 'INVALID_SESSION_SELECTOR', '登录会话选择无效。');
     loginAttempts.delete(ip);
     db.cleanSessions();
     const token = newSessionToken();
@@ -307,19 +326,28 @@ async function route(req, res) {
     db.createSession({ tokenHash: digestToken(token), userId: row.id, csrfToken, expiresAt, ip, userAgent: String(req.headers['user-agent'] || '').slice(0, 500) });
     db.markLogin(row.id);
     db.audit({ actorUserId: row.id, action: 'auth.login', targetType: 'session', ip });
-    sendJson(res, 200, { ok: true }, config, { 'set-cookie': cookie(req, token, config.sessionTtlSeconds) });
+    sendJson(res, 200, { ok: true, ...(selector ? { sessionSelector: selector } : {}) }, config,
+      { 'set-cookie': cookie(req, token, config.sessionTtlSeconds, selector ? selectedCookieName(selector) : DEFAULT_SESSION_COOKIE) });
     return;
   }
 
   if (!pathname.startsWith('/api/')) {
-    if (['/', '/index.html', '/boss.html'].includes(pathname)) {
-      const destination = pathname === '/boss.html' ? '/boss' : url.searchParams.get('workbench') === '1' ? '/boss/workbench' : '/employee';
-      res.writeHead(302, { ...securityHeaders(config), location: `${destination}${url.search}` });
+    const page = pageRoute(url, config, requestIngress(req, config));
+    if (page.redirect) {
+      res.writeHead(page.status, { ...securityHeaders(config), location: page.redirect });
       res.end();
       return;
     }
-    const pages = { '/employee': '/index.html', '/boss': '/boss.html', '/boss/login': '/boss-login.html', '/boss/workbench': '/index.html' };
-    if (!serveStatic(res, config, pages[pathname] || pathname)) sendJson(res, 404, { error: { code: 'NOT_FOUND', message: '页面不存在。' } }, config);
+    if (staticAssets.serve(res, page.file || pathname)) return;
+    if (pathname.startsWith('/assets/')) {
+      sendJson(res, 404, { error: { code: 'ASSET_VERSION_NOT_FOUND', message: '页面资源版本已更新，请刷新页面。' } }, config);
+      return;
+    }
+    if (pathname === '/vendor/sortable.js') {
+      if (!serveStatic(res, { ...config, publicDir: path.join(config.rootDir, 'node_modules/sortablejs/modular') }, '/sortable.complete.esm.js')) sendJson(res, 404, { error: { code: 'NOT_FOUND', message: '看板组件未安装。' } }, config);
+      return;
+    }
+    if (!serveStatic(res, config, page.file || pathname)) sendJson(res, 404, { error: { code: 'NOT_FOUND', message: '页面不存在。' } }, config);
     return;
   }
 
@@ -328,8 +356,9 @@ async function route(req, res) {
   if (req.method === 'POST' && pathname === '/api/logout') {
     requireMutation(req, session);
     db.deleteSession(session.tokenHash);
+    closeSessionStreams(session.tokenHash);
     audit(req, session, 'auth.logout', 'session');
-    sendJson(res, 200, { ok: true }, config, { 'set-cookie': cookie(req, '', 0) });
+    sendJson(res, 200, { ok: true }, config, { 'set-cookie': cookie(req, '', 0, requestSessionCookieName(req)) });
     return;
   }
   if (req.method === 'GET' && pathname === '/api/me') {
@@ -343,30 +372,38 @@ async function route(req, res) {
     return;
   }
 
-  if (req.method === 'GET' && pathname === '/api/memories') {
-    sendJson(res, 200, { memories: memory.list(session.user.id), status: memory.status() }, config);
+  const scopedMemory = pathname.match(/^\/api\/projects\/([^/]+)\/memories(?:\/([^/]+))?$/);
+  let scopeProjectId = null;
+  if (scopedMemory) {
+    const project = projectFor(session, scopedMemory[1]);
+    invariant(isPrivateProject(project), 400, 'PRIVATE_PROJECT_REQUIRED', '普通项目请使用“我的记忆”。');
+    scopeProjectId = project.id;
+  }
+  const memoryCollection = pathname === '/api/memories' || (scopedMemory && !scopedMemory[2]);
+  if (req.method === 'GET' && memoryCollection) {
+    sendJson(res, 200, { memories: memory.list(session.user.id, { scopeProjectId }), status: memory.status() }, config);
     return;
   }
-  if (req.method === 'POST' && pathname === '/api/memories') {
+  if (req.method === 'POST' && memoryCollection) {
     requireMutation(req, session);
     const body = await readJson(req, 16 * 1024);
     session = refreshSession(session);
-    const saved = memory.create({ userId: session.user.id, body: body.body, sourceKind: 'manual' });
+    const saved = memory.create({ userId: session.user.id, body: body.body, sourceKind: 'manual', scopeProjectId });
     audit(req, session, 'memory.create', 'user_memory', saved.id, { version: saved.version, sourceKind: saved.sourceKind });
     sendJson(res, 201, { memory: saved }, config);
     return;
   }
-  let memoryMatch = pathname.match(/^\/api\/memories\/([^/]+)$/);
+  const memoryMatch = scopedMemory?.[2] ? [pathname, scopedMemory[2]] : pathname.match(/^\/api\/memories\/([^/]+)$/);
   if (memoryMatch && req.method === 'PATCH') {
     requireMutation(req, session);
     const body = await readJson(req, 16 * 1024);
     session = refreshSession(session);
     const before = memory.get(memoryMatch[1]);
-    invariant(before?.userId === session.user.id, 404, 'MEMORY_NOT_FOUND', '记忆不存在。');
+    invariant(before?.userId === session.user.id && before.scopeProjectId === scopeProjectId, 404, 'MEMORY_NOT_FOUND', '记忆不存在。');
     const affected = memory.dependentChatIds(before.id, session.user.id);
     await Promise.all(affected.map((chatId) => codex.interruptAndWait(chatId)));
     session = refreshSession(session);
-    const saved = memory.update({ id: before.id, userId: session.user.id, version: body.version, body: body.body });
+    const saved = memory.update({ id: before.id, userId: session.user.id, version: body.version, body: body.body, scopeProjectId });
     memory.invalidateThreads([before.id]);
     audit(req, session, 'memory.update', 'user_memory', saved.id, { version: saved.version, affectedChats: affected.length });
     sendJson(res, 200, { memory: saved, resetChats: affected.length }, config);
@@ -377,11 +414,11 @@ async function route(req, res) {
     const body = await readJson(req, 16 * 1024);
     session = refreshSession(session);
     const before = memory.get(memoryMatch[1]);
-    invariant(before?.userId === session.user.id, 404, 'MEMORY_NOT_FOUND', '记忆不存在。');
+    invariant(before?.userId === session.user.id && before.scopeProjectId === scopeProjectId, 404, 'MEMORY_NOT_FOUND', '记忆不存在。');
     const affected = memory.dependentChatIds(before.id, session.user.id);
     await Promise.all(affected.map((chatId) => codex.interruptAndWait(chatId)));
     session = refreshSession(session);
-    const result = memory.delete({ id: before.id, userId: session.user.id, version: body.version });
+    const result = memory.delete({ id: before.id, userId: session.user.id, version: body.version, scopeProjectId });
     memory.invalidateThreads([before.id]);
     audit(req, session, 'memory.delete', 'user_memory', before.id, { affectedChats: affected.length });
     sendJson(res, 200, { ...result, resetChats: affected.length }, config);
@@ -403,7 +440,10 @@ async function route(req, res) {
     invariant(db.listProjects(ownerId).length < projectLimit, 413, 'PROJECT_QUOTA', '已达到项目数量上限。');
     const name = shortText(body.name, '项目名称');
     const description = String(body.description || '').trim().slice(0, 1000);
-    const project = db.createProject({ userId: ownerId, slug: slugify(name), name, description });
+    const projectType = body.projectType ?? 'standard';
+    invariant(['standard', 'local_private'].includes(projectType), 400, 'INVALID_PROJECT_TYPE', '项目类型无效。');
+    if (projectType === 'local_private') requireAdmin(session);
+    const project = db.createProject({ userId: ownerId, slug: slugify(name), name, description, projectType });
     try {
       workspace.createProject(project);
       worktrees.initialize(workspace.projectRoot(project));
@@ -413,7 +453,7 @@ async function route(req, res) {
       db.deleteProject(project.id);
       throw error;
     }
-    audit(req, session, 'project.create', 'project', project.id, { ownerId, name });
+    audit(req, session, 'project.create', 'project', project.id, { ownerId, projectType });
     sendJson(res, 201, { project: projectPayload(db.getProjectForUser(project.id, ownerId)) }, config);
     return;
   }
@@ -433,6 +473,7 @@ async function route(req, res) {
     session = refreshSession(session);
     project = ownerProject(projectFor(session, match[1]));
     invariant(project.accessId === expectedAccessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已变化。');
+    invariant(body.projectType === undefined || body.projectType === project.projectType, 409, 'PROJECT_TYPE_IMMUTABLE', '项目类型创建后不可切换。');
     const updated = db.updateProject(project.id, {
       name: body.name === undefined ? project.name : shortText(body.name, '项目名称'),
       description: body.description === undefined ? project.description : String(body.description).trim().slice(0, 1000),
@@ -461,7 +502,7 @@ async function route(req, res) {
     const trashed = workspace.trashProject(project);
     db.deleteProject(project.id);
     memory.refreshIndex(session.user.id);
-    audit(req, session, 'project.trash', 'project', project.id, { name: project.name, recoverable: trashed.recoverable });
+    audit(req, session, 'project.trash', 'project', project.id, { recoverable: trashed.recoverable });
     sendJson(res, 200, { ok: true, recoverable: trashed.recoverable }, config);
     return;
   }
@@ -480,19 +521,17 @@ async function route(req, res) {
     const mime = INLINE_MIME.get(extension) || 'application/octet-stream';
     const isHtmlPreview = extension === '.html' || extension === '.htm';
     const filename = path.basename(file.path);
-    let start = 0;
-    let end = file.size - 1;
-    let status = 200;
-    const range = String(req.headers.range || '');
-    if (range) {
-      const parsed = range.match(/^bytes=(\d*)-(\d*)$/);
-      invariant(parsed, 416, 'INVALID_RANGE', '文件范围请求无效。');
-      if (parsed[1]) start = Number(parsed[1]);
-      if (parsed[2]) end = Number(parsed[2]);
-      if (!parsed[1] && parsed[2]) start = Math.max(0, file.size - Number(parsed[2]));
-      invariant(Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= 0 && end >= start && end < file.size, 416, 'INVALID_RANGE', '文件范围请求越界。');
-      status = 206;
+    let range;
+    try { range = parseByteRange(req.headers.range, file.size); }
+    catch (error) {
+      if (error.code !== 'INVALID_RANGE') throw error;
+      sendJson(res, 416, { error: { code: error.code, message: error.message } }, config,
+        { 'content-range': `bytes */${file.size}`, 'accept-ranges': 'bytes' });
+      return;
     }
+    const start = range?.start ?? 0;
+    const end = range?.end ?? file.size - 1;
+    const status = range ? 206 : 200;
     const body = file.buffer.subarray(start, end + 1);
     res.writeHead(status, {
       ...securityHeaders(config),
@@ -617,18 +656,18 @@ async function route(req, res) {
   match = pathname.match(/^\/api\/chats\/([^/]+)$/);
   if (match && req.method === 'GET') {
     const chat = chatFor(session, match[1]);
-    const expectedThreadId = chat.codexThreadId;
+    const expectedThreadId = chat.codexThreadId || chat.localSessionId;
     const authorize = () => {
       const currentSession = refreshSession(session);
       const currentChat = chatFor(currentSession, chat.id);
-      invariant(currentChat.codexThreadId === expectedThreadId, 409, 'THREAD_MAPPING_CHANGED', '对话线程已变化，请刷新后重试。');
+      invariant((currentChat.codexThreadId || currentChat.localSessionId) === expectedThreadId, 409, 'THREAD_MAPPING_CHANGED', '对话线程已变化，请刷新后重试。');
       return { currentSession, currentChat };
     };
     const messages = await codex.historyForChat(chat, authorize);
     const { currentSession, currentChat } = authorize();
     const task = currentChat.taskId ? taskFor(currentSession, currentChat.taskId) : null;
     sendJson(res, 200, {
-      chat: chatPayload(currentChat), task, messages,
+      chat: chatPayload(currentChat), task: task ? graphs.publicTask(task) : null, messages,
       latestTurnRun: db.getLatestTurnRunForChat(currentChat.id), latestEventId: db.getLatestTurnEventId(currentChat.id),
     }, config);
     return;
@@ -671,9 +710,16 @@ async function route(req, res) {
     if (body.title !== undefined) patch.title = shortText(body.title, '对话标题', 120);
     if (body.preferredMode !== undefined) patch.preferredMode = turnMode(body.preferredMode);
     if (body.preferredModel !== undefined) {
+      assertStandardProject(db.getProject(chat.projectId));
       invariant(session.user.role === 'admin', 403, 'ADMIN_REQUIRED', '只有老板可以选择模型。');
       invariant(!codex.chatBusy(chat.id) && !db.listChatInputs(chat.id).length, 409, 'CHAT_RUNNING', '请等待当前任务和消息队列结束后切换模型。');
       patch.preferredModel = validateModel(body.preferredModel);
+    }
+    if (body.controlMode !== undefined) {
+      invariant(isPrivateProject(db.getProject(chat.projectId)), 400, 'PRIVATE_PROJECT_REQUIRED', '只有隐私项目支持本地控制模式。');
+      invariant(!codex.chatBusy(chat.id) && !db.listChatInputs(chat.id).length, 409, 'CHAT_RUNNING', '请等待运行及队列结束再改变审批模式。');
+      invariant(['manual', 'auto'].includes(body.controlMode), 400, 'INVALID_CONTROL_MODE', '审批模式无效。');
+      patch.controlMode = body.controlMode;
     }
     invariant(Object.keys(patch).length > 0, 400, 'INVALID_CHAT_UPDATE', '没有可更新的对话字段。');
     const updated = db.updateChat(chat.id, patch);
@@ -743,16 +789,38 @@ async function route(req, res) {
     const mode = turnMode(body.mode, chat.preferredMode || 'execute');
     if (chat.preferredMode !== mode) chat = db.updateChat(chat.id, { preferredMode: mode });
     sseHeaders(res, config);
-    const heartbeat = setInterval(() => sse(res, 'ping', { at: Date.now() }), 15_000);
+    const close = () => {
+      if (res.writableEnded) return;
+      // Preserve the legacy terminal-frame contract without releasing any
+      // task content after the Web session has been revoked.
+      sse(res, 'turn_error', { code: 'AUTH_REQUIRED', message: '登录状态已失效，请重新登录。' });
+      res.end();
+    };
+    const unregister = registerSessionStream(session, close);
+    const emit = (event, data) => {
+      if (!db.getSession(session.tokenHash)) { close(); return; }
+      sse(res, event, data);
+    };
+    const heartbeat = setInterval(() => emit('ping', { at: Date.now() }), 15_000);
     audit(req, session, 'turn.start', 'chat', chat.id, { effort: body.effort || config.codexReasoningEffort, mode });
     try {
-      await codex.runTurn({ chat, project, user: session.user, prompt: body.prompt, effort: body.effort, mode, emit: (event, data) => sse(res, event, data) });
+      await codex.runTurn({ chat, project, user: session.user, prompt: body.prompt, effort: body.effort, mode, emit });
     } catch (error) {
-      if (!error.turnEventEmitted) sse(res, 'turn_error', { message: error.message, code: error.code || 'TURN_FAILED' });
+      if (!error.turnEventEmitted) emit('turn_error', { message: error.message, code: error.code || 'TURN_FAILED' });
     } finally {
       clearInterval(heartbeat);
+      unregister();
       if (!res.writableEnded) res.end();
     }
+    return;
+  }
+  match = pathname.match(/^\/api\/chats\/([^/]+)\/tool-calls$/);
+  if (match && req.method === 'GET') {
+    const chat = chatFor(session, match[1]);
+    const run = url.searchParams.has('runId') ? db.getTurnRun(url.searchParams.get('runId')) : db.getLatestTurnRunForChat(chat.id);
+    invariant(!run || (run.chatId === chat.id && run.userId === session.user.id), 403, 'TURN_FORBIDDEN', '运行记录不属于此对话。');
+    const after = Math.max(0, Number(url.searchParams.get('after')) || 0);
+    sendJson(res, 200, run ? { runId: run.id, ...codex.toolDetails.list(chat.id, run.id, after) } : { runId: null, items: [], cursor: 0, hasMore: false }, config);
     return;
   }
   match = pathname.match(/^\/api\/chats\/([^/]+)\/events$/);
@@ -777,17 +845,20 @@ async function route(req, res) {
     let replaying = true;
     let closed = false;
     let heartbeat;
+    let unregisterSession = () => {};
     const terminal = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
     const cleanup = () => {
       if (closed) return;
       closed = true;
       if (heartbeat) clearInterval(heartbeat);
+      unregisterSession();
       codex.off('turnEvent', onEvent);
       codex.off('turnLiveEvent', onLiveEvent);
     };
     const sendEvent = (event, live = false) => {
       if (closed || (!live && event.id <= lastSent) || event.turnRunId !== run.id) return;
-      const currentUser = db.getUserById(session.user.id);
+      const currentSession = db.getSession(session.tokenHash);
+      const currentUser = currentSession?.user.id === session.user.id ? currentSession.user : null;
       const currentChat = db.getChat(chat.id);
       const currentAccess = currentUser?.status === 'active' && currentChat
         ? db.getProjectForUser(currentChat.projectId, currentUser.id) : null;
@@ -810,6 +881,7 @@ async function route(req, res) {
     const onLiveEvent = (event) => { if (!replaying) sendEvent(event, true); };
     codex.on('turnEvent', onEvent);
     codex.on('turnLiveEvent', onLiveEvent);
+    unregisterSession = registerSessionStream(session, () => { cleanup(); if (!res.writableEnded) res.end(); });
     sseHeaders(res, config);
     const waterline = db.getLatestTurnEventIdForRun(run.id);
     while (!closed && lastSent < waterline) {
@@ -822,7 +894,10 @@ async function route(req, res) {
     if (!closed && terminal.has(db.getTurnRun(run.id)?.status)) {
       cleanup(); if (!res.writableEnded) res.end();
     } else if (!closed) {
-      heartbeat = setInterval(() => sse(res, 'ping', { at: Date.now() }), 15_000);
+      heartbeat = setInterval(() => {
+        if (!db.getSession(session.tokenHash)) { cleanup(); if (!res.writableEnded) res.end(); return; }
+        sse(res, 'ping', { at: Date.now() });
+      }, 15_000);
       req.on('close', cleanup);
     }
     return;
@@ -842,7 +917,7 @@ async function route(req, res) {
     });
     audit(req, session, 'chat.thread_recovered', 'chat', chat.id, {
       strategy: body.action === 'reset' ? 'explicit_reset' : 'resume_retry',
-      mappingChanged: (chat.codexThreadId || null) !== (recovered.codexThreadId || null),
+      mappingChanged: (chat.codexThreadId || chat.localSessionId || null) !== (recovered.codexThreadId || recovered.localSessionId || null),
     });
     sendJson(res, 200, { chat: chatPayload(recovered), recoveries: db.listChatThreadRecoveries(chat.id) }, config);
     return;
@@ -860,11 +935,11 @@ async function route(req, res) {
   match = pathname.match(/^\/api\/chats\/([^/]+)\/goal$/);
   if (match && req.method === 'GET') {
     const chat = chatFor(session, match[1]);
-    const expectedThreadId = chat.codexThreadId;
+    const expectedThreadId = chat.codexThreadId || chat.localSessionId;
     const authorize = () => {
       const currentSession = refreshSession(session);
       const currentChat = chatFor(currentSession, chat.id);
-      invariant(currentChat.codexThreadId === expectedThreadId, 409, 'THREAD_MAPPING_CHANGED', '对话线程已变化，请刷新后重试。');
+      invariant((currentChat.codexThreadId || currentChat.localSessionId) === expectedThreadId, 409, 'THREAD_MAPPING_CHANGED', '对话线程已变化，请刷新后重试。');
     };
     const goal = await codex.getGoal(chat, authorize);
     authorize();
@@ -885,7 +960,7 @@ async function route(req, res) {
     session = refreshSession(session);
     chat = chatFor(session, match[1]);
     const approval = codex.resolveApproval({
-      chatId: chat.id, userId: session.user.id, approvalId: decodeURIComponent(match[2]), decision: String(body.decision || ''),
+      chatId: chat.id, userId: session.user.id, approvalId: decodeURIComponent(match[2]), decision: String(body.decision || ''), query: body.query,
     });
     audit(req, session, 'turn.approval', 'turn_approval', approval.id, { chatId: chat.id, decision: body.decision });
     sendJson(res, 200, { approval }, config);
@@ -975,6 +1050,7 @@ async function route(req, res) {
     const body = await readJson(req, 256 * 1024);
     session = refreshSession(session);
     const project = ownerProject(projectFor(session, String(body.projectId || '')));
+    assertStandardProject(project);
     invariant(Array.isArray(body.steps) && body.steps.length > 0 && body.steps.length <= 100, 400, 'INVALID_ROADMAP_STEPS', '路线图必须包含 1–100 个线性步骤。');
     const activeAccess = db.listProjectAccess(project.id, { activeOnly: true });
     const steps = body.steps.map((step, index) => {
@@ -1030,10 +1106,10 @@ async function route(req, res) {
     return;
   }
   if (req.method === 'GET' && pathname === '/api/admin/dashboard') {
-    const users = db.listUsers().map((user) => ({ ...user, usage: userUsage(user.id) }));
+    const users = db.listUsers().map((user) => ({ ...user, usage: userUsage(user.id), profile: graphStore.profile(user.id) }));
     sendJson(res, 200, {
       stats: db.stats(), codex: codex.status(), users,
-      projects: db.listAdminProjects().map(projectPayload),
+      projects: db.listAdminProjects().filter((project) => !isPrivateProject(project) || project.userId === session.user.id).map(projectPayload),
     }, config);
     return;
   }
@@ -1193,13 +1269,7 @@ db.cleanSessions();
 
 const server = http.createServer(async (req, res) => {
   try {
-    const ingress = requestIngress(req, config);
-    if (req.method === 'GET' && req.url === '/' && ingress.configured) {
-      const destination = ingress.configured === config.bossPublicOrigin ? '/boss/login' : '/employee';
-      res.writeHead(302, { ...securityHeaders(config), location: destination, 'cache-control': 'no-store' });
-      res.end();
-      return;
-    }
+    requestIngress(req, config);
     await route(req, res);
   } catch (error) {
     if (res.headersSent) {
@@ -1232,6 +1302,7 @@ function shutdown(signal) {
   codex.stop();
   server.close(async () => {
     await Promise.allSettled([...workflowScheduler.inFlight.values()].map(entry => entry.promise));
+    await codex.local.drain();
     db.close(); process.exit(0);
   });
   setTimeout(() => process.exit(1), 5000).unref();

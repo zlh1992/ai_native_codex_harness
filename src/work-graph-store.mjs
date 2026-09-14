@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { invariant } from './errors.mjs';
+import { assertStandardProject } from './private-projects.mjs';
 import { validateGraph, validateProfile, reviewPolicy } from './work-graph-contract.mjs';
 
 const timestamp = () => new Date().toISOString();
@@ -18,6 +19,7 @@ export class WorkGraphStore {
   policyEpoch(userId) { return this.sql.prepare('SELECT workflow_policy_epoch FROM users WHERE id=?').get(userId)?.workflow_policy_epoch; }
 
   owner(projectId, userId) {
+    assertStandardProject(this.db.getProject(projectId));
     const user = this.db.getUserById(userId);
     const project = this.db.getProjectForUser(projectId, userId);
     invariant(user?.status === 'active' && user.role === 'admin' && project?.accessKind === 'owner',

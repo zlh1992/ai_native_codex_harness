@@ -6,11 +6,13 @@
   <meta name="color-scheme" content="dark">
   <title>Boss 驾驶舱 · Codex Harness</title>
   <link rel="stylesheet" href="/boss.css">
+  <link rel="stylesheet" href="/portal-ui.css">
 </head>
-<body>
+<body data-auth="checking">
+  <section id="auth-status" class="auth-status" role="status"><strong>CODEX HARNESS</strong><p>正在验证登录状态…</p><button class="primary" hidden>重试连接</button></section>
   <div class="ambient"></div>
   <header class="cockpit-bar">
-    <a class="identity" href="/boss"><span>CH</span><div><b>老板驾驶舱</b><small>CODEX HARNESS / CONTROL</small></div></a>
+    <a class="identity" href="/boss/workbench?view=tasks"><span>CH</span><div><b>团队管理</b><small>CODEX HARNESS</small></div></a>
     <nav>
       <a class="nav-active" href="#overview">总览</a>
       <a href="#people">员工</a>
@@ -19,16 +21,16 @@
     </nav>
     <div class="bar-actions">
       <span id="boss-chip" class="boss-chip">正在验证身份</span>
-      <a class="workbench-link" href="/boss/workbench">我的工作台 ↗</a>
-      <button id="logout" class="icon-button" title="退出登录">↪</button>
+      <a class="workbench-link" href="/boss/workbench?view=tasks">返回任务看板</a>
+      <button id="logout" class="icon-button logout-button" title="退出当前账号">退出登录</button>
     </div>
   </header>
 
-  <main>
+  <main class="cockpit-content">
     <section id="overview" class="hero">
       <div>
         <p class="eyebrow">OWNER CONTROL PLANE</p>
-        <h1>把权限边界，<em>看得见。</em></h1>
+        <h1>团队与项目</h1>
         <p class="hero-copy">账号管理与内容访问彻底分开。你能管理所有员工和项目元数据，但只有自己拥有或明确获授权的项目才能打开内容。</p>
       </div>
       <div class="hero-status"><i id="codex-light"></i><div><small>本机执行面</small><b id="codex-label">正在连接</b></div></div>
@@ -41,7 +43,9 @@
         <div><p class="eyebrow">IDENTITY & POLICY</p><h2>员工账号</h2><p>创建账号、重置密码、停用会话，并控制联网与配额。</p></div>
         <button id="new-user" class="primary">＋ 新员工</button>
       </div>
-      <div class="table-wrap">
+      <div class="board-toolbar"><label class="board-search">搜索<input id="employee-search" type="search" placeholder="姓名、账号或岗位" aria-label="搜索员工"></label><div class="board-switch" aria-label="员工展示方式"><button class="secondary" data-people-view="board" aria-pressed="true">员工看板</button><button class="secondary" data-people-view="table" aria-pressed="false">账号列表</button></div></div>
+      <div id="employee-board"></div>
+      <div id="employee-table-view" class="table-wrap" hidden>
         <table>
           <thead><tr><th>员工</th><th>状态</th><th>联网</th><th>项目 / 共享</th><th>空间</th><th>最近登录</th><th></th></tr></thead>
           <tbody id="employee-table"></tbody>

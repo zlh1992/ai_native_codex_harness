@@ -2,7 +2,7 @@
 
 | 字段 | 内容 |
 | --- | --- |
-| 状态 | 阻塞（connector 已连接，DNS 仍为旧 A 记录） |
+| 状态 | 已部署（2026-09-11 固定入口验收通过） |
 | 日期 | 2026-09-10 |
 | 负责人 | Codex |
 | 关联目标 | graph 通过 Named Tunnel 提供两个固定角色入口 |
@@ -35,12 +35,18 @@
 
 ## 实施计划
 
+2026-09-11 收尾：两域名权威 DNS 已返回 Cloudflare 地址，真实 HTTPS 登录页面及 ready health 均通过。切换正式 named 管理，移除并行 connector 与旧 quick 白名单；修正启动脚本末尾 quick-only 判断导致 named 成功却返回非零的问题，再运行 gate 并复查公网。
+
 1. 增加可验证的多 origin/角色配置及 ingress 校验，兼容未配置的 quick 模式。
 2. 补充角色地址输出、named 前置检查与双域名健康检查。
 3. 更新架构及操作指南，运行针对性测试和完整 gate。
 4. 取得 Cloudflare 账号或现成隧道配置后备份这两条 DNS，配置同一隧道、保存 token，排空后切换并验收。
 
 ## 实际改动
+
+- 2026-09-11：权威 DNS 的两个域名均已返回 Cloudflare 地址。真实 HTTPS 的老板/员工登录页返回 200、`/api/health` 为 ready、未登录 `/api/me` 返回 401、根路径按角色返回 302。
+- 已把本机 `.env` 切换为 named、主地址为老板域名，移除旧 Quick hostname 白名单；检查无活跃运行后重启 Portal。正式 `com.codex-harness-remote.tunnel` 建立四条连接后移除 `named-preflight`，停止旧 Quick Tunnel。清理后两固定域名再次通过实际 HTTPS 验证。
+- 修正 `start-tunnel.sh` 最后的 quick-only 判断，避免 named 成功后返回 1。实际 named 启动已退出 0；角色地址输出正确。
 
 - 2026-09-10 用户提供 connector 凭据并授权继续部署：先以私有 token 文件启动并核验远程路由；云端路由齐备后备份配置、检查活跃运行、切换 Portal 与隧道并核验两角色地址。凭据不写入 tracked 文件或日志。
 - 部署续跑基线为 graph `3a07d13`。已保存 Git 忽略目录下的 token 文件（0600、父目录 0700），用项目独立 cloudflared 与 `--token-file` 启动并行 connector，launchd label 为 `com.codex-harness-remote.named-preflight`。未使用 sudo 或全局 Homebrew 服务，不影响其他项目。
@@ -76,16 +82,19 @@
 | 当前活跃运行与后台任务 | 通过 | 只读汇总无非终态 turn，无运行中的 workflow job；未改业务数据 |
 | 相对 Markdown 链接检查 | 通过 | Node 扫描 git tracked/untracked Markdown 链接，168 项，0 缺失 |
 | 本地和既有 Quick Tunnel `/api/health` | 通过 | 都为 ok、codex ready、nativeCodexMemory=false |
-| 两个固定公网入口 | 未执行 | 缺少同事云端隧道配置/凭据；本机 Host 模拟不冒充公网验收 |
+| 两个固定公网入口（2026-09-11） | 通过 | 真实 HTTPS GET 登录页 200，ready health，未登录 API 401，角色根路径 302；未提交真实账号密码 |
 | 双域名配置预装后本地与旧公网 `/api/health` | 通过 | graph 重启后均 ok、codex ready，原生记忆关闭 |
-| 权威 DNS TCP 与两家公共 DoH | 未通过上线条件 | 两 hostname 仍为旧家庭 A；用户回复已修改后仍未观察到新解析 |
+| 权威 DNS TCP 与两家公共 DoH（2026-09-10 历史） | 当时未通过 | 当时仍为旧家庭 A；2026-09-11 已解析到 Cloudflare 地址 |
+| `./bin/stop-local.sh && ./bin/start-local.sh && ./bin/stop-tunnel.sh && ./bin/start-tunnel.sh` | 通过 | 空闲时切换；named 启动返回 0，两个域名 ready |
+| `npm run gate`（2026-09-11 收尾） | 通过 | 110 单元/集成 + 18 E2E，0 失败/跳过 |
 
 ## 结论
 
-graph 本机适配已完成并通过完整门控；此次已连接 Named Tunnel、核实云端路由、备份并预装双域名配置，重启后本地与旧公网入口正常。固定域名上线目标仍被 DNS 旧记录阻塞。未向生产写入测试账号/项目；并行 connector 保留供 DNS 更新后的接入验证。回滚可恢复私有配置备份、重启 Portal 并移除该 connector，保留 Quick 与业务数据。当前不能宣称固定 HTTPS、登录或流式公网验收通过。
+2026-09-11 固定域名已部署到 graph，真实 HTTPS 入口、角色跳转、健康检查与未登录保护通过。正式 named connector 接管，临时 connector 和旧 Quick 入口已撤下，本机地址保留。未向生产写入测试账号/项目，也没有改用户密码；本轮未执行真实密码登录、上传或模型长对话，因此不宣称这些业务冒烟已完成。
+
+回滚时保留业务数据与 token，可停公网并继续使用回环入口；若重新开启 Quick Tunnel，会产生新的临时 URL，必须同步临时 origin 白名单，不能承诺原 Quick 地址恢复。
 
 ## 遗留事项
 
-- 同事只需完成 DNS：备份/替换两个工作台 hostname 的旧 A 记录为现有隧道的代理 CNAME，并确认 zone Active。隧道及两条应用路由已经就绪，不需要重建。
-- DNS 就绪后再次检查活跃运行，将并行 connector 转为正式 named 管理、移除临时 label 和旧域名白名单，完成 HTTPS、登录、上传、真实 Codex 与 SSE 外网验收。当前已完成备份及 Portal 双域名预装。
+- DNS 和正式隧道切换已完成；用户可用现有账号继续进行实际登录和长对话验证，结果不包含在本轮入口验收结论中。
 - 云端身份由同事管理；不能用原阿里云账号假定具有该域名的 Cloudflare 管理权。

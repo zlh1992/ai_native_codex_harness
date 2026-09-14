@@ -1,8 +1,12 @@
 import { invariant } from './errors.mjs';
 import { readJson, sendJson, sseHeaders, sse } from './http-utils.mjs';
+import { assertStandardProject } from './private-projects.mjs';
+import { workflowRecovery } from './workflow-recovery.mjs';
+import { rootModel } from './models.mjs';
 
 export function createWorkGraphRoutes({ db, store, graphs, reviews, runtime, scheduler, shares, codex, config,
   requireMutation, refreshSession, projectFor, requireAdmin, audit }) {
+  const publicJob = job => workflowJobView(job, db, config);
   return async function route(req, res, url, originalSession) {
     const pathname = url.pathname;
     let session = originalSession;
@@ -28,7 +32,7 @@ export function createWorkGraphRoutes({ db, store, graphs, reviews, runtime, sch
     match = pathname.match(/^\/api\/projects\/([^/]+)\/work-graphs(?:\/(generate|candidates))?$/);
     if (match) {
       if (req.method === 'POST') invariant(config.workGraphEnabled, 503, 'WORK_GRAPH_DISABLED', '工作图创建已由运维关闭。');
-      projectFor(session, match[1]);
+      assertStandardProject(projectFor(session, match[1]));
       if (req.method === 'GET' && match[2] === 'candidates') {
         store.owner(match[1], session.user.id);
         reply(200, { employees: db.listUsers().filter((u) => u.role === 'user' && u.status === 'active')
@@ -55,10 +59,13 @@ export function createWorkGraphRoutes({ db, store, graphs, reviews, runtime, sch
         const body = await bodyFor(); job = store.job(match[1]); store.owner(job.projectId, session.user.id);
         invariant(job.status === 'needs_attention', 409, 'WORKFLOW_JOB_CHANGED', '仅可重试需要处理的后台任务。');
         if (job.runId) store.assertRun(job.runId, job.generation);
-        invariant(!job.turnRunId || body.acknowledgeUncertain === true, 409, 'MODEL_DELIVERY_UNCERTAIN', '请先核对后台对话并确认再次调用。');
+        const recovery = workflowRecovery(job, db.getTurnRun(job.turnRunId));
+        invariant(recovery !== 'blocked', 409, 'WORKFLOW_RECOVERY_BLOCKED', '运行尚未结束或回执需核对，不能重新调用。');
+        invariant(recovery !== 'confirm' || body.acknowledgeUncertain === true, 409, 'MODEL_DELIVERY_UNCERTAIN', '请先查看后台记录并确认再次调用。');
         const payload = { ...job.payload, ownerEpoch: store.policyEpoch(session.user.id) };
-        store.sql.prepare(`UPDATE workflow_jobs SET status='queued',attempt=0,turn_run_id=NULL,result_json=NULL,payload_json=?,due_at=?,error_code=NULL WHERE id=?`)
-          .run(JSON.stringify(payload), Date.now(), job.id);
+        // Keep completed receipts/bindings: retry means resume, not duplicate model writes.
+        store.sql.prepare(`UPDATE workflow_jobs SET status='queued',attempt=0,turn_run_id=?,payload_json=?,due_at=?,error_code=NULL,updated_at=? WHERE id=? AND status='needs_attention'`)
+          .run(recovery === 'resume' ? job.turnRunId : null, JSON.stringify(payload), Date.now(), new Date().toISOString(), job.id);
         job = store.job(job.id); scheduler.wake();
       } else if (req.method !== 'GET') return false;
       reply(200, { job: publicJob(job) }); return true;
@@ -184,7 +191,17 @@ function rasterType(bytes) {
   return null;
 }
 
-function publicJob(job) {
+export function workflowJobView(job, db, config) {
+  const run = job.turnRunId ? db.getTurnRun(job.turnRunId) : null;
+  const chat = run ? db.getChat(run.chatId) : db.listChats({ projectId: job.projectId, userId: job.ownerId }).find(c => c.workflowJobId === job.id);
+  const recovery = workflowRecovery(job, run);
+  const count = chat ? db.db.prepare('SELECT COUNT(*) AS n FROM turn_runs WHERE chat_id=? AND codex_turn_id IS NOT NULL').get(chat.id).n : 0;
+  const tool = run ? db.db.prepare("SELECT event_type,created_at FROM turn_events WHERE turn_run_id=? AND event_type IN ('tool_started','tool_completed') ORDER BY id DESC LIMIT 1").get(run.id) : null;
   return { id: job.id, type: job.type, status: job.status, dueAt: job.dueAt, attempt: job.attempt,
+    recovery, chatId: chat?.id || null, maxAttempts: job.maxAttempts,
+    progress: { configuredModel: rootModel(config, chat, db.getUserById(job.ownerId)), configuredEffort: config.codexReasoningEffort,
+      modelCalls: count, runStatus: run?.status || null, startedAt: run?.startedAt || run?.createdAt || null,
+      completedAt: run?.completedAt || null, lastToolAt: tool?.created_at || null, lastToolStatus: tool?.event_type || null,
+      receiptSaved: Boolean(job.result) },
     errorCode: job.errorCode, result: job.result ? Object.fromEntries(['planId', 'roadmapId', 'version', 'runId', 'reviewId'].filter(key => job.result[key] !== undefined).map(key => [key, job.result[key]])) : null, taskId: job.taskId, createdAt: job.createdAt };
 }

@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import { EventEmitter } from 'node:events';
+import path from 'node:path';
+import { buildSeatbeltProfile } from './sandbox.mjs';
 
 export const PORTAL_MEMORY_CONFIG = Object.freeze({
   features: Object.freeze({ memories: false }),
@@ -56,11 +58,16 @@ export class CodexAppServerClient extends EventEmitter {
       '-c', 'memories.generate_memories=false',
       '-c', 'memories.use_memories=false',
     ];
-    for (const role of ['default', 'worker', 'explorer']) {
+    for (const role of this.config.searchOnly ? [] : ['default', 'worker', 'explorer']) {
       args.push('-c', `agents.${role}.description="Portal-managed Luna subagent"`);
       args.push('-c', `agents.${role}.config_file="${this.config.portalAgentConfig}"`);
     }
-    for (const feature of disabledFeatures) args.push('--disable', feature);
+    for (const feature of disabledFeatures) {
+      if (this.config.searchOnly && !this.config.summaryOnly && feature === 'web_search') continue;
+      args.push('--disable', feature);
+    }
+    if (this.config.searchOnly) args.push('-c', `web_search="${this.config.summaryOnly ? 'disabled' : 'live'}"`, '-c', 'agents.enabled=false',
+      '--disable', 'remote_plugin', '--disable', 'tool_suggest');
     this.stopping = false;
     this.lastError = null;
     // App Server authenticates from local Codex state and does not need Portal,
@@ -73,7 +80,23 @@ export class CodexAppServerClient extends EventEmitter {
     ]) {
       if (process.env[key] !== undefined) childEnv[key] = process.env[key];
     }
-    this.process = spawn(this.config.codexBin, args, {
+    let binary = this.config.codexBin;
+    let spawnArgs = args;
+    if (this.config.searchOnly) {
+      // Dedicated search process sees only its disposable auth/state directory,
+      // never the Portal database, workspaces, DSH sessions or user Codex home.
+      for (const key of Object.keys(childEnv)) delete childEnv[key];
+      Object.assign(childEnv, { HOME: this.config.rootDir, CODEX_HOME: this.config.rootDir,
+        TMPDIR: this.config.rootDir, PATH: '/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin', LANG: 'en_US.UTF-8' });
+      const metadata = [];
+      for (let dir = path.dirname(this.config.codexBin); ; dir = path.dirname(dir)) { metadata.push(dir); if (dir === path.dirname(dir)) break; }
+      for (let dir = this.config.rootDir; ; dir = path.dirname(dir)) { metadata.push(dir); if (dir === path.dirname(dir)) break; }
+      const profile = buildSeatbeltProfile({ writableRoots: [this.config.rootDir],
+        readableRoots: [path.dirname(this.config.codexBin)], readableMetadataPaths: metadata, networkAccess: true });
+      binary = '/usr/bin/sandbox-exec';
+      spawnArgs = ['-p', profile, this.config.codexBin, ...args];
+    }
+    this.process = spawn(binary, spawnArgs, {
       cwd: this.config.rootDir,
       env: childEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -87,7 +110,7 @@ export class CodexAppServerClient extends EventEmitter {
       const error = this.lastError || new Error(`Codex app-server 已退出 (code=${code}, signal=${signal})`);
       this.lastError = error;
       this.started = false;
-      for (const pending of this.pending.values()) pending.reject(error);
+      for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
       this.pending.clear();
       this.emit('exit', error);
     });
@@ -114,6 +137,13 @@ export class CodexAppServerClient extends EventEmitter {
       error.code = 'CODEX_NATIVE_MEMORY_ENABLED';
       this.lastError = error;
       try { this.process?.kill('SIGTERM'); } catch { /* already stopped */ }
+      throw error;
+    }
+    if (this.config.searchOnly && (effective?.config?.web_search !== (this.config.summaryOnly ? 'disabled' : 'live') || Object.values(effective?.config?.mcp_servers || {}).some((server) => server.enabled !== false))) {
+      const error = new Error('专用搜索配置不符合隔离要求。');
+      error.code = 'CODEX_SEARCH_CONFIG_UNSAFE';
+      this.lastError = error;
+      this.stop();
       throw error;
     }
     this.started = true;

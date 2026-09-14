@@ -9,16 +9,18 @@
 - **PRD-003**：chat transcript 默认只属于创建者。共享同一项目、roadmap 或 worktree 不授予读取其他用户原 chat 的能力。唯一例外是 owner 显式新 share：将该项目 owner 已有全部 chat 一次性 fork 为接收者私有副本；后续不自动同步。
 - **PRD-004**：跨人员交付经过 task/submission、显式 share 时的一次性 thread fork 或未来 artifact/handoff；禁止裸 `inject_items`、实时全量 transcript 同步或共用原 thread id。
 - **PRD-005**：当前仅支持一个超级管理员和多个普通员工；不能从现有角色模型推导组织、多老板或细粒度 viewer/reviewer 权限。
-- **PRD-006**：EDIT/EXECUTE 偏好属于 chat，不能由同项目其他 chat 的选择隐式改变；新建和迁移后的 chat 默认 EXECUTE，老板与员工采用同一模式语义和项目内自动放行策略。
-- **PRD-007**：长期记忆以 `user_id` 私有；同一用户只可跨其当前仍有有效 access 的来源项目召回，`admin` 角色不构成员工记忆读取旁路。普通 chat 可独立关闭召回或形成记忆；planner/reviewer 一律不召回、不形成记忆。
+- **PRD-006**：EDIT/EXECUTE 偏好属于 chat，不能由同项目其他 chat 的选择隐式改变；新建和迁移后的 chat 默认 EXECUTE。普通项目采用同一项目内自动放行策略；隐私项目独立 controlMode 默认 manual，不能由其他 chat 改变。
+- **PRD-007**：长期记忆以 `user_id` 私有；同一用户仅可跨其当前仍有有效 access 的普通来源项目召回。隐私项目记忆额外以 project_id 隔离，只在本项目多 chat 共享；普通/隐私及不同隐私项目双向隔离。`admin` 无记忆读取旁路；chat 独立控制搜索/管理，planner/reviewer 禁止记忆。
 - **PRD-008**：若 owner chat 曾引用可用的跨项目记忆，`files_and_history` 分享必须显式确认并绑定接收者、chat/引用快照；快照变化、重复使用或超时必须拒绝。若引用已因删除或来源撤权而失效，必须先显式重置 chat，不能继续分享其历史。
+
+- **PRD-009**：project_type 创建后不可变。local_private 只由活动老板本人创建、访问；禁止员工授权、分享、工作图/task/规划审核及 Codex thread 绑定。不得转换旧项目或隐式回退 Codex。完整契约见 [本地隐私项目](10-local-private-projects.md)。
 
 ## 运行平台约束
 
 - **RUN-001**：支持平台是 macOS；命令隔离依赖 `sandbox-exec`/Seatbelt。Node.js 必须为 22.13 或更高。
 - **RUN-002**：Portal 必须只监听 `127.0.0.1`、`localhost` 或 `::1`；公网访问必须经过 HTTPS 隧道。
 - **RUN-003**：Codex app-server 必须通过后端 stdio JSON-RPC 使用，不得把原始 RPC 或非回环 app-server WebSocket 暴露给浏览器。
-- **RUN-004**：Portal 启动成功的定义是 HTTP、Codex initialize 与 Portal skill 注册同时 ready；`/api/health` 必须区分 `starting`、`failed`、`ready`。
+- **RUN-004**：默认启动成功要求 HTTP、Codex initialize 和 Portal skill 同时 ready。显式启用本地引擎时，HTTP + 本地 ready 可提供隐私项目的部分能力，不等于普通 Codex ready；health 必须分开报告两个引擎。模型目录健康不是推理验收。
 - **RUN-005**：正式服务与隧道由独立 launchd job 管理，PID 文件只能引用经过命令标记校验的本项目进程。
 - **RUN-006**：Portal 启动的 Codex app-server 必须关闭 `memories` feature，并固定 `memories.generate_memories=false` 与 `memories.use_memories=false`；相同配置必须覆盖 start/resume/fork 与子代理，且 `config/read` 生效值验证通过后才可 ready。浏览器、项目配置和运营开关不得重新开启原生记忆。
 
@@ -36,7 +38,7 @@
 - **FS-003**：共享项目必须为每个 active 员工建立独立 `project_access` 和 worktree；同一项目同一员工最多一个 active access。新授权必须先把 owner 当前 Git 可见的 tracked/untracked/删除状态提交为不可变基线，并将 `base_sha` 返回和持久化；不能从旧 HEAD 建树后留下一个未绑定的易变 patch。
 - **FS-004**：同一 chat 任一时刻最多一个 active root turn；同一 access/worktree 的不同 chat 可以并发。浏览器文件修改、submission 快照与 owner delivery 必须等待整个 access/worktree 空闲。浏览器编辑器覆盖既有文件时必须携带读取所得 SHA-256 `If-Match` 版本；stale save 返回 `FILE_VERSION_CONFLICT`，不能静默覆盖另一标签页或先前写入。并发 turn/命令若修改同一文件可能相互观察或覆盖，当前不承诺自动冲突解决。
 - **FS-005**：删除文件或项目默认移动到项目 trash，不能在普通 Web 流程中不可恢复销毁。
-- **FS-006**：命令环境不得继承 Portal、隧道、Codex 或其他项目秘密；网络访问默认关闭并按用户授权。命令 `HOME`/`TMPDIR` 必须按 `user.id + project_access.id` 隔离，不能由同一用户的不同项目复用可写 runtime。
+- **FS-006**：命令环境不得继承 Portal、隧道、Codex 或其他项目秘密；普通项目网络默认关闭并按用户授权，隐私项目命令一律禁网。命令 `HOME`/`TMPDIR` 按 user.id + project_access.id 隔离，不能跨项目复用。
 - **FS-007**：项目 HTML 必须默认以可切回源码的受限 iframe 渲染。iframe 与 HTML HTTP 响应都必须 sandbox，禁止 `allow-same-origin`、表单、弹窗、顶层导航、嵌套 frame、worker 和网络 API；不得为了预览把项目脚本提升为 Portal 同源脚本，或绕过 `project_access`、canonical path 与文件读取边界。
 
 ## 数据与生命周期约束

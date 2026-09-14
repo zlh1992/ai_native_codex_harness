@@ -46,12 +46,15 @@ async function workflowTurn(threadId, turnId, prompt) {
         : [node('delivery', ids[0], [], true)];
       toolData(await callTool(threadId, turnId, 'work_graph_submit_plan', { graph: { schemaVersion: 1, title: 'Generated team graph', nodes } }));
     } else {
+      const currentFiles = context.files.filter(file => !file.evidenceRef);
+      const upstream = context.files.find(file => file.evidenceRef);
       const verdict = context.submission.summary.includes('needs-rework') ? 'rework'
-        : context.submission.outputs.length && !context.files.length ? 'needs_human' : 'passed';
+        : context.submission.outputs.length && !currentFiles.length ? 'needs_human' : 'passed';
       toolData(await callTool(threadId, turnId, 'work_graph_submit_review', { verdict,
         feedback: verdict === 'rework' ? 'Add the missing supporting evidence.' : 'The stated result is supported.',
         items: context.task.checklist.map((item) => ({ id: item.id, status: verdict === 'passed' ? 'passed' : 'failed',
-          comment: 'Checked the supplied result.', evidence: [context.files[0]?.path || 'result_summary'] })) }));
+          comment: 'Checked the supplied result.', evidence: [currentFiles[0]?.path || 'result_summary',
+            ...(upstream ? [upstream.evidenceRef] : [])] })) }));
     }
     completeTurn(threadId, turnId, prompt);
   } catch {

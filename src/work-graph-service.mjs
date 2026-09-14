@@ -178,6 +178,28 @@ export class WorkGraphService {
       deliveryCommitSha: row.delivery_commit_sha, ...JSON.parse(row.manifest_json) } : null;
   }
 
+  reviewInputs(task) {
+    // Only the handoffs frozen when this task was dispatched, never arbitrary project files.
+    const dependencies = this.node(task).dependsOn;
+    invariant(task.inputManifest.length === dependencies.length
+      && new Set(task.inputManifest.map(input => input.taskId)).size === dependencies.length,
+    409, 'UPSTREAM_EVIDENCE_CHANGED', '任务缺少固定上游交付证据。');
+    return task.inputManifest.map(input => {
+      const source = this.db.getTask(input.taskId);
+      const submission = this.db.getSubmission(input.submissionId);
+      const handoff = source && this.handoffFor(source.id, input.taskVersion);
+      invariant(source?.projectId === task.projectId && source.workflowRunId === task.workflowRunId
+        && dependencies.includes(source.nodeKey) && source.status === 'passed'
+        && source.version === input.taskVersion && submission?.taskId === source.id
+        && submission.taskVersion === input.taskVersion && submission.verdict === 'passed'
+        && handoff?.id === input.id && handoff.submissionId === submission.id
+        && handoff.deliveryCommitSha === input.deliveryCommitSha && submission.deliveryCommitSha === input.deliveryCommitSha,
+      409, 'UPSTREAM_EVIDENCE_CHANGED', '固定上游交付证据不匹配，请老板核对。');
+      return { submissionId: submission.id, snapshotCommitSha: submission.snapshotCommitSha,
+        outputs: submission.outputsManifest.map(output => ({ ...output, evidenceRef: `upstream:${submission.id}:${output.path}` })) };
+    });
+  }
+
   handoffs(taskId, userId) {
     const task = this.db.getTask(taskId);
     invariant(task?.workflowRunId && this.db.getUserById(userId)?.status === 'active', 403, 'TASK_FORBIDDEN', '任务不可访问。');
@@ -241,7 +263,8 @@ export class WorkGraphService {
       }) };
   }
   publicTask(task) { const { assignedAccessId, ...safe } = task;
-    return { ...safe, ...(task.workflowRunId ? { workflowStatus: this.store.run(task.workflowRunId)?.status } : {}) }; }
+    const run = task.workflowRunId ? this.store.run(task.workflowRunId) : null;
+    return { ...safe, ...(run ? { workflowStatus: run.status, reviewMode: nodeReviewMode(this.node(task), run.reviewPolicy) } : {}) }; }
   publicSubmission(submission) {
     const { projectAccessId, codexThreadId, codexTurnId, finalItemId, ...safe } = submission;
     return safe;

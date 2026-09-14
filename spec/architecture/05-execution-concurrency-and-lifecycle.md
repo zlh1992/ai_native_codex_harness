@@ -2,6 +2,8 @@
 
 ## 两级容量模型
 
+本章自动放行/原生 thread 路径描述 standard 项目。local_private 额外限制本机一个活动 DSH root，并领取同一全局 root/EXECUTE 席位；manual 默认逐项确认文件变更、命令和云搜索，auto 也不能在 EDIT 执行命令。两个引擎的用户/工作区忙碌状态必须聚合，Codex 故障不得暂停本地输入。详见 [本地生命周期](10-local-private-projects.md)。
+
 Portal 在 App Server 最大并发之上再施加业务调度：
 
 | 资源 | 当前硬上限 | 作用 |

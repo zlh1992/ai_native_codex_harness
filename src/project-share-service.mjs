@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { invariant } from './errors.mjs';
+import { assertStandardProject } from './private-projects.mjs';
 
 export class ProjectShareService {
   constructor({ db, workspace, worktrees, codex, store, memory = null }) { Object.assign(this, { db, workspace, worktrees, codex, store, memory }); }
@@ -12,6 +13,7 @@ export class ProjectShareService {
   }
 
   async grant({ project, userId, authorize, scope = 'files_and_history', memoryConfirmationToken = null }) {
+    assertStandardProject(this.db.getProject(project.id));
     invariant(['files_only', 'files_and_history'].includes(scope), 400, 'INVALID_SHARE_SCOPE', '分享范围无效。');
     const check = () => {
       authorize();
@@ -75,6 +77,7 @@ export class ProjectShareService {
   }
 
   prepareWorkflow(job) {
+    assertStandardProject(this.db.getProject(job.projectId));
     const run = this.store.assertRun(job.runId, job.generation, ['preparing']);
     this.store.assertJob(job.id, job.leaseToken);
     const project = this.store.owner(run.projectId, run.ownerId);

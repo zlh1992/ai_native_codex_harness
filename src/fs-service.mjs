@@ -224,6 +224,12 @@ export class WorkspaceService {
     return { path: relative, size: result.size, modifiedAt: result.modifiedAt, version: result.version };
   }
 
+  approvalFingerprint(project, relativePath) {
+    const { relative } = this.resolve(project, relativePath);
+    invariant(relative, 400, 'INVALID_PATH', '必须指定审批目标，不能变更项目根目录。');
+    return this.#fileOperation(project, { operation: 'fingerprint', relative }).version;
+  }
+
   async spreadsheetPreview(project, relativePath) {
     invariant(/\.(xlsx|xlsm)$/i.test(String(relativePath)), 415, 'UNSUPPORTED_SPREADSHEET', '当前表格预览支持 .xlsx 和 .xlsm。');
     const file = this.readBuffer(project, relativePath, Math.min(this.config.uploadMaxBytes, 20 * 1024 * 1024));

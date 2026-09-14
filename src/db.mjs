@@ -3,6 +3,8 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { ensureSubmissionSchema, migrateWorkGraph } from './work-graph-schema.mjs';
+import { migratePrivateProjects, assertStandardProject } from './private-projects.mjs';
+import { migrateToolDetails } from './tool-details.mjs';
 
 function json(value, fallback = {}) {
   try { return JSON.parse(value); } catch { return fallback; }
@@ -330,6 +332,8 @@ export class HarnessDatabase {
     this.#backfillOwnerAccess();
     this.#repairOrphanedSubmissionsOnce();
     migrateWorkGraph(this.db);
+    migratePrivateProjects(this.db);
+    migrateToolDetails(this.db);
   }
 
   #ensureColumn(table, name, definition) {
@@ -508,11 +512,11 @@ export class HarnessDatabase {
   deleteUserSessions(userId) { this.db.prepare('DELETE FROM sessions WHERE user_id=?').run(userId); }
   cleanSessions() { this.db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(now()); }
 
-  createProject({ userId, slug, name, description = '' }) {
+  createProject({ userId, slug, name, description = '', projectType = 'standard' }) {
     const id = randomUUID();
     const timestamp = now();
-    this.db.prepare('INSERT INTO projects (id,user_id,slug,name,description,created_at,updated_at) VALUES (?,?,?,?,?,?,?)')
-      .run(id, userId, slug, name, description, timestamp, timestamp);
+    this.db.prepare('INSERT INTO projects (id,user_id,slug,name,description,created_at,updated_at,project_type) VALUES (?,?,?,?,?,?,?,?)')
+      .run(id, userId, slug, name, description, timestamp, timestamp, projectType);
     const project = this.getProject(id);
     try {
       this.createOwnerAccess(project);
@@ -526,6 +530,7 @@ export class HarnessDatabase {
   mapProject(row) {
     return row ? {
       id: row.id, userId: row.user_id, slug: row.slug, name: row.name,
+      projectType: row.project_type || 'standard',
       description: row.description, createdAt: row.created_at, updatedAt: row.updated_at,
       username: row.username, displayName: row.display_name,
       repoKind: row.repo_kind || 'directory', accessId: row.access_id,
@@ -560,14 +565,14 @@ export class HarnessDatabase {
       a.id AS access_id,a.user_id AS access_user_id,a.access_kind,a.tree_path,a.branch_name,a.base_sha
       FROM projects p JOIN users owner ON owner.id=p.user_id
       JOIN project_access a ON a.project_id=p.id AND a.user_id=? AND a.status='active'
-      WHERE p.id=?`).get(userId, projectId));
+      WHERE p.id=? AND (p.project_type='standard' OR (p.user_id=a.user_id AND a.access_kind='owner'))`).get(userId, projectId));
   }
 
   listProjectsForUser(userId) {
     return this.db.prepare(`SELECT p.*,owner.username,owner.display_name,
       a.id AS access_id,a.user_id AS access_user_id,a.access_kind,a.tree_path,a.branch_name,a.base_sha
       FROM project_access a JOIN projects p ON p.id=a.project_id JOIN users owner ON owner.id=p.user_id
-      WHERE a.user_id=? AND a.status='active' ORDER BY p.updated_at DESC`).all(userId).map((row) => this.mapProject(row));
+      WHERE a.user_id=? AND a.status='active' AND (p.project_type='standard' OR (p.user_id=a.user_id AND a.access_kind='owner')) ORDER BY p.updated_at DESC`).all(userId).map((row) => this.mapProject(row));
   }
 
   listAdminProjects() {
@@ -624,6 +629,7 @@ export class HarnessDatabase {
   }
 
   grantProjectAccess({ id = randomUUID(), projectId, userId, treePath, branchName, baseSha = null }) {
+    assertStandardProject(this.getProject(projectId));
     this.db.prepare(`INSERT INTO project_access
       (id,project_id,user_id,access_kind,tree_path,branch_name,base_sha,status,created_at)
       VALUES (?,?,?,'shared',?,?,?,'active',?)`).run(id, projectId, userId, treePath, branchName, baseSha, now());
@@ -701,6 +707,7 @@ export class HarnessDatabase {
       purpose: row.purpose || 'normal', workflowJobId: row.workflow_job_id || null,
       preferredMode: row.preferred_mode || 'execute',
       preferredModel: row.preferred_model || null,
+      controlMode: row.control_mode || 'manual', localSessionId: row.local_session_id || null,
       useMemory: row.use_memory === undefined ? true : Boolean(row.use_memory),
       saveMemory: row.save_memory === undefined ? true : Boolean(row.save_memory),
       memoryContextResetAt: row.memory_context_reset_at || null,
@@ -737,6 +744,7 @@ export class HarnessDatabase {
       ['title', 'title'], ['codexThreadId', 'codex_thread_id'], ['status', 'status'],
       ['taskId', 'task_id'], ['taskVersion', 'task_version'], ['threadState', 'thread_state'],
       ['threadError', 'thread_error'], ['preferredMode', 'preferred_mode'], ['preferredModel', 'preferred_model'],
+      ['controlMode', 'control_mode'], ['localSessionId', 'local_session_id'],
       ['useMemory', 'use_memory'], ['saveMemory', 'save_memory'],
     ]) {
       if (key in patch) {
@@ -837,8 +845,24 @@ export class HarnessDatabase {
     return this.db.prepare('SELECT * FROM chat_thread_recoveries WHERE chat_id=? ORDER BY id DESC').all(chatId)
       .map((row) => ({
         id: row.id, chatId: row.chat_id, oldThreadId: row.old_thread_id, newThreadId: row.new_thread_id,
-        reason: row.reason, createdAt: row.created_at,
+        reason: row.reason, createdAt: row.created_at, engine: row.engine || 'codex',
       }));
+  }
+
+  recoverLocalChat({ chatId, expectedSessionId, newSessionId }) {
+    const timestamp = now();
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const updated = this.db.prepare(`UPDATE chats SET local_session_id=?,thread_state='ready',thread_error=NULL,
+        memory_context_reset_at=?,updated_at=? WHERE id=? AND local_session_id IS ?
+        AND project_id IN (SELECT id FROM projects WHERE project_type='local_private')`)
+        .run(newSessionId, timestamp, timestamp, chatId, expectedSessionId || null);
+      if (updated.changes !== 1) throw new Error('LOCAL_SESSION_MAPPING_CHANGED');
+      this.db.prepare(`INSERT INTO chat_thread_recoveries (chat_id,old_thread_id,new_thread_id,reason,created_at,engine)
+        VALUES (?,?,?,'explicit_local_reset',?,'deepseek')`).run(chatId, expectedSessionId || null, newSessionId, timestamp);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    return this.getChat(chatId);
   }
 
   getChatInput(chatId, id) {

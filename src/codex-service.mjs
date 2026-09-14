@@ -9,6 +9,8 @@ import { CapacityService } from './capacity-service.mjs';
 import { HttpError, invariant } from './errors.mjs';
 import { runSandboxedCommand } from './sandbox.mjs';
 import { MEMORY_TOOLS, callMemoryTool } from './memory-tools.mjs';
+import { assertStandardProject } from './private-projects.mjs';
+import { ToolDetailsService } from './tool-details.mjs';
 
 const EFFORTS = new Set(['none', 'low', 'medium', 'high', 'xhigh', 'max']);
 const TURN_MODES = new Set(['edit', 'execute']);
@@ -86,6 +88,7 @@ export class CodexService extends EventEmitter {
     this.db = db;
     this.workspace = workspace;
     this.memory = memory;
+    this.toolDetails = new ToolDetailsService({ db, config });
     this.client = new CodexAppServerClient(config);
     this.capacity = new CapacityService({
       db, maxRootTurns: config.portalMaxActiveRootTurns,
@@ -135,7 +138,7 @@ export class CodexService extends EventEmitter {
       throw error;
     }
   }
-  stop() { this.inputQueue.stop(); this.client.stop(); }
+  stop() { this.toolDetails.stop(); this.inputQueue.stop(); this.client.stop(); }
 
   workspaceBusy(projectAccessId) {
     const recovering = [...this.recoveringChats].some((chatId) => this.db.getChat(chatId)?.projectAccessId === projectAccessId);
@@ -439,7 +442,7 @@ export class CodexService extends EventEmitter {
       return { itemId: data.itemId || null, byteLength: Buffer.byteLength(String(data.delta || '')), omittedFromReplay: true };
     }
     if (event === 'tool_started' || event === 'tool_completed') {
-      return { callId: data.callId || null, name: data.name || null, success: data.success !== false };
+      return { callId: data.callId || null, name: data.name || null, success: data.success !== false && !data.result?.error && !data.result?.timedOut && !data.result?.signal && (data.result?.exitCode == null || data.result.exitCode === 0) };
     }
     if (event === 'native_item' || event === 'subagent_updated') {
       return {
@@ -480,6 +483,7 @@ export class CodexService extends EventEmitter {
   }
 
   #emitPersistent({ turnRunId, chatId, emit }, event, data = {}) {
+    try { this.toolDetails.capture(turnRunId, chatId, event, data); } catch { /* Details must never block execution. */ }
     if (['assistant_delta', 'reasoning_delta', 'command_output'].includes(event)) {
       this.emit('turnLiveEvent', { turnRunId, chatId, eventType: event, payload: data });
       try { emit(event, data); } catch { /* disconnected browser; terminal snapshot still persists */ }
@@ -522,6 +526,7 @@ export class CodexService extends EventEmitter {
   }
 
   async runTurn({ chat, project, user, prompt, effort, mode = 'execute', emit, inputId = null, workflowLeaseToken = null }) {
+    assertStandardProject(this.db.getProject(project.id));
     invariant(inputId || !this.db.listChatInputs(chat.id).length, 409, 'INPUT_QUEUE_PENDING', '请通过消息队列发送，以保持发送顺序。');
     const model = rootModel(this.config, chat, user);
     const text = messageText(prompt);
@@ -1060,7 +1065,7 @@ export class CodexService extends EventEmitter {
     if (message.method === 'item/started') {
       const item = params.item || {};
       if (item.type === 'fileChange') this.#rememberFileChanges(active, item.id, item.changes);
-      if (item.type === 'commandExecution' || item.type === 'fileChange' || item.type === 'dynamicToolCall') {
+      if (['commandExecution', 'fileChange', 'dynamicToolCall', 'mcpToolCall', 'webSearch'].includes(item.type)) {
         this.#emit(active, 'native_item', { phase: 'started', item });
       }
       if (item.type === 'collabAgentToolCall') {
@@ -1090,7 +1095,7 @@ export class CodexService extends EventEmitter {
       }
       return;
     }
-    if (message.method === 'item/completed' && ['commandExecution', 'fileChange', 'dynamicToolCall', 'collabAgentToolCall'].includes(params.item?.type)) {
+    if (message.method === 'item/completed' && ['commandExecution', 'fileChange', 'dynamicToolCall', 'collabAgentToolCall', 'mcpToolCall', 'webSearch'].includes(params.item?.type)) {
       if (params.item.type === 'collabAgentToolCall') this.#trackSubagentItem(active, params.item, 'completed');
       else this.#emit(active, 'native_item', { phase: 'completed', item: params.item });
       return;
@@ -1255,6 +1260,7 @@ export class CodexService extends EventEmitter {
   #recordAutomaticApproval(active, kind, request, {
     approvalId = `auto:${randomUUID()}`, fileTargets = null, itemId = null,
   } = {}) {
+    if (active.localApprovalManaged) return;
     const safeRequest = this.#publicApprovalRequest(request, fileTargets);
     this.db.createApproval({
       id: approvalId, turnRunId: active.turnRunId, chatId: active.chat.id, userId: active.user.id,
@@ -1394,6 +1400,14 @@ export class CodexService extends EventEmitter {
       return { ...result, storageBytes: usage.bytes, storageQuotaBytes: approvedUser.maxStorageBytes };
     }
     throw new HttpError(400, 'UNKNOWN_TOOL', `未知工作区工具: ${name}`);
+  }
+
+  executeWorkspaceTool(active, name, args) { return this.#callTool(active, name, args); }
+  emitRuntimeEvent(context, event, data) { return this.#emitPersistent(context, event, data); }
+  isReady() { return this.skillsReady && this.client.started; }
+  steerInput(active, input) {
+    return this.client.request('turn/steer', { threadId: active.threadId, expectedTurnId: active.turnId,
+      clientUserMessageId: input.id, input: [{ type: 'text', text: input.prompt, text_elements: [] }] }, 15_000);
   }
 
   #finish(active, error = null, turn = null) {

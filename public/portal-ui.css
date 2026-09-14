@@ -1,0 +1,60 @@
+:root{--board-bg:#111a23;--board-panel:#19252f;--board-card:#22323e;--board-line:#354652;--board-muted:#a7bbc8;--board-text:#edf4f8}
+[hidden]{display:none!important}
+body[data-auth="checking"] dialog,body[data-auth="error"] dialog{display:none!important}
+body[data-auth="checking"] #app-view,body[data-auth="error"] #app-view,body[data-auth="checking"] #login-view,body[data-auth="error"] #login-view,body[data-auth="checking"] .cockpit-bar,body[data-auth="checking"] .cockpit-content,body[data-auth="error"] .cockpit-bar,body[data-auth="error"] .cockpit-content{display:none!important}
+.auth-status{min-height:100vh;display:grid;place-content:center;justify-items:center;gap:16px;text-align:center;padding:24px;background:#0e171e;color:#eef4f8;font-size:16px}.auth-status strong{font-size:24px}.auth-status p{max-width:480px;color:#a7bbc8}.auth-status button{font-size:16px;padding:12px 24px}
+.topbar .nav-button,.topbar .icon-button,.cockpit-bar .icon-button{font-size:14px;white-space:nowrap;min-height:40px}.topbar{gap:16px}.topbar .brand-button{cursor:pointer}.topbar .user-chip{font-size:13px}.icon-button.logout-button{color:#bacbd7;background:transparent}
+.board-toolbar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin:18px 0}.board-toolbar h2{font-size:20px;margin:0}.board-toolbar p{font-size:13px;color:var(--board-muted);margin:5px 0}.board-search{display:flex;align-items:center;gap:10px;border:1px solid var(--board-line);background:var(--board-bg);padding:10px 14px;border-radius:9px}.board-search input{font:inherit;font-size:14px;color:var(--board-text);border:0;background:none;outline:none;min-width:180px}.board-switch{display:flex;gap:4px}.board-switch button{font-size:14px}.board-switch button[aria-pressed="true"]{background:#314e63;color:#fff;border-color:#6198be}
+.kanban-board{display:flex;gap:16px;align-items:flex-start;overflow-x:auto;overscroll-behavior-x:contain;padding:4px 2px 18px;scrollbar-width:auto;scroll-snap-type:x proximity;min-height:240px;color:var(--board-text)}
+.kanban-column{flex:0 0 292px;min-width:0;max-height:min(72vh,850px);display:flex;flex-direction:column;border:1px solid var(--board-line);border-radius:14px;background:var(--board-panel);scroll-snap-align:start;border-top:3px solid var(--column-color,#7998ac)}
+.kanban-column[data-tone="waiting"]{--column-color:#8396a7}.kanban-column[data-tone="active"]{--column-color:#62b7ff}.kanban-column[data-tone="review"]{--column-color:#c4a4ff}.kanban-column[data-tone="blocked"]{--column-color:#ffb474}.kanban-column[data-tone="done"]{--column-color:#77d5b5}
+.kanban-column>header{display:flex;align-items:center;gap:9px;padding:16px 14px 12px}.kanban-column>header h3{font-size:15px;letter-spacing:.01em;margin:0;flex:1}.kanban-count{background:#2c3e4b;color:#d2e4ef;border-radius:6px;padding:2px 7px;font-size:13px}
+.kanban-items{min-height:70px;overflow-y:auto;overscroll-behavior:contain;padding:0 10px 10px;display:flex;flex-direction:column;gap:10px}.kanban-card{flex-shrink:0;border:1px solid #3b4d5c;border-radius:10px;background:var(--board-card);box-shadow:0 2px 3px #0002;color:var(--board-text);padding:14px;transition:border-color .15s,box-shadow .15s}.kanban-card:hover{border-color:#8babbd;box-shadow:0 5px 12px #0003}.kanban-card h4{font-size:16px;line-height:1.55;margin:10px 0;overflow-wrap:anywhere}.kanban-card p{font-size:13px;line-height:1.6;color:var(--board-muted);margin:6px 0;white-space:pre-wrap;overflow-wrap:anywhere}.kanban-card .card-open{border:0;padding:0;background:none;color:inherit;text-align:left;width:100%;font:inherit;cursor:pointer}.kanban-card .card-top,.kanban-card footer{display:flex;align-items:center;justify-content:space-between;gap:8px}.kanban-card footer{margin-top:14px;flex-wrap:wrap}.card-tag{font-size:12px;padding:4px 7px;border-radius:5px;background:#354c60;color:#dbefff;max-width:100%;overflow-wrap:anywhere}.card-avatar{width:28px;height:28px;display:inline-grid;place-items:center;flex-shrink:0;border-radius:50%;background:#37596c;color:#daf2ff;font-size:13px;font-weight:700}.card-person{display:flex;align-items:center;gap:7px;font-size:13px;min-width:0;overflow-wrap:anywhere}.card-meta{font-size:12px;color:#b1c5d2}.card-order{display:flex;gap:3px;flex-shrink:0}.card-order button{border:0;background:transparent;color:#aac1cf;min-width:24px;min-height:26px;font-size:14px;border-radius:4px}.card-order button:hover,.card-order button:focus-visible{background:#415c70;color:white}.card-drag{cursor:grab;touch-action:none}.kanban-empty{color:#9db2c2;font-size:14px;padding:16px 6px;text-align:center}.kanban-ghost{opacity:.35}.kanban-chosen{border-color:#8ac8ee}.board-live{font-size:13px;color:#b1c5d2;min-height:20px}.board-empty{padding:48px 24px;text-align:center;color:#adbfce;font-size:15px}
+.employee-home{background:var(--board-bg);padding:28px 28px 40px}.employee-hero{align-items:center;gap:16px;margin-bottom:18px}.employee-hero h1{font-size:28px;line-height:1.2;letter-spacing:-.02em;margin:4px 0 8px}.employee-hero p:last-child{font-size:14px;max-width:720px;margin:0;color:var(--board-muted)}.employee-hero .eyebrow{font-size:12px;color:#89b9da;letter-spacing:.12em}.employee-summary{gap:12px;margin-bottom:16px}.employee-summary>div{padding:14px 18px;background:var(--board-panel);border-color:var(--board-line)}.employee-summary span{font-size:13px}.employee-summary b{font-size:24px}.capacity-card{background:var(--board-panel);border-color:var(--board-line);padding:12px 16px}.capacity-card b{font-size:22px}.capacity-card small{font-size:12px}
+.graph-project-row{margin:12px 0}.graph-project-row label{font-size:14px}.graph-generate-details{border:1px solid var(--board-line);border-radius:12px;background:var(--board-panel);margin:14px 0}.graph-generate-details>summary{cursor:pointer;padding:14px 18px;font-size:14px;font-weight:700;color:#c8e5f8}.graph-generate-details .graph-generate{border:0;padding:6px 18px 18px;margin:0}.graph-toolbar .eyebrow{font-size:12px;margin:0 0 7px}.graph-toolbar select{font-size:16px;max-width:100%;width:100%}.graph-toolbar>div:first-child{min-width:0;flex:1}.graph-toolbar{gap:14px}.graph-view-actions{flex-wrap:wrap}.graph-view-actions button{font-size:14px;padding:9px 12px}.graph-view-help{font-size:13px;color:var(--board-muted)}.graph-project-row select{font-size:15px}.graph-run-bar,#graph-run-bar{font-size:14px}.graph-run-bar button,#graph-run-bar button{font-size:14px}.graph-events{background:var(--board-panel)}
+.cockpit-content .hero{padding:24px 0;margin-bottom:12px;min-height:0}.cockpit-content .hero h1{font-size:30px}.cockpit-content .hero-copy{font-size:14px;max-width:750px}.cockpit-content .metric{padding:16px}.cockpit-content .metric b{font-size:27px}.cockpit-content .metric small{font-size:13px}.cockpit-content .metric span{font-size:12px}.cockpit-content .panel-title h2{font-size:23px}.cockpit-content .panel-title p{font-size:14px}.cockpit-bar nav a,.cockpit-bar .workbench-link{font-size:14px}.cockpit-content .people-panel{background:var(--board-bg);border-color:var(--board-line)}.cockpit-content .board-search input{width:auto;padding:0;border:0}.cockpit-content .kanban-card .secondary{padding:6px 10px;font-size:13px}.cockpit-content .table-wrap table{font-size:14px}.cockpit-content .table-wrap th{font-size:13px}
+:focus-visible{outline:2px solid #96d9ff;outline-offset:3px}
+.stage-header{align-items:flex-start;flex-wrap:wrap;gap:12px;padding:16px 20px}
+.stage-header>div:first-child{flex:1 1 200px;min-width:0}
+.stage-header h2,.stage-header .eyebrow{overflow-wrap:anywhere}
+.turn-controls{flex:1 1 340px;min-width:0;flex-wrap:wrap;justify-content:flex-end;gap:8px 12px}
+.turn-controls label{white-space:nowrap;flex-shrink:0;font-size:12px}
+.turn-controls select{font-size:12px;max-width:100%}
+.project-list,.chat-list{align-content:start}
+.project-item,.chat-item{align-content:start}
+.task-flow-notice{grid-column:1/-1;flex-basis:100%;padding:10px 12px;border:1px solid var(--board-line);border-radius:10px;background:var(--board-panel);font-size:13px;line-height:1.5}
+.task-flow-notice[hidden]{display:none}.task-flow-notice p{margin:0 0 8px}.task-flow-notice>div{display:flex;flex-wrap:wrap;gap:8px}.task-flow-notice button{padding:6px 10px;font-size:12px}
+@media(max-width:820px){.employee-home{padding:18px 14px}.employee-hero{display:block}.employee-hero h1{font-size:25px}.capacity-card{display:none}.employee-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.kanban-column{flex-basis:min(290px,82vw);max-height:68vh}.topbar{flex-wrap:wrap;height:auto;padding:10px;gap:6px}.topbar nav{order:3;flex-basis:100%;overflow-x:auto;min-height:42px}.topbar .nav-button{padding:0 13px}.topbar .brand-button{font-size:10px}.topbar .topbar-right{margin-left:auto}.app-shell{grid-template-rows:auto 1fr}.cockpit-bar{flex-wrap:wrap;gap:12px;padding:12px}.cockpit-bar nav{order:3;width:100%;overflow-x:auto}.cockpit-content .hero h1{font-size:25px}.board-search{flex:1}.board-search input{width:100%;min-width:0}.graph-toolbar{align-items:stretch;flex-direction:column}.graph-view-actions{gap:6px}.graph-project-row>span{display:none}}
+@media(prefers-reduced-motion:reduce){.kanban-card{transition:none}}
+/* Shared boss/employee mobile chat: keep reading space independent of tool activity. */
+@media(max-width:820px){
+  body{overflow:auto}
+  .app-shell{height:auto;min-height:100dvh}
+  .workbench{display:block;overflow:visible}
+  .project-rail{min-height:0;max-height:none}
+  .stage-header{padding:14px;gap:10px}
+  .turn-controls{justify-content:flex-start;flex-basis:100%}
+  .files-panel{display:grid;position:static;inset:auto;width:100%;height:70dvh;min-height:360px;box-shadow:none}
+  .files-header{flex-wrap:wrap;gap:10px}
+  .files-header .file-actions{flex-wrap:wrap}
+  .chat-stage{display:flex;flex-direction:column;height:auto;min-height:100svh;overflow:visible}
+  .chat-stage> *{flex-shrink:0;min-width:0}
+  .chat-stage .stage-header{padding:12px;gap:8px}
+  .chat-stage .stage-header h2{font-size:18px;line-height:1.4;margin:0}
+  .chat-stage .stage-header .eyebrow{font-size:10px;margin:0 0 4px}
+  .chat-stage .message-list{height:65vh;height:65svh;min-height:360px;overflow:auto;padding:18px 12px;scroll-padding-block:16px}
+  .chat-stage .message{max-width:100%;margin-bottom:20px}
+  .chat-stage .message.user{max-width:92%}
+  .chat-stage .message-body{font-size:16px;line-height:1.75;padding:12px 14px}
+  .chat-stage .message-label{font-size:11px}
+  .chat-stage .welcome-message{margin:60px auto}
+  .chat-stage .activity-strip{max-height:80px;padding:8px 12px;font-size:12px}
+  .chat-stage .turn-insights{max-height:180px;padding:8px 12px}
+  .chat-stage .composer{margin:10px 8px max(14px,env(safe-area-inset-bottom));padding:10px;gap:8px;grid-template-columns:minmax(0,1fr) auto}
+  .chat-stage .composer textarea{min-width:0;min-height:96px;max-height:180px;font-size:16px;line-height:1.6;padding:8px;overflow-y:auto;scroll-margin-block:120px}
+  .chat-stage .send-button{width:48px;height:48px;font-size:24px;align-self:end;touch-action:manipulation}
+  .chat-stage .composer-foot{font-size:11px;line-height:1.5;overflow-wrap:anywhere}
+  .chat-stage .composer-foot>span:last-child{display:none}
+  .chat-stage .input-queue,.chat-stage .task-flow-notice{max-height:160px;overflow:auto}
+}
+.task-graph-choice{display:flex;flex:1 1 360px;flex-direction:column;gap:6px;min-width:0;max-width:100%;font-size:14px}.task-graph-choice select{width:100%;min-width:0;max-width:100%;min-height:44px;font:inherit;padding:10px}

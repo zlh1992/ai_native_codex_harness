@@ -13,9 +13,9 @@ export class InputQueueService {
     this.timer.unref?.();
   }
   stop() { clearInterval(this.timer); this.timer = null; }
-  pauseAll(reason) {
+  pauseAll(reason, predicate = () => true) {
     for (const row of this.db.db.prepare("SELECT DISTINCT chat_id FROM chat_inputs WHERE status='queued'").all()) {
-      this.db.pauseChatInputs(row.chat_id, reason);
+      if (predicate(row.chat_id)) this.db.pauseChatInputs(row.chat_id, reason);
     }
   }
 
@@ -97,7 +97,7 @@ export class InputQueueService {
     const claimed = this.db.changeChatInput(chatId, id, revision, { status: 'steering', turnRunId: active.turnRunId });
     this.inFlight.add(chatId);
     try {
-      const response = await this.codex.client.request('turn/steer', {
+      const response = this.codex.steerInput ? await this.codex.steerInput(active, input) : await this.codex.client.request('turn/steer', {
         threadId: active.threadId, expectedTurnId: active.turnId, clientUserMessageId: id,
         input: [{ type: 'text', text: input.prompt, text_elements: [] }],
       }, 15_000);
@@ -123,9 +123,10 @@ export class InputQueueService {
   }
 
   pump() {
-    if (!this.codex.skillsReady || !this.codex.client.started) return;
+    if (!this.codex.isReady && (!this.codex.skillsReady || !this.codex.client.started)) return;
     const chats = this.db.db.prepare("SELECT DISTINCT chat_id FROM chat_inputs WHERE status='queued'").all();
     for (const { chat_id: chatId } of chats) {
+      if (this.codex.isReady && !this.codex.isReady(chatId)) continue;
       if (this.inFlight.has(chatId) || this.codex.activeByChat.has(chatId) || this.codex.pendingChats.has(chatId)) continue;
       const runtime = this.db.runtimeForChat(chatId);
       if (runtime.turnBusy || runtime.approvalBusy || runtime.leaseBusy) continue;

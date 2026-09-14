@@ -59,7 +59,7 @@ export async function runSandboxedCommand({ config, workspace, project, user, co
   const profile = buildSeatbeltProfile({
     writableRoots: [projectRoot, runtimeRoot],
     deniedPaths: project.accessKind === 'shared' ? [path.join(projectRoot, '.git')] : [],
-    networkAccess: user.networkAccess,
+    networkAccess: project.projectType === 'local_private' ? false : user.networkAccess,
   });
   const cpuSeconds = Math.max(5, Math.ceil(config.commandTimeoutMs / 1000));
   const wrapped = `ulimit -t ${cpuSeconds}; ulimit -n 256; ulimit -u 96; ${String(command)}`;

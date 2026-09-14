@@ -38,3 +38,18 @@ test('model-generated plans cannot escalate a node to automatic review', async (
   await f.runtime.call(f.active, 'work_graph_submit_plan', { graph: { nodes: [{ key: 'delivery', reviewMode: 'auto' }] } }, 'root');
   assert.equal(f.saved().nodes[0].reviewMode, undefined);
 });
+
+test('reviewer can cite only upstream snapshot references actually read by this root', async () => {
+  const { runtime, active, job } = fixture();
+  const ref = 'upstream:approved-submission:report.md';
+  runtime.context.review = async () => ({ coverage: [{ path: 'report.md', evidenceRef: ref, complete: true }],
+    files: [{ path: 'report.md', evidenceRef: ref, content: 'upstream fixed text' }] });
+  await runtime.call(active, 'work_graph_context', {}, 'root');
+  assert.deepEqual(job.payload.reviewEvidence.readablePaths, [ref]);
+  assert.equal(JSON.stringify(job.payload).includes('upstream fixed text'), false);
+  for (const unread of ['report.md', 'upstream:another-submission:report.md']) {
+    await assert.rejects(() => runtime.call(active, 'work_graph_submit_review', { items: [{ evidence: [unread] }] }, 'root'),
+      { code: 'INVALID_REVIEW_EVIDENCE' });
+  }
+  assert.deepEqual(await runtime.call(active, 'work_graph_submit_review', { items: [{ evidence: [ref] }] }, 'root'), { reviewId: 'review' });
+});

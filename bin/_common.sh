@@ -68,7 +68,7 @@ wait_launch_job_gone() {
 
 local_health() {
   curl -fsS --max-time 5 "http://127.0.0.1:$PORT/api/health" 2>/dev/null \
-    | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{try{const x=JSON.parse(s);process.exit(x.ok&&x.codex?0:1)}catch{process.exit(1)}})'
+    | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{try{const x=JSON.parse(s);process.exit(x.ok&&(x.codex||(x.localDeepSeek?.enabled&&x.localDeepSeek.state==="ready"))?0:1)}catch{process.exit(1)}})'
 }
 
 local_web_health() {
@@ -78,7 +78,7 @@ local_web_health() {
 
 local_codex_failed() {
   curl -fsS --max-time 5 "http://127.0.0.1:$PORT/api/health" 2>/dev/null \
-    | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{try{const x=JSON.parse(s);process.exit(x.ok&&x.codexState==="failed"?0:1)}catch{process.exit(1)}})'
+    | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{try{const x=JSON.parse(s);process.exit(x.ok&&x.codexState==="failed"&&!(x.localDeepSeek?.enabled&&["starting","ready"].includes(x.localDeepSeek.state))?0:1)}catch{process.exit(1)}})'
 }
 
 stop_owned_pid() {

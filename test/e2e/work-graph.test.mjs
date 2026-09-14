@@ -139,6 +139,12 @@ test('human Work Graph HTTP: planner, automatic files-only sharing, review/rewor
   const read = async () => (await json(boss, `/api/work-graphs/${graphId}`)).graph;
   let graph = await until(read, g => g.nodes[0].status === 'active');
   assert.equal(graph.nodes.length, 4);
+  assert.equal(graph.nodes[0].task.reviewMode, 'auto');
+  const { chat: firstTaskChat } = await json(staff[0], `/api/tasks/${graph.nodes[0].taskId}/chat`, { method: 'POST', body: {} });
+  const firstTaskContext = await json(staff[0], `/api/chats/${firstTaskChat.id}`);
+  assert.equal(firstTaskContext.task.reviewMode, 'auto');
+  assert.equal(firstTaskContext.task.workflowStatus, 'running');
+  assert.equal(firstTaskContext.task.assignedAccessId, undefined);
   for (const employee of staff) {
     const visible = await json(employee, `/api/work-graphs/${graphId}`);
     assert.equal(visible.graph.plan, null);

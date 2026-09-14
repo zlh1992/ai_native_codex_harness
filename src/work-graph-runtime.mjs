@@ -1,4 +1,5 @@
 import { invariant } from './errors.mjs';
+import { workflowRecovery } from './workflow-recovery.mjs';
 import { graphText, reviewPolicy } from './work-graph-contract.mjs';
 
 const empty = { type: 'object', properties: {}, additionalProperties: false };
@@ -73,13 +74,22 @@ export class WorkGraphRuntime {
 
   async runModel(job, purpose, prompt) {
     this.store.assertJob(job.id, job.leaseToken);
-    invariant(this.codex.status().ready, 409, 'CODEX_NOT_READY', 'Codex 服务尚未就绪。');
+    this.store.owner(job.projectId, job.ownerId);
+    if (!job.runId) invariant(job.payload.ownerEpoch === this.store.policyEpoch(job.ownerId),
+      403, 'WORKFLOW_AUTHORIZATION_CHANGED', '生成任务的账号策略已变化。');
     const current = this.store.job(job.id);
+    invariant(!current.result || current.turnRunId, 409, 'MODEL_DELIVERY_UNCERTAIN', '已有回执但运行身份缺失，请核对后台记录。');
     if (current.turnRunId) {
       const old = this.db.getTurnRun(current.turnRunId);
-      invariant(old?.status === 'completed' && current.result, 409, 'MODEL_DELIVERY_UNCERTAIN', '先前模型调用结果不确定，请核对并重新授权。');
-      return current.result;
+      const recovery = workflowRecovery(current, old);
+      if (recovery === 'resume') return current.result;
+      invariant(recovery === 'retry', 409, 'MODEL_DELIVERY_UNCERTAIN', '先前模型调用结果不确定，请核对并重新授权。');
+      const cleared = this.store.sql.prepare(`UPDATE workflow_jobs SET turn_run_id=NULL
+        WHERE id=? AND lease_token=? AND status='leased' AND turn_run_id=? AND result_json IS NULL`)
+        .run(job.id, job.leaseToken, current.turnRunId);
+      invariant(cleared.changes === 1, 409, 'WORKFLOW_JOB_CHANGED', '后台任务已变化。');
     }
+    invariant(this.codex.status().ready, 409, 'CODEX_NOT_READY', 'Codex 服务尚未就绪。');
     if (job.runId) {
       const run = this.store.assertRun(job.runId, job.generation);
       const used = this.store.sql.prepare('SELECT COUNT(*) AS n FROM turn_runs tr JOIN chats c ON c.id=tr.chat_id JOIN workflow_jobs j ON j.id=c.workflow_job_id WHERE j.workflow_run_id=?').get(job.runId).n;
@@ -94,7 +104,19 @@ export class WorkGraphRuntime {
       this.store.sql.prepare('UPDATE chats SET purpose=?,workflow_job_id=? WHERE id=?').run(purpose, job.id, chat.id);
       chat = this.db.getChat(chat.id);
     }
-    await this.codex.runTurn({ chat, project, user, prompt, mode: 'edit', emit: () => {}, workflowLeaseToken: job.leaseToken });
+    try {
+      await this.codex.runTurn({ chat, project, user, prompt, mode: 'edit', emit: () => {}, workflowLeaseToken: job.leaseToken });
+    } catch (error) {
+      // runTurn rejects after draining its active runtime. Never recover across a lost lease.
+      this.store.assertJob(job.id, job.leaseToken);
+      const failed = this.store.job(job.id);
+      const recovery = workflowRecovery(failed, this.db.getTurnRun(failed.turnRunId));
+      if (recovery === 'resume') return failed.result;
+      if (failed.turnRunId && recovery === 'retry') {
+        throw Object.assign(new Error('规划响应流网络中断，未保存计划，等待有界重试。'), { code: 'PLANNER_TRANSIENT_NETWORK' });
+      }
+      throw error;
+    }
     const done = this.store.job(job.id);
     this.store.assertJob(job.id, job.leaseToken);
     invariant(this.db.getTurnRun(done.turnRunId)?.status === 'completed' && done.result,
@@ -128,7 +150,9 @@ export class WorkGraphRuntime {
         .run(JSON.stringify({ ...review.detail, coverage: evidence.coverage }), review.id);
       this.store.event({ projectId: job.projectId, runId: job.runId, taskId: task.id, recipientId: job.ownerId,
         type: 'review.suggested', payload: { reviewId: review.id, submissionId: job.submissionId } });
-      if (job.payload.mode === 'auto' && review.verdict !== 'needs_human' && evidence.coverage.every(f => f.complete)) {
+      const references = new Set(review.detail.items.flatMap(item => item.evidence));
+      const requiredCoverage = evidence.coverage.filter(file => !file.evidenceRef || references.has(file.evidenceRef));
+      if (job.payload.mode === 'auto' && review.verdict !== 'needs_human' && requiredCoverage.every(f => f.complete)) {
         this.store.enqueue({ projectId: job.projectId, ownerId: job.ownerId, runId: job.runId, generation: job.generation,
           type: 'review.apply', dedupeKey: `apply:${review.id}:${job.generation}`, taskId: job.taskId,
           taskVersion: job.taskVersion, submissionId: job.submissionId, payload: { reviewId: review.id } });
@@ -154,7 +178,7 @@ export class WorkGraphRuntime {
         const current = this.store.job(job.id);
         this.store.sql.prepare('UPDATE workflow_jobs SET payload_json=? WHERE id=? AND lease_token=?')
           .run(JSON.stringify({ ...current.payload, reviewEvidence: { turnRunId: current.turnRunId,
-            coverage: result.coverage, readablePaths: result.files.map(f => f.path) } }), job.id, active.workflowLeaseToken);
+            coverage: result.coverage, readablePaths: result.files.map(f => f.evidenceRef || f.path) } }), job.id, active.workflowLeaseToken);
       }
       return result;
     }

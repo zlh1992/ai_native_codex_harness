@@ -130,7 +130,7 @@ public_origin_health() {
 }
 
 ready_json() {
-  node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{try{const x=JSON.parse(s);process.exit(x.ok&&x.codex?0:1)}catch{process.exit(1)}})'
+  node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{try{const x=JSON.parse(s);process.exit(x.ok&&(x.codex||(x.localDeepSeek?.enabled&&x.localDeepSeek.state==="ready"))?0:1)}catch{process.exit(1)}})'
 }
 
 for _ in {1..45}; do
@@ -147,4 +147,4 @@ if ! public_health; then
 fi
 echo "公网隧道已启动：${ADDRESS}${TUNNEL_PID:+（PID ${TUNNEL_PID}）}"
 print_portal_addresses "$ADDRESS" "$MODE"
-[[ "$MODE" == "quick" ]] && echo "Quick Tunnel 重启后会生成新地址。"
+if [[ "$MODE" == "quick" ]]; then echo "Quick Tunnel 重启后会生成新地址。"; fi

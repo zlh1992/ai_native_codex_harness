@@ -1,6 +1,21 @@
+import { KanbanBoard } from './kanban.js';
+import { loginPage, defaultPage } from './navigation.js';
+import { createSessionClient, setAuthState, watchSession } from './session-ui.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = { me: null, csrf: '', data: null, pendingRevoke: null, pendingMemoryShare: null };
+let employeeBoard; let checkingSession = false;
+const sessionClient = createSessionClient({ getCsrf: () => state.csrf, onExpired: expireSession });
+const sessionChanges = watchSession(bootstrap);
+function expireSession() {
+  sessionClient.reset(); employeeBoard?.destroy(); employeeBoard = null;
+  state.me = null; state.csrf = ''; state.data = null; state.pendingRevoke = null; state.pendingMemoryShare = null;
+  for (const dialog of $$('dialog')) { if (dialog.open) dialog.close(); }
+  for (const form of $$('form')) form.reset();
+  for (const id of ['employee-board', 'employee-table', 'project-grid', 'audit-list', 'metric-grid']) $(`#${id}`).replaceChildren();
+  setAuthState('checking');
+  location.replace(loginPage(location.pathname, `${location.pathname}${location.search}${location.hash}`));
+}
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[char]);
@@ -27,22 +42,7 @@ function toast(message, kind = '') {
 }
 
 async function api(url, options = {}) {
-  const headers = new Headers(options.headers || {});
-  if (options.body && typeof options.body !== 'string') {
-    headers.set('content-type', 'application/json');
-    options.body = JSON.stringify(options.body);
-  }
-  if (options.method && options.method !== 'GET') headers.set('x-csrf-token', state.csrf);
-  const response = await fetch(url, { ...options, headers, credentials: 'same-origin' });
-  const payload = response.headers.get('content-type')?.includes('json') ? await response.json() : null;
-  if (!response.ok) {
-    if (response.status === 401) location.replace('/boss/login');
-    const error = new Error(payload?.error?.message || `请求失败 (${response.status})`);
-    error.code = payload?.error?.code;
-    error.details = payload?.error?.details;
-    throw error;
-  }
-  return payload;
+  return sessionClient.request(url, options);
 }
 
 function employees() {
@@ -65,7 +65,16 @@ function renderMetrics() {
 }
 
 function renderEmployees() {
-  const list = employees();
+  const query = $('#employee-search').value.trim().toLocaleLowerCase();
+  const list = employees().filter(user => `${user.displayName} ${user.username} ${user.profile?.jobTitle || ''}`.toLocaleLowerCase().includes(query));
+  employeeBoard ||= new KanbanBoard($('#employee-board'), { key: `${state.me.id}:employees`, onOpen: id => openUser(employees().find(user => user.id === id)) });
+  employeeBoard.render([{ id: 'available', title: '可安排', tone: 'done' }, { id: 'limited', title: '有限可用', tone: 'active' },
+    { id: 'unavailable', title: '暂不可用', tone: 'blocked' }, { id: 'disabled', title: '已停用', tone: 'waiting' }], employees().map(user => ({
+    id: user.id, column: user.status === 'disabled' ? 'disabled' : user.profile?.availability || 'available',
+    title: user.displayName, tag: user.profile?.jobTitle || '未设置岗位', person: `@${user.username}`,
+    description: `${user.projectCount || 0} 个自有项目 · ${user.sharedProjectCount || 0} 个共享项目\n${(user.profile?.skills || []).join(' · ')}`,
+    meta: `空间 ${formatBytes(user.usage?.bytes)}`, search: `${user.displayName} ${user.username} ${user.profile?.jobTitle || ''}`,
+  })), query);
   $('#employee-table').innerHTML = list.map((user) => `<tr>
     <td><b>${escapeHtml(user.displayName)}</b><small>@${escapeHtml(user.username)}</small></td>
     <td><span class="status ${user.status}">${user.status === 'active' ? '启用' : '停用'}</span></td>
@@ -92,7 +101,9 @@ function renderProjects() {
     const shareRows = shares.map((access) => `<div class="share-row"><span class="share-state">${escapeHtml(access.displayName || access.username)} (@${escapeHtml(access.username)}) · 独立文件与对话 · 基线 ${escapeHtml((access.baseSha || 'unknown').slice(0, 12))}</span><button class="secondary danger" data-revoke="${project.id}" data-access="${access.id}">撤权</button></div>`).join('');
     let actions = '<span class="share-state">🔒 老板无内容访问权</span>';
     if (mine) {
-      if (project.repoKind !== 'git') {
+      if (project.projectType === 'local_private') {
+        actions = `<span class="share-state">隐私项目 · 本地 DeepSeek + DSH · 永不可分享</span><a class="secondary" href="/boss/workbench?project=${project.id}">打开</a>`;
+      } else if (project.repoKind !== 'git') {
         actions = `<button class="primary" data-init-git="${project.id}">初始化 Git</button><a class="secondary" href="/boss/workbench?project=${project.id}">打开</a>`;
       } else {
         const available = employees().some((user) => user.status === 'active' && !sharedUserIds.has(user.id));
@@ -222,7 +233,20 @@ $('#new-user').addEventListener('click', () => openUser());
 $('#new-project').addEventListener('click', () => { $('#project-form').reset(); $('.form-error', $('#project-form')).textContent = ''; $('#project-dialog').showModal(); });
 $('#refresh').addEventListener('click', () => load().catch((error) => toast(error.message, 'error')));
 $('#refresh-audit').addEventListener('click', () => loadAudit().catch((error) => toast(error.message, 'error')));
-$('#logout').addEventListener('click', async () => { try { await api('/api/logout', { method: 'POST' }); } finally { location.replace('/boss/login'); } });
+$('#logout').addEventListener('click', async event => {
+  const button = event.currentTarget; button.disabled = true;
+  try { await api('/api/logout', { method: 'POST', sessionCheck: true }); sessionChanges.announce(); expireSession(); }
+  catch (error) { if (error.status === 401) { sessionChanges.announce(); expireSession(); } else toast('退出未确认，请重试；当前登录状态未被清除。', 'error'); }
+  finally { button.disabled = false; }
+});
+$('#employee-search').addEventListener('input', renderEmployees);
+$$('[data-people-view]').forEach(button => button.addEventListener('click', () => {
+  const board = button.dataset.peopleView === 'board';
+  $('#employee-board').hidden = !board; $('#employee-table-view').hidden = board;
+  $$('[data-people-view]').forEach(item => item.setAttribute('aria-pressed', String(item === button)));
+}));
+function highlightSection() { const hash = location.hash || '#overview'; $$('.cockpit-bar nav a').forEach(link => link.classList.toggle('nav-active', link.getAttribute('href') === hash)); }
+window.addEventListener('hashchange', highlightSection); highlightSection();
 
 $('#confirm-form').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -300,16 +324,20 @@ $('#project-form').addEventListener('submit', async (event) => {
 });
 
 async function bootstrap() {
+  if (checkingSession) return;
+  checkingSession = true; setAuthState('checking');
   try {
-    const data = await api('/api/me');
-    if (data.user.role !== 'admin') return location.replace('/employee');
+    const data = await api('/api/me', { sessionCheck: true, timeoutMs: 12_000 });
+    if (data.user.role !== 'admin') return location.replace(defaultPage('user'));
+    if (state.me?.id === data.user.id) { state.csrf = data.csrfToken; setAuthState('authenticated'); return; }
     state.me = data.user;
     state.csrf = data.csrfToken;
     await load();
+    setAuthState('authenticated');
   } catch (error) {
-    if (!state.me) location.replace('/boss/login');
-    else toast(error.message, 'error');
-  }
+    if (error.status === 401) expireSession();
+    else setAuthState('error', '暂时无法连接服务，请重试；不会因此退出登录。', () => { state.me = null; bootstrap(); });
+  } finally { checkingSession = false; }
 }
 
 bootstrap();

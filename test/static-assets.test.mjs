@@ -1,0 +1,41 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createStaticAssets } from '../src/static-assets.mjs';
+
+test('frontend snapshots version HTML references, ESM descendants and the local vendor consistently', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-assets-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const publicDir = path.join(root, 'public'); fs.mkdirSync(publicDir);
+  fs.writeFileSync(path.join(publicDir, 'index.html'), '<link href="/styles.css"><script src="/app.js"></script><a href="/boss">Boss</a>');
+  fs.writeFileSync(path.join(publicDir, 'styles.css'), 'body{color:red}');
+  fs.writeFileSync(path.join(publicDir, 'app.js'), "import './child.js'; const load = () => import('/vendor/sortable.js');");
+  fs.writeFileSync(path.join(publicDir, 'child.js'), 'export const ok=true;');
+  const config = { publicDir, rootDir: root };
+  const assets = createStaticAssets(config);
+  const read = pathname => {
+    const result = {};
+    result.found = assets.serve({ writeHead: (status, headers) => Object.assign(result, { status, headers }), end: body => { result.body = body.toString(); } }, pathname);
+    return result;
+  };
+  const prefix = `/assets/${assets.version}`;
+  const html = read('/index.html');
+  assert.ok(html.body.includes(`href="${prefix}/styles.css"`));
+  assert.ok(html.body.includes(`src="${prefix}/app.js"`));
+  assert.ok(html.body.includes('href="/boss"'));
+  assert.equal(html.headers['cache-control'], 'no-store');
+  const module = read(`${prefix}/app.js`);
+  assert.ok(module.body.includes("import './child.js'"));
+  assert.ok(module.body.includes(`import('${prefix}/vendor/sortable.js')`));
+  assert.match(module.headers['cache-control'], /immutable/);
+  assert.equal(read(`${prefix}/child.js`).status, 200);
+  assert.equal(read(`${prefix}/vendor/sortable.js`).found, false, 'absent vendor remains absent');
+  assert.equal(read('/assets/incorrect/app.js').found, false);
+  assert.equal(read(`${prefix}/../app.js`).found, false);
+  assert.equal(read(`${prefix}/index.html`).found, false);
+  fs.writeFileSync(path.join(publicDir, 'styles.css'), 'body{color:blue}');
+  assert.equal(read(`${prefix}/styles.css`).body, 'body{color:red}', 'immutable URL never changes within a process');
+  assert.notEqual(createStaticAssets(config).version, assets.version, 'a changed transitive asset creates a new release');
+});

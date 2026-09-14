@@ -200,6 +200,27 @@ function moveToTrash(payload) {
   return {};
 }
 
+// One sandbox invocation, bounded work, and no file contents returned to the caller.
+function fingerprint(payload) {
+  const hash = createHash('sha256'); let count = 0, bytes = 0;
+  const walk = relative => {
+    assert(++count <= 3000, 413, 'APPROVAL_TARGET_TOO_LARGE', '审批目标包含过多条目。');
+    assertNoSymlinkComponents(payload.root, relative);
+    const target = targetFor(payload.root, relative), value = fs.lstatSync(target);
+    assert(value.isDirectory() || value.isFile(), 400, 'INVALID_FILE_OPERATION', '审批目标类型不支持。');
+    hash.update(JSON.stringify([relative, value.isDirectory() ? 'directory' : 'file']));
+    if (value.isDirectory()) for (const name of fs.readdirSync(target).sort()) walk([relative, name].filter(Boolean).join('/'));
+    else {
+      bytes += value.size;
+      assert(bytes <= 256 * 1024 * 1024, 413, 'APPROVAL_TARGET_TOO_LARGE', '审批目标超过 256 MiB，请缩小范围。');
+      const fd = fs.openSync(target, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      try { hash.update(hashFileDescriptor(fd, fs.fstatSync(fd).size)); } finally { fs.closeSync(fd); }
+    }
+  };
+  try { walk(payload.relative); } catch (error) { if (count === 1 && error.code === 'ENOENT') return { version: 'missing' }; throw error; }
+  return { version: hash.digest('hex') };
+}
+
 function errorResult(error) {
   if (error instanceof OperationError) return { ok: false, status: error.status, code: error.code, message: error.message };
   if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return { ok: false, status: 404, code: 'PATH_NOT_FOUND', message: '文件或目录不存在。' };
@@ -210,7 +231,7 @@ function errorResult(error) {
 
 try {
   const payload = JSON.parse(fs.readFileSync(0, 'utf8'));
-  const operations = { read, stat, write, makeDirectory, tree, moveToTrash };
+  const operations = { read, stat, write, makeDirectory, tree, moveToTrash, fingerprint };
   assert(operations[payload.operation], 400, 'INVALID_FILE_OPERATION', '未知文件操作。');
   process.stdout.write(JSON.stringify({ ok: true, value: operations[payload.operation](payload) }));
 } catch (error) {

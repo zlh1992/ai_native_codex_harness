@@ -7,6 +7,7 @@ SERVER_PID="$(launch_job_pid "$SERVER_LABEL")"
 if launch_job_exists "$SERVER_LABEL" && [[ -n "$SERVER_PID" ]]; then
   if local_health; then
     echo "本地服务：运行中（PID ${SERVER_PID}）"
+    curl -fsS --max-time 5 "http://127.0.0.1:$PORT/api/health" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const h=JSON.parse(s);console.log(`引擎：Codex ${h.codexState} / 本地 DeepSeek ${h.localDeepSeek?.state||"disabled"}`)})'
     print_portal_addresses "http://127.0.0.1:$PORT"
   elif local_codex_failed; then
     echo "本地服务：Web 进程运行中，但 Codex app-server 启动失败（PID ${SERVER_PID}）"

@@ -33,6 +33,29 @@ export function sendJson(res, status, payload, config, headers = {}) {
   res.end(body);
 }
 
+// Only a single byte range is supported; never coerce unbounded decimal
+// offsets to imprecise Number values before comparing them with the file size.
+export function parseByteRange(value, size) {
+  if (!value) return null;
+  const match = String(value).trim().match(/^bytes=(\d*)-(\d*)$/i);
+  const invalid = () => { throw new HttpError(416, 'INVALID_RANGE', '文件范围请求无效或越界。'); };
+  if (!match || (!match[1] && !match[2]) || size === 0) return invalid();
+  const length = BigInt(size);
+  let start, end;
+  if (!match[1]) {
+    const suffix = BigInt(match[2]);
+    if (suffix === 0n) return invalid();
+    start = suffix >= length ? 0n : length - suffix;
+    end = length - 1n;
+  } else {
+    start = BigInt(match[1]);
+    end = match[2] ? BigInt(match[2]) : length - 1n;
+    if (start >= length || end < start) return invalid();
+    if (end >= length) end = length - 1n;
+  }
+  return { start: Number(start), end: Number(end) };
+}
+
 export async function readBody(req, limit) {
   const declared = Number(req.headers['content-length'] || 0);
   if (declared > limit) throw new HttpError(413, 'BODY_TOO_LARGE', '请求体超过允许大小。');
@@ -56,7 +79,7 @@ export async function readJson(req, limit = 1024 * 1024) {
 
 export function serveStatic(res, config, pathname) {
   let relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
-  if (!path.extname(relative)) relative = 'index.html';
+  if (!path.extname(relative)) return false;
   const target = path.resolve(config.publicDir, relative);
   if (!target.startsWith(`${config.publicDir}${path.sep}`) || !fs.existsSync(target) || !fs.statSync(target).isFile()) {
     return false;

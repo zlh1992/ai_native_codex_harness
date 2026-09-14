@@ -1,23 +1,43 @@
 import { WorkGraphUI } from './work-graph.js';
+import { KanbanBoard, taskColumns, taskColumn } from './kanban.js';
+import { SelectionClock, readView, viewUrl, safeReturnTo, defaultPage, loginPage } from './navigation.js';
+import { createSessionClient, setAuthState, watchSession } from './session-ui.js';
+import { taskConversationState } from './task-flow.js';
+import { selectTaskGraph } from './task-graph-filter.js';
+import { ToolDetailsPanel } from './tool-details.js';
+import { configureEmployeeSession, saveEmployeeSession, clearEmployeeSession, sessionFetch, sessionUrl } from './employee-session.js';
 
 const bossWorkbench = location.pathname === '/boss/workbench' || new URLSearchParams(location.search).get('workbench') === '1';
+configureEmployeeSession(!bossWorkbench);
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
-const state = {
-  me: null, csrf: '', projects: [], chats: [], selectedProject: null, selectedChat: null,
+const initialState = () => ({
+  me: null, csrf: '', modelSaving: false, projects: [], chats: [], selectedProject: null, selectedChat: null,
   selectedFile: null, selectedFileInfo: null, fileEntries: [], fileContent: null, viewerMode: 'preview',
-  runningTurns: new Map(), maxConcurrentTurns: 11, tasks: [], selectedTask: null,
+  runningTurns: new Map(), maxConcurrentTurns: 11, tasks: [], selectedTask: null, taskGraphId: '',
   codexCapacity: null, pendingSubmission: null, pendingUpload: null,
   pendingTextAction: null, pendingConfirmAction: null,
   eventCursors: new Map(), inputQueues: new Map(), queueRuns: new Map(),
   queueRefreshing: false, queueHistoryPending: false, queueSending: false, queueEdit: null, pendingInput: null,
   memories: [], memoryStatus: null,
-};
+  view: 'tasks', drafts: new Map(), pendingInputs: new Map(), navigating: false, savedFileContent: null,
+});
+const state = initialState();
+const projectClock = new SelectionClock();
+const chatClock = new SelectionClock();
+const taskClock = new SelectionClock();
+const routeClock = new SelectionClock();
+const fileClock = new SelectionClock();
+const sessionClient = createSessionClient({ getCsrf: () => state.csrf, onExpired: showLogin });
+const sessionChanges = watchSession(bootstrap);
+let checkingSession = false;
+let taskBoard;
 const workGraphUI = new WorkGraphUI({ api, toast, openTask, refreshTasks: loadTasks,
   openFile: async (projectId, relative) => {
+    cancelLocationRestore();
     if (!state.projects.some((p) => p.id === projectId)) await loadProjects();
-    await selectProject(state.projects.find((p) => p.id === projectId));
+    if (!await selectProject(state.projects.find((p) => p.id === projectId))) return;
     switchView('workbench'); await openFile(relative);
   } });
 
@@ -113,33 +133,37 @@ async function recoverThread(recovery, action) {
 }
 
 async function api(path, options = {}) {
-  const headers = new Headers(options.headers || {});
-  if (options.body && !(options.body instanceof ArrayBuffer) && !(options.body instanceof Blob) && typeof options.body !== 'string') {
-    headers.set('content-type', 'application/json');
-    options.body = JSON.stringify(options.body);
-  }
-  if (options.method && options.method !== 'GET') headers.set('x-csrf-token', state.csrf);
-  const response = await fetch(path, { ...options, headers, credentials: 'same-origin' });
-  const payload = response.headers.get('content-type')?.includes('json') ? await response.json() : null;
-  if (!response.ok) {
-    if (response.status === 401) showLogin();
-    const error = new Error(payload?.error?.message || `请求失败 (${response.status})`);
-    error.code = payload?.error?.code;
-    error.status = response.status;
-    throw error;
-  }
-  return payload;
+  return sessionClient.request(path, options);
+}
+
+function clearPrivateState() {
+  if (typeof toolDetailsPanel !== 'undefined') toolDetailsPanel.reset('');
+  sessionClient.reset(); projectClock.next(); chatClock.next(); taskClock.next(); routeClock.next(); fileClock.next();
+  for (const entry of state.runningTurns.values()) { entry.controller?.abort(); entry.reader?.cancel().catch(() => {}); }
+  workGraphUI.dispose(); taskBoard?.destroy(); taskBoard = null;
+  Object.assign(state, initialState());
+  for (const selector of ['#project-list', '#chat-list', '#message-list', '#file-tree', '#file-preview', '#memory-list', '#memory-ref-panel div', '#goal-card', '#approval-list', '#plan-panel div', '#diff-panel pre', '#activity-strip', '#input-queue', '#task-list', '#work-graph-drawer', '#toast-stack']) $(selector)?.replaceChildren();
+  for (const dialog of $$('dialog')) if (dialog.open) dialog.close();
+  for (const form of $$('form')) form.reset();
+  for (const field of $$('textarea')) field.value = '';
+  $('#task-graph-filter').replaceChildren();
+  delete $('#task-graph-filter').dataset.options;
+  $('#task-search').value = '';
+  delete $('#input-queue').dataset.signature;
+  closeViewer(); setComposer(false);
 }
 
 function showLogin() {
-  if (bossWorkbench) { location.replace('/boss/login'); return; }
+  const returnTo = `${location.pathname}${location.search}`;
+  clearPrivateState();
+  if (bossWorkbench) { location.replace(loginPage(location.pathname, returnTo)); return; }
+  setAuthState('guest');
   $('#login-view').classList.remove('hidden');
   $('#app-view').classList.add('hidden');
-  state.me = null; state.inputQueues.clear(); state.queueRuns.clear(); state.runningTurns.clear();
-  state.pendingInput = null; state.queueEdit = null;
 }
 
 function showApp() {
+  setAuthState('authenticated');
   $('#login-view').classList.add('hidden');
   $('#app-view').classList.remove('hidden');
   requestAnimationFrame(clampPanelSizes);
@@ -155,23 +179,33 @@ async function health() {
 }
 
 async function bootstrap() {
+  if (checkingSession) return;
+  checkingSession = true;
+  try { await restoreSession(); } finally { checkingSession = false; }
+}
+
+async function restoreSession() {
+  setAuthState('checking');
   let data;
   try {
-    data = await api('/api/me');
+    data = await api('/api/me', { sessionCheck: true, timeoutMs: 12_000 });
   } catch (error) {
-    showLogin();
-    if (error.status !== 401) $('#login-error').textContent = `无法验证登录状态：${error.message}`;
+    if (error.status === 401) showLogin();
+    else if (error.name !== 'AbortError') setAuthState('error', '暂时无法连接服务。登录状态尚未确认，请重试。', bootstrap);
+    else if (document.body.dataset.auth === 'checking') setAuthState('error', '连接超时，请重试。', bootstrap);
     return;
   }
-
+  if (state.me?.id === data.user.id) { state.csrf = data.csrfToken; showApp(); return; }
+  if (state.me) clearPrivateState();
   state.me = data.user;
   state.csrf = data.csrfToken;
   if (data.user.role === 'user' && bossWorkbench) { location.replace('/employee'); return; }
   if (data.user.role === 'admin' && !bossWorkbench) {
-    location.replace('/boss');
+    location.replace(defaultPage('admin'));
     return;
   }
-  showApp();
+  const returnTo = new URLSearchParams(location.search).get('returnTo');
+  if (returnTo) { location.replace(safeReturnTo(returnTo, data.user.role)); return; }
   document.title = bossWorkbench ? '老板工作台 · Codex Harness' : '员工工作台 · Codex Harness';
   $('#user-chip').textContent = `${data.user.displayName} · ${data.user.role === 'admin' ? '超级管理员' : data.user.username}`;
   $('#model-badge').textContent = data.model;
@@ -193,14 +227,15 @@ async function bootstrap() {
   try {
     await Promise.all([loadProjects(), loadTasks()]);
     if (data.workGraphEnabled !== false) await workGraphUI.initialize(data.user, state.projects);
-    const selected = requestedProject && state.projects.find((project) => project.id === requestedProject);
-    if (selected) { await selectProject(selected); switchView('workbench'); }
-    else switchView('tasks');
+    await restoreLocation();
+    showApp();
   } catch (error) {
     // api() already handles an actual expired session. Other failures must not
     // masquerade as a login failure and discard the authenticated UI state.
     if (error.status === 401) return;
-    if (requestedProject) switchView('workbench');
+    if (!state.me) return;
+    showApp();
+    switchView(requestedProject ? 'workbench' : 'tasks', false);
     toast(`工作台加载失败：${error.message}`, 'error');
   }
 }
@@ -216,14 +251,47 @@ function updateCapacity(capacity = state.codexCapacity || {}) {
 }
 
 async function loadTasks() {
+  const request = state.tasksRequest = (state.tasksRequest || 0) + 1;
   const data = await api('/api/tasks');
+  if (request !== state.tasksRequest) return;
   state.tasks = data.tasks || [];
+  syncSelectedTask();
+  if (state.tasks.some(task => !state.projects.some(project => project.id === task.projectId))) {
+    const projects = await api('/api/projects');
+    if (request !== state.tasksRequest) return;
+    state.projects = projects.projects; renderProjects();
+  }
   renderTasks();
   if (workGraphUI.initialized && state.me?.role === 'admin') await workGraphUI.refresh();
 }
 
+function syncSelectedTask() {
+  if (!state.selectedChat?.taskId) return;
+  state.selectedTask = state.tasks.find(task => task.id === state.selectedChat.taskId) || null;
+  const flow = taskConversationState(state.selectedTask, state.selectedChat);
+  for (const button of $$('.submit-task-button')) {
+    button.hidden = !flow.canWork || Number(button.dataset.taskVersion) !== state.selectedTask?.version;
+    button.disabled = button.hidden;
+  }
+  setComposer(true);
+}
+
+function renderTaskNotice(flow) {
+  const root = $('#task-flow-notice');
+  root.hidden = !state.selectedChat?.taskId;
+  if (root.hidden) { root.replaceChildren(); delete root.dataset.signature; return; }
+  const signature = JSON.stringify([state.selectedChat.id, state.selectedTask?.id, flow]);
+  if (root.dataset.signature === signature) return;
+  root.dataset.signature = signature;
+  root.innerHTML = `<p role="status">${escapeHtml(flow.message)}</p><div>${state.selectedTask?.workflowRunId ? '<button type="button" class="secondary" data-task-detail>查看任务 / 审核</button>' : ''}${flow.canOpenCurrent ? '<button type="button" class="secondary" data-task-current>进入当前版本</button>' : ''}<button type="button" class="secondary" data-task-board>返回任务看板</button></div>`;
+}
+
 async function loadMemories() {
-  const data = await api('/api/memories');
+  const scope = $('#memory-scope').value;
+  const requestId = state.memoryRequest = (state.memoryRequest || 0) + 1;
+  const data = await api(memoryEndpoint(scope));
+  if (requestId !== state.memoryRequest || scope !== $('#memory-scope').value) return;
+  $('#memory-scope-description').textContent = scope ? '仅此隐私项目的多段对话共享；不会向其他项目、员工或普通 Codex 对话召回。' : '只属于当前账号，可跨有权访问的普通项目召回；与所有隐私项目隔离。Codex 原生长期记忆固定关闭。';
   state.memories = data.memories || []; state.memoryStatus = data.status;
   const index = data.status?.index;
   $('#memory-index-state').textContent = index?.available ? '索引进程已启动' : '关键词搜索降级';
@@ -237,12 +305,16 @@ async function loadMemories() {
     <p>${escapeHtml(item.body)}</p></article>`).join('');
 }
 
+function memoryEndpoint(scope = $('#memory-scope').value) { return scope ? `/api/projects/${encodeURIComponent(scope)}/memories` : '/api/memories'; }
+$('#memory-scope').addEventListener('change', () => { $('#memory-create-body').value = ''; $('#memory-list').replaceChildren(); void loadMemories().catch(error => toast(error.message, 'error')); });
+
 async function refreshChatMemory(turnRunId = null) {
   const chat = state.selectedChat;
+  const selection = chatClock.version;
   $('#use-memory').disabled = !chat; $('#save-memory').disabled = !chat;
   if (!chat) { $('#memory-ref-panel').classList.add('hidden'); updateInsightsVisibility(); return; }
   const data = await api(`/api/chats/${chat.id}/memory`);
-  if (state.selectedChat?.id !== chat.id) return;
+  if (!chatClock.current(selection) || state.selectedChat?.id !== chat.id) return;
   $('#use-memory').checked = data.settings.useMemory; $('#save-memory').checked = data.settings.saveMemory;
   const refs = (data.references || []).filter((ref) => !turnRunId || ref.turnRunId === turnRunId);
   const panel = $('#memory-ref-panel');
@@ -252,45 +324,52 @@ async function refreshChatMemory(turnRunId = null) {
 }
 
 function taskStatusLabel(status) {
-  return ({ draft: '草稿', ready: '等待前序', active: '进行中', submitted: '待老板验收', passed: '已通过', rework: '需返工' })[status] || status;
+  return ({ draft: '草稿', ready: '等待前序', active: '进行中', submitted: '待验收', passed: '已通过', rework: '需返工' })[status] || status;
 }
 
 function renderTasks() {
   if (workGraphUI.initialized && state.me?.role === 'admin') return;
-  const active = state.tasks.filter((task) => ['active', 'rework'].includes(task.status)).length;
+  const selected = selectTaskGraph(state.tasks, state.taskGraphId);
+  state.taskGraphId = selected.id;
+  const select = $('#task-graph-filter');
+  const options = `<option value="">全部工作图 · ${state.tasks.length} 项任务</option>${selected.choices.map(choice => `<option value="${escapeHtml(choice.id)}">${escapeHtml(choice.label)} · ${choice.count} 项任务</option>`).join('')}`;
+  if (select.dataset.options !== options) { select.innerHTML = options; select.dataset.options = options; }
+  select.value = selected.id;
+  const tasks = selected.tasks;
+  const active = tasks.filter((task) => ['active', 'rework'].includes(task.status)).length;
   $('#task-active-count').textContent = String(active);
-  $('#task-submitted-count').textContent = String(state.tasks.filter((task) => task.status === 'submitted').length);
-  $('#task-passed-count').textContent = String(state.tasks.filter((task) => task.status === 'passed').length);
+  $('#task-submitted-count').textContent = String(tasks.filter((task) => task.status === 'submitted').length);
+  $('#task-passed-count').textContent = String(tasks.filter((task) => task.status === 'passed').length);
   $('#visible-project-count').textContent = String(state.projects.length);
   const root = $('#task-list');
-  if (!state.tasks.length) {
-    root.className = 'task-board empty-state';
-    root.textContent = '老板尚未分配任务。你仍可在工作台处理自己的项目。';
-    return;
-  }
-  root.className = 'task-board';
-  root.innerHTML = state.tasks.map((task) => {
-    const actionable = ['active', 'rework'].includes(task.status) && (!task.workflowRunId || task.workflowStatus === 'running');
-    return `<article class="task-card status-${task.status}">
-      <div class="task-card-top"><span class="status-tag ${task.status}">${escapeHtml(taskStatusLabel(task.status))}</span><span>V${task.version} · #${task.position + 1}</span></div>
-      <p class="eyebrow">${escapeHtml(task.roadmapTitle || 'DIRECT TASK')} · ${escapeHtml(task.projectName)}</p>
-      <h3>${escapeHtml(task.title)}</h3>
-      <div class="acceptance"><b>验收标准</b><p>${escapeHtml(task.acceptance)}</p></div>
-      <div class="task-card-foot"><span>${formatDate(task.updatedAt, true)}</span>${task.workflowRunId ? `<button class="secondary task-inspect" data-id="${task.id}">清单 / 交付</button>` : ''}${actionable ? `<button class="primary task-open" data-id="${task.id}">${task.status === 'rework' ? '继续返工' : '进入任务'}</button>` : ''}</div>
-    </article>`;
-  }).join('');
-  $$('.task-open', root).forEach((button) => button.addEventListener('click', () => openTask(button.dataset.id)));
-  $$('.task-inspect', root).forEach((button) => button.addEventListener('click', () => workGraphUI.inspect(state.tasks.find((t) => t.id === button.dataset.id)).catch((e) => toast(e.message, 'error'))));
+  if (!state.me) return;
+  root.className = '';
+  taskBoard ||= new KanbanBoard(root, { key: `${state.me.id}:my-tasks`, onOpen: id => {
+    const task = state.tasks.find(item => item.id === id); if (!task) return;
+    if (task.workflowRunId) void workGraphUI.inspect(task).catch(e => toast(e.message, 'error'));
+    else if (['active', 'rework'].includes(task.status)) void openTask(id);
+    else openConfirmDialog({ eyebrow: taskStatusLabel(task.status), title: task.title, message: task.acceptance, submitLabel: '关闭', onConfirm: async () => {} });
+  } });
+  taskBoard.render(taskColumns, tasks.map(task => ({ id: task.id, column: taskColumn(task), title: task.title,
+    tag: [task.projectName, task.roadmapTitle].filter(Boolean).join(' · ') || '交付任务', description: task.acceptance, person: state.me.displayName,
+    meta: `${taskStatusLabel(task.status)} · V${task.version}`, search: `${task.title} ${task.projectName} ${task.roadmapTitle || ''} ${taskStatusLabel(task.status)}` })), $('#task-search').value);
 }
 
 async function openTask(taskId) {
+  cancelLocationRestore();
+  if (!await confirmLeaveEditor()) return;
+  const selection = taskClock.next();
   try {
     const data = await api(`/api/tasks/${taskId}/chat`, { method: 'POST' });
+    if (!taskClock.current(selection)) return;
     state.selectedTask = data.task;
     let project = state.projects.find((item) => item.id === data.project.id);
     if (!project) { await loadProjects(); project = state.projects.find((item) => item.id === data.project.id); }
-    await selectProject(project);
+    if (!taskClock.current(selection)) return;
+    if (!await selectProject(project, true, { confirmed: true, fromTask: true })) return;
+    if (!taskClock.current(selection)) return;
     await selectChat(data.chat);
+    if (!taskClock.current(selection)) return;
     switchView('workbench');
   } catch (error) { toast(error.message, 'error'); await loadTasks(); }
 }
@@ -298,12 +377,15 @@ async function openTask(taskId) {
 async function loadProjects() {
   const data = await api('/api/projects');
   state.projects = data.projects;
+  const memoryScope = $('#memory-scope').value;
+  $('#memory-scope').replaceChildren(new Option('我的普通项目记忆', ''), ...state.projects.filter(p => p.projectType === 'local_private').map(p => new Option(`隐私项目 · ${p.name}`, p.id)));
+  $('#memory-scope').value = state.projects.some(p => p.id === memoryScope) ? memoryScope : '';
   await workGraphUI.updateProjects(state.projects);
   renderProjects();
   if (state.tasks) renderTasks();
   if (state.selectedProject) {
     const refreshed = state.projects.find((item) => item.id === state.selectedProject.id);
-    if (refreshed) await selectProject(refreshed, false);
+    if (refreshed) await selectProject(refreshed, false, { confirmed: true, fromTask: true });
     else resetProject();
   }
 }
@@ -312,24 +394,36 @@ function renderProjects() {
   const root = $('#project-list');
   if (!state.projects.length) { root.className = 'project-list empty-state'; root.textContent = '还没有项目，点击 ＋ 创建'; return; }
   root.className = 'project-list';
-  root.innerHTML = state.projects.map((project) => `<button class="project-item ${state.selectedProject?.id === project.id ? 'active' : ''}" data-id="${project.id}"><b><i class="project-dot"></i>${escapeHtml(project.name)}</b><span>${project.accessKind === 'shared' ? '共享给我 · ' : ''}${escapeHtml(project.description || project.slug)}</span></button>`).join('');
-  $$('.project-item', root).forEach((button) => button.addEventListener('click', () => selectProject(state.projects.find((item) => item.id === button.dataset.id))));
+  root.innerHTML = state.projects.map((project) => `<button class="project-item ${state.selectedProject?.id === project.id ? 'active' : ''}" data-id="${project.id}"><b><i class="project-dot"></i>${escapeHtml(project.name)}</b><span>${project.projectType === 'local_private' ? '隐私 · 本地 · 不可分享 · ' : project.accessKind === 'shared' ? '共享给我 · ' : ''}${escapeHtml(project.description || project.slug)}</span></button>`).join('');
+  $$('.project-item', root).forEach((button) => button.addEventListener('click', () => { cancelLocationRestore(); void selectProject(state.projects.find((item) => item.id === button.dataset.id)).catch(error => toast(error.message, 'error')); }));
 }
 
-async function selectProject(project, clearChat = true) {
+async function selectProject(project, clearChat = true, { confirmed = false, fromTask = false } = {}) {
   if (!project) return toast('项目授权已失效，请刷新任务列表。', 'error');
+  if (!confirmed && (clearChat || state.selectedProject?.id !== project.id) && !await confirmLeaveEditor()) return false;
+  if (!fromTask) taskClock.next();
+  const selection = projectClock.next();
+  const changing = state.selectedProject?.id !== project.id;
+  if (clearChat) { saveDraft(); chatClock.next(); }
+  const chatSelection = chatClock.version;
   state.selectedProject = project;
-  if (clearChat) { state.selectedChat = null; state.selectedTask = null; }
-  closeViewer();
+  if (clearChat) { state.selectedChat = null; state.selectedTask = null; state.pendingInput = null; $('#prompt-input').value = ''; clearChatDisplay(); setComposer(false); }
+  if (changing || clearChat) closeViewer();
+  if (changing) { state.chats = []; state.fileEntries = []; renderChats(); $('#file-tree').replaceChildren(); }
   renderProjects();
   $('#project-kicker').textContent = project.username ? `${project.username.toUpperCase()} / ${project.slug}` : project.slug;
-  $('#chat-title').textContent = project.name;
+  $('#chat-title').textContent = state.selectedChat?.title || project.name;
   await Promise.all([loadChats(), loadFiles(), refreshUsage()]);
-  if (clearChat) { renderMessages([]); await refreshChatMemory(); }
+  if (!projectClock.current(selection)) return false;
+  if (clearChat && chatClock.current(chatSelection)) { renderMessages([]); await refreshChatMemory(); }
+  if (clearChat) saveLocation();
+  return true;
 }
 
 function resetProject() {
+  saveDraft(); projectClock.next(); chatClock.next(); taskClock.next();
   state.selectedProject = null; state.selectedChat = null; state.selectedTask = null; closeViewer();
+  state.pendingInput = null; $('#prompt-input').value = ''; clearChatDisplay(); setComposer(false);
   renderProjects(); renderChats(); renderMessages([]);
   refreshChatMemory();
   $('#file-tree').className = 'file-tree empty-state'; $('#file-tree').textContent = '选择项目后浏览文件';
@@ -337,13 +431,17 @@ function resetProject() {
 
 async function refreshUsage() {
   if (!state.selectedProject) return;
-  const data = await api(`/api/projects/${state.selectedProject.id}`);
+  const projectId = state.selectedProject.id; const selection = projectClock.version;
+  const data = await api(`/api/projects/${projectId}`);
+  if (!projectClock.current(selection) || !state.me) return;
   updateUsage(data.usage, state.me.maxStorageBytes);
 }
 
 async function loadChats() {
   if (!state.selectedProject) return renderChats();
-  const data = await api(`/api/projects/${state.selectedProject.id}/chats`);
+  const projectId = state.selectedProject.id; const selection = projectClock.version;
+  const data = await api(`/api/projects/${projectId}/chats`);
+  if (!projectClock.current(selection) || state.selectedProject?.id !== projectId) return;
   state.chats = data.chats;
   renderChats();
 }
@@ -358,7 +456,7 @@ function renderChats() {
     const running = state.runningTurns.has(chat.id) || chat.status === 'running';
     return `<button class="chat-item ${state.selectedChat?.id === chat.id ? 'active' : ''} ${running ? 'running' : ''}" data-id="${chat.id}"><b>${running ? '<i class="run-dot">●</i> ' : ''}${escapeHtml(chat.title)}</b><span>${running ? '正在运行 · ' : ''}${chat.sharedAt ? '共享时的独立副本 · ' : ''}${formatDate(chat.updatedAt, true)}</span></button>`;
   }).join('');
-  $$('.chat-item', root).forEach((button) => button.addEventListener('click', () => selectChat(state.chats.find((item) => item.id === button.dataset.id))));
+  $$('.chat-item', root).forEach((button) => button.addEventListener('click', () => { cancelLocationRestore(); taskClock.next(); void selectChat(state.chats.find((item) => item.id === button.dataset.id)).catch(error => toast(error.message, 'error')); }));
 }
 
 function shouldAppendLivePrompt(messages, entry) {
@@ -368,11 +466,19 @@ function shouldAppendLivePrompt(messages, entry) {
 }
 
 async function selectChat(chat) {
+  if (!chat || chat.projectId !== state.selectedProject?.id) return;
+  const selection = chatClock.next();
+  saveDraft();
   state.selectedChat = chat;
+  state.selectedTask = null;
+  $('#prompt-input').value = state.drafts.get(chat.id) || '';
+  state.pendingInput = state.pendingInputs.get(chat.id) || null;
+  clearChatDisplay();
+  setComposer(false);
   renderChats();
   $('#chat-title').textContent = chat.title;
   const data = await api(`/api/chats/${chat.id}`);
-  if (state.selectedChat?.id !== chat.id) return;
+  if (!chatClock.current(selection) || state.selectedChat?.id !== chat.id) return;
   state.selectedChat = data.chat;
   $('#mode-select').value = data.chat.preferredMode || 'execute';
   updateModelSelect();
@@ -383,24 +489,37 @@ async function selectChat(chat) {
   if (!running && ['queued', 'starting', 'running'].includes(data.latestTurnRun?.status)) {
     running = await resumePersistedTurn(data);
   }
+  if (!chatClock.current(selection)) return;
   if (running) renderLiveTurn(running, shouldAppendLivePrompt(data.messages, running));
   renderActivity(running);
   await Promise.all([refreshTurnInsights(), refreshChatMemory(data.latestTurnRun?.id || null)]);
+  if (!chatClock.current(selection)) return;
   setComposer(true);
   await refreshInputQueue();
+  if (chatClock.current(selection)) saveLocation();
+}
+
+function clearChatDisplay() {
+  if (typeof toolDetailsPanel !== 'undefined') toolDetailsPanel.reset('');
+  $('#message-list').textContent = '正在载入对话…';
+  renderActivity(); renderPlanDiff(); renderApprovals([]);
+  $('#goal-card').classList.add('hidden'); $('#memory-ref-panel').classList.add('hidden');
+  $('#input-queue').replaceChildren(); delete $('#input-queue').dataset.signature;
+  updateInsightsVisibility();
 }
 
 function renderMessages(messages) {
   const root = $('#message-list');
   if (!messages.length) {
-    root.innerHTML = `<div class="welcome-message"><span class="mark">C</span><h3>${state.selectedProject ? '准备开始构建。' : '从一个项目开始。'}</h3><p>${state.selectedProject ? '描述目标、错误或想修改的功能，Codex 会直接在这个隔离项目中工作。' : '创建或选择项目，再新建对话。Codex 会在隔离的本机目录中读取、编写和验证代码。'}</p></div>`;
+    renderPlanDiff();
+    root.innerHTML = `<div class="welcome-message"><span class="mark">C</span><h3>${state.selectedProject ? '准备开始构建。' : '从一个项目开始。'}</h3><p>${state.selectedProject?.projectType === 'local_private' ? '本地 DeepSeek 将在此隐私项目中工作；对话和记忆不发送给 Codex。云端搜索按当前确认策略单独处理。' : state.selectedProject ? '描述目标、错误或想修改的功能，Codex 会直接在这个隔离项目中工作。' : '创建或选择项目，再新建对话。Codex 会在隔离的本机目录中读取、编写和验证代码。'}</p></div>`;
   } else {
     root.innerHTML = messages.map(messageHtml).join('');
     const snapshot = [...messages].reverse().find((message) => message.role === 'assistant' && message.metadata);
     renderPlanDiff(snapshot?.metadata?.plan || [], snapshot?.metadata?.diffSnapshot || '');
   }
   if (state.selectedChat?.threadState === 'resume_failed') {
-    root.insertAdjacentHTML('afterbegin', `<article class="message error thread-recovery"><div class="message-label">THREAD RECOVERY</div><div class="message-body"><p>原 Codex 线程暂时无法恢复，映射和本地历史均已保留。</p><small>${escapeHtml(state.selectedChat.threadError || '')}</small><div class="message-actions"><button class="secondary" data-thread-recovery="retry">重试原线程</button><button class="danger-button" data-thread-recovery="reset">确认并新建空白线程</button></div></div></article>`);
+    root.insertAdjacentHTML('afterbegin', `<article class="message error thread-recovery"><div class="message-label">THREAD RECOVERY</div><div class="message-body"><p>原 ${state.selectedProject?.projectType === 'local_private' ? 'DeepSeek 本地会话' : 'Codex 线程'}暂时无法恢复，映射和本地历史均已保留。</p><small>${escapeHtml(state.selectedChat.threadError || '')}</small><div class="message-actions"><button class="secondary" data-thread-recovery="retry">重试原线程</button><button class="danger-button" data-thread-recovery="reset">确认并新建空白线程</button></div></div></article>`);
   }
   root.scrollTop = root.scrollHeight;
 }
@@ -410,10 +529,10 @@ function messageHtml(message) {
     const result = message.metadata?.result;
     return `<div class="message event"><div class="tool-event">↳ ${escapeHtml(message.content)} ${result?.exitCode !== undefined ? `· exit ${escapeHtml(result.exitCode)}` : ''}</div></div>`;
   }
-  const label = message.role === 'user' ? 'YOU' : message.role === 'error' ? 'ERROR' : 'CODEX';
+  const label = message.role === 'user' ? 'YOU' : message.role === 'error' ? 'ERROR' : state.selectedProject?.projectType === 'local_private' ? 'DEEPSEEK · LOCAL' : 'CODEX';
   const canSubmit = message.role === 'assistant' && message.metadata?.turnRunId && message.metadata?.finalItemId
     && state.selectedTask && message.metadata.taskId === state.selectedTask.id
-    && message.metadata.taskVersion === state.selectedTask.version && ['active', 'rework'].includes(state.selectedTask.status);
+    && message.metadata.taskVersion === state.selectedTask.version && taskConversationState(state.selectedTask, state.selectedChat).canWork;
   const action = canSubmit ? `<div class="message-actions"><button class="submit-task-button" data-turn-run-id="${escapeHtml(message.metadata.turnRunId)}" data-item-id="${escapeHtml(message.metadata.finalItemId)}" data-task-version="${escapeHtml(message.metadata.taskVersion)}">提交任务 Done</button></div>` : '';
   return `<article class="message ${message.role}"><div class="message-label">${label}</div><div class="message-body">${markdown(message.content)}</div>${action}</article>`;
 }
@@ -423,7 +542,7 @@ function appendMessage(role, content = '') {
   $('.welcome-message', root)?.remove();
   const article = document.createElement('article');
   article.className = `message ${role}`;
-  article.innerHTML = `<div class="message-label">${role === 'user' ? 'YOU' : role === 'error' ? 'ERROR' : 'CODEX'}</div><div class="message-body"></div>`;
+  article.innerHTML = `<div class="message-label">${role === 'user' ? 'YOU' : role === 'error' ? 'ERROR' : state.selectedProject?.projectType === 'local_private' ? 'DEEPSEEK · LOCAL' : 'CODEX'}</div><div class="message-body"></div>`;
   $('.message-body', article).innerHTML = markdown(content);
   root.append(article); root.scrollTop = root.scrollHeight;
   return article;
@@ -431,7 +550,10 @@ function appendMessage(role, content = '') {
 
 function updateConcurrencyIndicator() {
   const active = state.runningTurns.size;
-  $('#codex-status').innerHTML = `<i></i> Codex · ${active}/${state.maxConcurrentTurns}`;
+  const local = state.selectedProject?.projectType === 'local_private';
+  const runtime = state.codexCapacity?.runtimes?.deepseek;
+  $('#codex-status').innerHTML = local ? `<i></i> 本地 DeepSeek · ${escapeHtml(({ ready: '在线', starting: '连接中', disabled: '未启用', unavailable: '不可用' })[runtime?.state] || '待检查')}` : `<i></i> Codex · ${active}/${state.maxConcurrentTurns}`;
+  $('#codex-status').classList.toggle('online', local ? runtime?.state === 'ready' : Boolean(state.codexCapacity?.ready));
 }
 
 function selectedChatRunning() {
@@ -439,12 +561,15 @@ function selectedChatRunning() {
 }
 
 function setComposer(enabled) {
+  updateModelSelect();
+  const flow = taskConversationState(state.selectedTask, state.selectedChat);
   const usable = enabled && Boolean(state.selectedChat)
-    && state.selectedChat.threadState !== 'resume_failed';
+    && state.selectedChat.threadState !== 'resume_failed' && flow.canWork;
+  renderTaskNotice(flow);
   $('#prompt-input').disabled = !usable;
   $('#send-button').disabled = !usable || state.queueSending;
   $('#send-button').setAttribute('aria-label', selectedChatRunning() ? '加入消息队列' : '发送消息');
-  $('#prompt-input').placeholder = selectedChatRunning() ? '继续输入，发送后排队…' : '告诉 Codex 你想构建什么…';
+  $('#prompt-input').placeholder = selectedChatRunning() ? '继续输入，发送后排队…' : state.selectedProject?.projectType === 'local_private' ? '告诉本地 DeepSeek 你想完成什么…' : '告诉 Codex 你想构建什么…';
   renderInputQueue();
   $('#stop-turn').classList.toggle('hidden', !selectedChatRunning());
   $('#composer-context').textContent = state.selectedChat
@@ -471,7 +596,7 @@ function renderActivity(entry) {
     strip.classList.add('hidden'); strip.innerHTML = ''; return;
   }
   strip.classList.remove('hidden');
-  strip.innerHTML = `<div class="activity-line"><i>●</i><span>${escapeHtml(entry.statusText || 'Codex 正在思考…')}</span></div>${entry.events.map((event) => `<div class="activity-line"><i>${event.done ? '✓' : '↳'}</i><span>${escapeHtml(event.name)}</span></div>`).join('')}`;
+  strip.innerHTML = `<div class="activity-line"><i>●</i><span>${escapeHtml(entry.statusText || `${entry.engineLabel || 'Codex'} 正在思考…`)}</span></div>${entry.events.map((event) => `<div class="activity-line"><i>${event.failed ? '✕' : event.done ? '✓' : '↳'}</i><span>${escapeHtml(event.name)}</span></div>`).join('')}`;
 }
 
 function updateInsightsVisibility() {
@@ -493,21 +618,29 @@ function renderPlanDiff(plan = [], diff = '') {
 
 function renderApprovals(approvals = []) {
   const root = $('#approval-list');
+  const edited = new Map([...root.querySelectorAll('.approval-card')].map(card => [card.dataset.id, card.querySelector('[data-search-query]')?.value]));
   root.innerHTML = approvals.map((approval) => {
     const request = approval.request || {};
     return `<article class="approval-card" data-id="${escapeHtml(approval.id || approval.approvalId)}">
-      <div><span class="status-tag rework">等待批准</span><b>${approval.kind === 'file' ? '文件修改' : '命令执行'}</b></div>
+      <div><span class="status-tag rework">等待批准</span><b>${approval.kind === 'web_search' ? '云端搜索 · Luna-low' : approval.kind === 'file' ? '文件修改' : '命令执行'}</b></div>
       ${request.reason ? `<p>${escapeHtml(request.reason)}</p>` : ''}
       ${Array.isArray(request.files) && request.files.length ? `<small>目标文件</small><pre>${escapeHtml(request.files.join('\n'))}</pre>` : ''}
       ${request.command ? `<pre>${escapeHtml(request.command)}</pre>` : ''}
       ${request.cwd ? `<small>cwd · ${escapeHtml(request.cwd)}</small>` : ''}
+      ${request.preview ? `<details><summary>查看变更内容（最多 12000 字）</summary><pre>${escapeHtml(request.preview)}</pre></details>` : ''}
+      ${approval.kind === 'web_search' ? `<label>实际外发搜索词（可编辑）<textarea data-search-query maxlength="1000" rows="3">${escapeHtml(request.query || '')}</textarea></label>` : ''}
       <div class="approval-actions"><button data-decision="decline" class="secondary">拒绝</button><button data-decision="accept" class="primary">批准一次</button></div>
     </article>`;
   }).join('');
+  for (const card of root.querySelectorAll('.approval-card')) {
+    const query = card.querySelector('[data-search-query]');
+    if (query && edited.get(card.dataset.id) !== undefined) query.value = edited.get(card.dataset.id);
+  }
   updateInsightsVisibility();
 }
 
 async function refreshTurnInsights() {
+  const selection = chatClock.version;
   if (!state.selectedChat) {
     $('#goal-card').classList.add('hidden'); renderApprovals([]); updateInsightsVisibility(); return;
   }
@@ -516,11 +649,11 @@ async function refreshTurnInsights() {
     const [goalData, approvalData] = await Promise.all([
       api(`/api/chats/${chatId}/goal`), api(`/api/chats/${chatId}/approvals`),
     ]);
-    if (state.selectedChat?.id !== chatId) return;
+    if (!chatClock.current(selection) || state.selectedChat?.id !== chatId) return;
     const goal = goalData.goal;
     const card = $('#goal-card');
     card.classList.toggle('hidden', !goal && !state.selectedTask);
-    if (goal || state.selectedTask) card.innerHTML = `<p class="eyebrow">CODEX GOAL · ${escapeHtml(goal?.status || '等待同步')}</p><b>${escapeHtml(state.selectedTask?.title || goal?.objective || '')}</b><p>${escapeHtml(state.selectedTask?.acceptance || goal?.objective || '')}</p><small>Goal 完成不等于任务通过；仍需从最终回复提交快照并等待老板验收。</small>`;
+    if (goal || state.selectedTask) card.innerHTML = `<p class="eyebrow">CODEX GOAL · ${escapeHtml(goal?.status || '等待同步')}</p><b>${escapeHtml(state.selectedTask?.title || goal?.objective || '')}</b><p>${escapeHtml(state.selectedTask?.acceptance || goal?.objective || '')}</p><small>Goal 完成不等于任务通过；仍需提交成果，并按项目验收方式等待结果。</small>`;
     renderApprovals(approvalData.approvals || []);
     updateInsightsVisibility();
   } catch (error) { toast(error.message, 'error'); }
@@ -528,24 +661,25 @@ async function refreshTurnInsights() {
 
 function applyJournalEvent(entry, event) {
   const data = event.payload || {};
+  const engine = entry.engineLabel || 'Codex';
   if (event.eventType === 'assistant_delta') entry.text += data.delta || '';
   else if (event.eventType === 'diff_updated' && typeof data.diff === 'string') entry.diff = data.diff;
   else if (event.eventType === 'input_steered') void refreshInputQueue({ history: true });
   else if (event.eventType === 'plan_updated') entry.plan = data.plan || [];
   else if (event.eventType === 'turn_queued') entry.statusText = `${data.mode || entry.mode.toUpperCase()} 正在排队 · 前方 ${Math.max(0, Number(data.position || 1) - 1)} 个任务`;
-  else if (event.eventType === 'turn_status') entry.statusText = data.status === 'running' ? `Codex 正在执行 · ${entry.mode.toUpperCase()}` : 'Codex 正在启动…';
+  else if (event.eventType === 'turn_status') entry.statusText = data.status === 'running' ? `${engine} 正在执行 · ${entry.mode.toUpperCase()}` : `${engine} 正在启动…`;
   else if (event.eventType === 'tool_started') {
     const existing = entry.events.find((item) => item.callId === data.callId);
     if (existing) Object.assign(existing, { name: data.name || existing.name, toolName: data.name, done: false });
     else entry.events.push({ callId: data.callId, name: data.name || '工具调用', toolName: data.name, done: false });
   } else if (event.eventType === 'tool_completed') {
     const tool = entry.events.find((item) => item.callId === data.callId);
-    if (tool) Object.assign(tool, { done: true, name: data.name || tool.name, toolName: data.name || tool.toolName });
-    else entry.events.push({ callId: data.callId, name: data.name || '工具调用', done: true });
+    if (tool) Object.assign(tool, { done: true, failed: data.success === false, name: data.name || tool.name, toolName: data.name || tool.toolName });
+    else entry.events.push({ callId: data.callId, name: data.name || '工具调用', done: true, failed: data.success === false });
   } else if (event.eventType === 'approval_required') {
     entry.statusText = '等待你批准操作…';
   } else if (event.eventType === 'approval_resolved') {
-    entry.statusText = 'Codex 继续执行…';
+    entry.statusText = `${engine} 继续执行…`;
   } else if (event.eventType === 'subagent_updated') {
     const callId = data.item?.id || `subagent:${event.id}`;
     const existing = entry.events.find((item) => item.callId === callId);
@@ -557,10 +691,10 @@ function applyJournalEvent(entry, event) {
     const value = { callId, name: existing?.toolName || data.item?.type || '原生操作', done: data.phase === 'completed' };
     if (existing) Object.assign(existing, value); else entry.events.push(value);
   } else if (event.eventType === 'turn_error') {
-    entry.statusText = data.message || 'Codex 任务已中断';
+    entry.statusText = data.message || `${engine} 任务已中断`;
     entry.terminalStatus = data.status || 'failed';
   } else if (event.eventType === 'turn_completed') {
-    entry.statusText = 'Codex 已完成';
+    entry.statusText = `${engine} 已完成`;
     entry.terminalStatus = data.status || 'completed';
   }
 }
@@ -602,8 +736,10 @@ async function resumePersistedTurn(chatData) {
   if (!run || state.runningTurns.has(chatData.chat.id)) return state.runningTurns.get(chatData.chat.id) || null;
   const entry = {
     chatId: chatData.chat.id, projectId: chatData.chat.projectId, prompt: '', mode: run.mode || chatData.chat.preferredMode || 'execute', text: '',
+    engineLabel: state.projects?.find(project => project.id === chatData.chat.projectId)?.projectType === 'local_private' ? '本地 DeepSeek' : 'Codex',
     events: [], approvals: [], plan: [], diff: '', statusText: '正在恢复任务事件…', lastEventId: 0,
     turnRunId: run.id, recovered: true,
+    controller: new AbortController(), sessionEpoch: sessionClient.generation(),
   };
   state.runningTurns.set(entry.chatId, entry);
   try { await recoverTurnJournal(entry, { fullRun: true }); }
@@ -614,20 +750,22 @@ async function resumePersistedTurn(chatData) {
       let attempt = 0;
       while (state.runningTurns.get(entry.chatId) === entry && !entry.terminalStatus) {
         try {
-          const response = await fetch(`/api/chats/${entry.chatId}/turn-runs/${entry.turnRunId}/events?after=${entry.lastEventId}`, {
+          const response = await sessionFetch(`/api/chats/${entry.chatId}/turn-runs/${entry.turnRunId}/events?after=${entry.lastEventId}`, {
             credentials: 'same-origin', headers: { 'last-event-id': String(entry.lastEventId || 0) },
+            signal: entry.controller.signal,
           });
           if (!response.ok || !response.body) {
             const payload = response.headers.get('content-type')?.includes('json') ? await response.json() : null;
             const error = new Error(payload?.error?.message || `事件恢复失败 (${response.status})`);
             error.status = response.status; throw error;
           }
-          const reader = response.body.getReader();
+          if (entry.sessionEpoch !== sessionClient.generation()) { await response.body?.cancel(); break; }
+          const reader = response.body.getReader(); entry.reader = reader;
           const decoder = new TextDecoder();
           let buffer = '';
-          while (!entry.terminalStatus) {
+          while (!entry.terminalStatus && state.runningTurns.get(entry.chatId) === entry) {
             const { done, value } = await reader.read();
-            if (done) break;
+            if (done || entry.sessionEpoch !== sessionClient.generation()) break;
             buffer += decoder.decode(value, { stream: true });
             const frames = buffer.split('\n\n'); buffer = frames.pop() || '';
             for (const frame of frames) {
@@ -649,6 +787,8 @@ async function resumePersistedTurn(chatData) {
           await recoverTurnJournal(entry);
           attempt = 0;
         } catch (error) {
+          if (entry.controller.signal.aborted || entry.sessionEpoch !== sessionClient.generation()) break;
+          if (error.status === 401) showLogin();
           if ([401, 403, 404].includes(error.status)) throw error;
           await new Promise((resolve) => setTimeout(resolve, backoff[Math.min(attempt, backoff.length - 1)]));
           attempt += 1;
@@ -658,7 +798,7 @@ async function resumePersistedTurn(chatData) {
       if (state.selectedChat?.id === entry.chatId) toast(`事件恢复已暂停：${error.message}`, 'error');
     } finally {
       if (state.runningTurns.get(entry.chatId) === entry) state.runningTurns.delete(entry.chatId);
-      if (state.selectedChat?.id === entry.chatId) {
+      if (state.me && entry.sessionEpoch === sessionClient.generation() && state.selectedChat?.id === entry.chatId) {
         try {
           const fresh = await api(`/api/chats/${entry.chatId}`);
           if (state.selectedChat?.id !== entry.chatId) return;
@@ -700,13 +840,14 @@ function renderInputQueue() {
 
 async function refreshInputQueue({ history = false } = {}) {
   const chatId = state.selectedChat?.id;
+  const selection = chatClock.version;
   if (!chatId || !state.me) return;
   if (state.queueRefreshing) { state.queueHistoryPending ||= history; return; }
   history ||= state.queueHistoryPending; state.queueHistoryPending = false;
   state.queueRefreshing = true;
   try {
     const queue = await api(`/api/chats/${chatId}/queue`);
-    if (state.selectedChat?.id !== chatId) return;
+    if (!chatClock.current(selection) || state.selectedChat?.id !== chatId) return;
     state.inputQueues.set(chatId, queue.inputs);
     const signature = JSON.stringify(queue.latestTurnRun);
     const changed = state.queueRuns.get(chatId) !== signature;
@@ -714,10 +855,11 @@ async function refreshInputQueue({ history = false } = {}) {
     renderInputQueue();
     if (history || (!state.runningTurns.has(chatId) && changed)) {
       const data = await api(`/api/chats/${chatId}`);
-      if (state.selectedChat?.id !== chatId) return;
+      if (!chatClock.current(selection) || state.selectedChat?.id !== chatId) return;
       state.selectedChat = data.chat; state.selectedTask = data.task || null;
       renderMessages(data.messages);
       if (['queued', 'starting', 'running'].includes(data.latestTurnRun?.status)) await resumePersistedTurn(data);
+      if (!chatClock.current(selection)) return;
       const running = state.runningTurns.get(chatId);
       if (running) renderLiveTurn(running, shouldAppendLivePrompt(data.messages, running));
       renderActivity(running); updateConcurrencyIndicator(); setComposer(true);
@@ -742,7 +884,9 @@ async function submitQueuedInput() {
   state.queueSending = true; setComposer(true);
   try {
     await api(`/api/chats/${chatId}/queue`, { method: 'POST', body });
-    state.pendingInput = null;
+    if (state.pendingInput?.id === body.id) state.pendingInput = null;
+    state.pendingInputs?.delete(chatId);
+    if (state.drafts?.get(chatId)?.trim() === prompt) state.drafts.delete(chatId);
     if (state.selectedChat?.id === chatId && $('#prompt-input').value.trim() === prompt) {
       $('#prompt-input').value = ''; $('#prompt-input').style.height = '';
     }
@@ -753,7 +897,9 @@ async function submitQueuedInput() {
 
 async function loadFiles() {
   if (!state.selectedProject) return;
-  const data = await api(`/api/projects/${state.selectedProject.id}/tree`);
+  const projectId = state.selectedProject.id; const selection = projectClock.version;
+  const data = await api(`/api/projects/${projectId}/tree`);
+  if (!projectClock.current(selection) || state.selectedProject?.id !== projectId) return;
   state.fileEntries = data.entries;
   const root = $('#file-tree');
   root.className = 'file-tree';
@@ -776,10 +922,12 @@ const SOURCE_FIRST_EXTENSIONS = new Set([
 ]);
 
 function rawFileUrl(filePath) {
-  return `/api/projects/${state.selectedProject.id}/raw?path=${encodeURIComponent(filePath)}`;
+  return sessionUrl(`/api/projects/${state.selectedProject.id}/raw?path=${encodeURIComponent(filePath)}`);
 }
 
 function closeViewer() {
+  fileClock.next();
+  state.savedFileContent = null;
   state.selectedFile = null; state.selectedFileInfo = null; state.fileContent = null; state.viewerMode = 'preview';
   $('#editor-pane')?.classList.add('hidden');
   $('#file-tree-resizer')?.classList.add('hidden');
@@ -847,6 +995,7 @@ function renderWorkbook(data, root) {
 }
 
 async function renderFilePreview() {
+  const selection = fileClock.version;
   const root = $('#file-preview'); root.innerHTML = '';
   const filePath = state.selectedFile; const extension = fileExtension(filePath); const raw = rawFileUrl(filePath);
   if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.bmp', '.ico', '.svg'].includes(extension)) {
@@ -877,7 +1026,7 @@ async function renderFilePreview() {
     root.innerHTML = '<div class="preview-empty"><div><b>正在解析工作簿…</b>读取工作表和单元格。</div></div>';
     const projectId = state.selectedProject.id; const selected = filePath;
     const data = await api(`/api/projects/${projectId}/spreadsheet-preview?path=${encodeURIComponent(filePath)}`);
-    if (state.selectedProject?.id === projectId && state.selectedFile === selected) renderWorkbook(data, root);
+    if (fileClock.current(selection) && state.selectedProject?.id === projectId && state.selectedFile === selected) renderWorkbook(data, root);
     return;
   }
   if (state.fileContent !== null) {
@@ -910,21 +1059,25 @@ async function setViewerMode(mode) {
 }
 
 async function openFile(filePath) {
+  if (!state.selectedProject) return;
+  if (!await confirmLeaveEditor()) return;
+  const selection = fileClock.next();
   const projectId = state.selectedProject.id;
   try {
-    state.selectedFile = filePath; state.selectedFileInfo = state.fileEntries.find((entry) => entry.path === filePath) || null; state.fileContent = null;
+    state.selectedFile = filePath; state.selectedFileInfo = state.fileEntries.find((entry) => entry.path === filePath) || null; state.fileContent = null; state.savedFileContent = null;
     const extension = fileExtension(filePath);
     const binaryPreview = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.bmp', '.ico', '.pdf', '.xlsx', '.xlsm'].includes(extension);
     if (!binaryPreview) {
       try {
         const file = await api(`/api/projects/${projectId}/file?path=${encodeURIComponent(filePath)}`);
-        if (state.selectedProject?.id !== projectId || state.selectedFile !== filePath) return;
+        if (!fileClock.current(selection) || state.selectedProject?.id !== projectId || state.selectedFile !== filePath) return;
         state.selectedFileInfo = file;
-        state.fileContent = file.content; $('#file-editor').value = file.content;
+        state.fileContent = file.content; state.savedFileContent = file.content; $('#file-editor').value = file.content;
       } catch (error) {
         if (error.code !== 'BINARY_FILE') throw error;
       }
     }
+    if (!fileClock.current(selection)) return;
     state.viewerMode = SOURCE_FIRST_EXTENSIONS.has(extension) ? 'source' : 'preview';
     $('#editor-path').textContent = filePath;
     $('#download-file').href = rawFileUrl(filePath); $('#download-file').download = filePath.split('/').pop();
@@ -936,27 +1089,91 @@ async function openFile(filePath) {
 }
 
 async function writeFile(filePath, content, successMessage = '', { overwrite = true, expectedVersion = null } = {}) {
-  const data = await api(`/api/projects/${state.selectedProject.id}/file?path=${encodeURIComponent(filePath)}&overwrite=${overwrite ? '1' : '0'}`, {
+  const projectId = state.selectedProject.id;
+  const selection = fileClock.version;
+  const data = await api(`/api/projects/${projectId}/file?path=${encodeURIComponent(filePath)}&overwrite=${overwrite ? '1' : '0'}`, {
     method: 'PUT', headers: {
       'content-type': 'application/octet-stream',
       ...(expectedVersion ? { 'if-match': `"${expectedVersion}"` } : {}),
     }, body: content,
   });
-  if (state.selectedFile === filePath) {
+  if (state.selectedProject?.id !== projectId) return;
+  if (fileClock.current(selection) && state.selectedFile === filePath) {
     state.selectedFileInfo = data.file;
-    if (typeof content === 'string') state.fileContent = content;
+    if (typeof content === 'string') { state.fileContent = content; state.savedFileContent = content; }
   }
   await loadFiles();
-  if (state.selectedFile === filePath && state.viewerMode === 'preview') await renderFilePreview();
+  if (fileClock.current(selection) && state.selectedFile === filePath && state.viewerMode === 'preview') await renderFilePreview();
   toast(successMessage || `已保存 ${filePath}`);
 }
 
-function switchView(view) {
+function saveDraft() {
+  const id = state.selectedChat?.id;
+  if (!id) return;
+  state.drafts.set(id, $('#prompt-input').value);
+  if (state.pendingInput) state.pendingInputs.set(id, state.pendingInput);
+}
+
+function editorDirty() {
+  return Boolean(state.selectedFile && state.savedFileContent !== null && $('#file-editor').value !== state.savedFileContent);
+}
+
+async function confirmLeaveEditor() {
+  if (!editorDirty()) return true;
+  const dialog = $('#leave-editor-dialog');
+  if (dialog.open) return false;
+  dialog.returnValue = 'cancel'; dialog.showModal();
+  return new Promise(resolve => { dialog.addEventListener('close', () => resolve(dialog.returnValue === 'discard'), { once: true }); });
+}
+
+function saveLocation(replace = false) {
+  if (!state.me || state.navigating) return;
+  const url = viewUrl(location.pathname, { view: state.view, project: state.selectedProject?.id, chat: state.selectedChat?.id });
+  if (`${location.pathname}${location.search}` !== url) history[replace ? 'replaceState' : 'pushState'](null, '', url);
+}
+
+function cancelLocationRestore() {
+  routeClock.next(); state.navigating = false;
+}
+
+async function restoreLocation() {
+  if (!state.me) return;
+  const selection = routeClock.next();
+  const requested = readView(location.search);
+  state.navigating = true;
+  try {
+    const project = state.projects.find(item => item.id === requested.project);
+    if (project) {
+      if (state.selectedProject?.id !== project.id) {
+        const changed = await selectProject(project);
+        if (!routeClock.current(selection)) return;
+        if (changed === false) { state.navigating = false; saveLocation(true); return; }
+      }
+      if (requested.chat && !state.chats.some(item => item.id === requested.chat)) await loadChats();
+      if (!routeClock.current(selection)) return;
+      const chat = state.chats.find(item => item.id === requested.chat);
+      if (chat && state.selectedChat?.id !== chat.id) await selectChat(chat);
+      else if (!chat && state.selectedChat) { saveDraft(); chatClock.next(); state.selectedChat = null; state.selectedTask = null; state.pendingInput = null; $('#prompt-input').value = ''; clearChatDisplay(); renderMessages([]); setComposer(false); }
+    } else if (state.selectedProject || requested.project) {
+      if (!await confirmLeaveEditor()) { if (routeClock.current(selection)) { state.navigating = false; saveLocation(true); } return; }
+      if (!routeClock.current(selection)) return;
+      resetProject(); if (requested.project) toast('该项目已不可访问，已返回任务看板。', 'error');
+    }
+    if (!routeClock.current(selection)) return;
+    switchView(requested.project && !project ? 'tasks' : requested.view, false);
+  } finally { if (routeClock.current(selection)) state.navigating = false; }
+  if (routeClock.current(selection)) saveLocation(true);
+}
+
+function switchView(view, push = true) {
+  if (!['tasks', 'workbench', 'memories'].includes(view)) return;
+  state.view = view;
   $('#tasks-view').classList.toggle('hidden', view !== 'tasks');
   $('#workbench-view').classList.toggle('hidden', view !== 'workbench');
   $('#memories-view').classList.toggle('hidden', view !== 'memories');
   $$('.nav-button').forEach((button) => button.classList.toggle('active', button.dataset.view === view));
   if (view === 'memories') void loadMemories().catch((error) => toast(error.message, 'error'));
+  if (push) { cancelLocationRestore(); taskClock.next(); saveLocation(); }
 }
 
 function clamp(value, minimum, maximum) {
@@ -1030,21 +1247,47 @@ function setupResizers() {
 
 $('#login-form').addEventListener('submit', async (event) => {
   event.preventDefault(); $('#login-error').textContent = '';
+  const submit = event.currentTarget.querySelector('button'); submit.disabled = true;
   try {
-    await api('/api/employee/login', { method: 'POST', body: { username: $('#login-username').value, password: $('#login-password').value } });
-    $('#login-password').value = ''; await bootstrap();
+    const sessionSelector = crypto.randomUUID().replaceAll('-', '');
+    await api('/api/employee/login', { method: 'POST', body: { username: $('#login-username').value, password: $('#login-password').value, sessionSelector } });
+    saveEmployeeSession(sessionSelector); sessionClient.reset();
+    $('#login-password').value = ''; sessionChanges.announce(); await bootstrap();
   } catch (error) { $('#login-error').textContent = error.message; }
+  finally { submit.disabled = false; }
 });
 
-$('#logout-button').addEventListener('click', async () => { try { await api('/api/logout', { method: 'POST' }); } finally { showLogin(); } });
-$('#boss-nav').addEventListener('click', () => location.assign('/boss'));
+$('#logout-button').addEventListener('click', async (event) => {
+  const button = event.currentTarget;
+  if (!await confirmLeaveEditor()) return;
+  button.disabled = true;
+  try {
+    await api('/api/logout', { method: 'POST', sessionCheck: true });
+    clearEmployeeSession();
+    sessionChanges.announce(); showLogin();
+  } catch (error) {
+    if (error.status === 401) { clearEmployeeSession(); sessionChanges.announce(); showLogin(); }
+    else toast('退出未确认，请重试；当前登录状态未被清除。', 'error');
+  } finally { button.disabled = false; }
+});
+$('#boss-nav').addEventListener('click', async () => { if (await confirmLeaveEditor()) location.assign('/boss#people'); });
 $$('[data-view]').forEach((button) => button.addEventListener('click', () => switchView(button.dataset.view)));
+$('#task-search').addEventListener('input', renderTasks);
+$('#task-graph-filter').addEventListener('change', event => { state.taskGraphId = event.target.value; renderTasks(); });
+$('#task-flow-notice').addEventListener('click', event => {
+  const button = event.target.closest('button'); if (!button) return;
+  if (button.hasAttribute('data-task-board')) switchView('tasks');
+  else if (button.hasAttribute('data-task-current') && state.selectedTask) void openTask(state.selectedTask.id);
+  else if (button.hasAttribute('data-task-detail') && state.selectedTask) void workGraphUI.inspect(state.selectedTask).catch(e => toast(e.message, 'error'));
+});
+window.addEventListener('popstate', () => restoreLocation().catch(error => toast(error.message, 'error')));
+window.addEventListener('beforeunload', event => { saveDraft(); if (editorDirty() || [...state.drafts.values()].some(value => value.trim())) { event.preventDefault(); event.returnValue = ''; } });
 $('#refresh-tasks').addEventListener('click', () => Promise.all([loadTasks(), loadProjects()]).then(renderTasks).catch((error) => toast(error.message, 'error')));
 
 $('#memory-create-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const submit = event.submitter; submit.disabled = true;
   try {
-    await api('/api/memories', { method: 'POST', body: { body: $('#memory-create-body').value } });
+    await api(memoryEndpoint(), { method: 'POST', body: { body: $('#memory-create-body').value } });
     $('#memory-create-body').value = ''; await loadMemories(); toast('记忆已保存。');
   } catch (error) { toast(error.message, 'error'); } finally { submit.disabled = false; }
 });
@@ -1057,14 +1300,14 @@ $('#memory-list').addEventListener('click', async (event) => {
       openTextDialog({ eyebrow: 'EDIT MEMORY', title: '编辑私有记忆', label: '修改后，引用旧版本的对话必须重置原生线程',
         value: item.body, submitLabel: '保存修改', multiline: true, onSubmit: async (body) => {
           if (body.trim() === item.body) return;
-          const result = await api(`/api/memories/${item.id}`, { method: 'PATCH', body: { body, version: item.version } });
+          const result = await api(`${memoryEndpoint(item.scopeProjectId)}/${item.id}`, { method: 'PATCH', body: { body, version: item.version } });
           await loadMemories(); toast(`记忆已更新${result.resetChats ? `，${result.resetChats} 个对话需重置` : ''}。`);
         } });
     } else if (event.target.closest('[data-memory-delete]')) {
       openConfirmDialog({ eyebrow: 'FORGET MEMORY', title: '删除私有记忆',
         message: '删除会立即停止后续召回；引用过它的对话需要重置原生线程。', submitLabel: '确认删除',
         onConfirm: async () => {
-          const result = await api(`/api/memories/${item.id}`, { method: 'DELETE', body: { version: item.version } });
+          const result = await api(`${memoryEndpoint(item.scopeProjectId)}/${item.id}`, { method: 'DELETE', body: { version: item.version } });
           await loadMemories(); toast(`记忆已删除${result.resetChats ? `，${result.resetChats} 个对话需重置` : ''}。`);
         } });
     }
@@ -1113,7 +1356,7 @@ $('#approval-list').addEventListener('click', async (event) => {
   button.disabled = true;
   try {
     await api(`/api/chats/${state.selectedChat.id}/approvals/${encodeURIComponent(card.dataset.id)}`, {
-      method: 'POST', body: { decision: button.dataset.decision },
+      method: 'POST', body: { decision: button.dataset.decision, ...(card.querySelector('[data-search-query]') ? { query: card.querySelector('[data-search-query]').value } : {}) },
     });
     card.remove(); updateInsightsVisibility();
   } catch (error) { button.disabled = false; toast(error.message, 'error'); }
@@ -1125,7 +1368,7 @@ $('#message-list').addEventListener('click', (event) => {
     const action = recovery.dataset.threadRecovery;
     if (action === 'reset') {
       openConfirmDialog({
-        eyebrow: 'RESET CODEX THREAD', title: '建立空白线程',
+        eyebrow: state.selectedProject?.projectType === 'local_private' ? 'RESET LOCAL SESSION' : 'RESET CODEX THREAD', title: '建立空白线程',
         message: '原线程标识和恢复谱系会保留，但新线程没有原生上下文。仅在确认接受上下文断点时继续。',
         submitLabel: '确认建立', onConfirm: () => recoverThread(recovery, action),
       });
@@ -1169,6 +1412,7 @@ $('#submit-form').addEventListener('submit', async (event) => {
 
 $('#new-project').addEventListener('click', () => {
   $('#project-form').reset(); $('.form-error', $('#project-form')).textContent = '';
+  $('#project-type-label').classList.toggle('hidden', state.me?.role !== 'admin');
   $('#project-dialog').showModal();
 });
 
@@ -1178,7 +1422,7 @@ $('#project-form').addEventListener('submit', async (event) => {
   const target = event.currentTarget;
   const form = new FormData(target);
   try {
-    const data = await api('/api/projects', { method: 'POST', body: { name: form.get('name'), description: form.get('description') } });
+    const data = await api('/api/projects', { method: 'POST', body: { name: form.get('name'), description: form.get('description'), projectType: state.me?.role === 'admin' ? form.get('projectType') : 'standard' } });
     $('#project-dialog').close(); await loadProjects(); await selectProject(data.project); toast('隔离项目已创建');
   } catch (error) { $('.form-error', target).textContent = error.message; }
 });
@@ -1297,7 +1541,7 @@ $('#queue-edit-form').addEventListener('submit', async (event) => {
   } catch (error) { $('#queue-edit-error').textContent = error.message; }
   finally { button.disabled = false; }
 });
-$('#prompt-input').addEventListener('input', (event) => { event.target.style.height = 'auto'; event.target.style.height = `${Math.min(180, event.target.scrollHeight)}px`; });
+$('#prompt-input').addEventListener('input', (event) => { saveDraft(); event.target.style.height = 'auto'; event.target.style.height = `${Math.min(180, event.target.scrollHeight)}px`; });
 $('#prompt-input').addEventListener('keydown', (event) => { if (!event.isComposing && (event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); $('#composer').requestSubmit(); } });
 $('#stop-turn').addEventListener('click', async () => {
   if (!state.selectedChat) return;
@@ -1373,16 +1617,46 @@ $('#delete-file').addEventListener('click', () => {
   });
 });
 
+const toolDetailsRoot = document.createElement('section');
+toolDetailsRoot.id = 'tool-details-panel'; toolDetailsRoot.hidden = true;
+$('#activity-strip').after(toolDetailsRoot);
+const toolDetailsPanel = new ToolDetailsPanel({ root: toolDetailsRoot, api,
+  context: () => state.me && state.selectedChat ? { chatId: state.selectedChat.id, epoch: `${sessionClient.generation()}:${chatClock.version}` } : null });
+setInterval(() => { void toolDetailsPanel.refresh(); }, 1500);
+
 setInterval(() => {
   if (!document.hidden) void refreshInputQueue().catch(() => {});
 }, 1000);
 setupResizers(); health(); bootstrap();
 
 function updateModelSelect() {
+  const local = state.selectedProject?.projectType === 'local_private';
   const select = $('#model-select');
+  select.classList.toggle('hidden', local || state.me?.role !== 'admin');
+  $('#model-badge').classList.toggle('hidden', !local && state.me?.role === 'admin');
+  if (local) $('#model-badge').textContent = `${state.codexCapacity?.runtimes?.deepseek?.model || 'DeepSeek'} · DSH · 不可分享`;
+  $('#local-control-label').classList.toggle('hidden', !local);
+  $('#local-control').value = state.selectedChat?.controlMode || 'manual';
+  $('#local-control').disabled = !state.selectedChat || selectedChatRunning();
+  $('#effort-select').closest('label').classList.toggle('hidden', local);
+  updateConcurrencyIndicator();
   select.value = state.selectedChat?.preferredModel || '';
   select.disabled = !state.selectedChat || Boolean(state.modelSaving);
 }
+
+$('#local-control').addEventListener('change', async (event) => {
+  const chatId = state.selectedChat?.id; if (!chatId) return;
+  const controlMode = event.target.value;
+  const save = async () => {
+    const data = await api(`/api/chats/${chatId}`, { method: 'PATCH', body: { controlMode } });
+    if (state.selectedChat?.id === chatId) Object.assign(state.selectedChat, data.chat);
+    updateModelSelect(); toast('本地控制模式已保存。');
+  };
+  updateModelSelect();
+  if (controlMode === 'auto') openConfirmDialog({ eyebrow: 'LOCAL AUTO', title: '启用完全接管？',
+    message: '本对话的文件变更、沙箱命令和联网搜索将不再逐项询问。模型生成的搜索词会发送云端 Luna，可能包含敏感信息；正文和项目文件不会自动附带。', submitLabel: '启用完全接管', onConfirm: save });
+  else try { await save(); } catch (error) { toast(error.message, 'error'); }
+});
 
 $('#model-select').addEventListener('change', async (event) => {
   const chatId = state.selectedChat?.id;

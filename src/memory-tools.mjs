@@ -46,7 +46,7 @@ export async function callMemoryTool({ memory, active, name, args, authorize, in
     result = name === 'memory_update'
       ? memory.update({ ...args, userId: active.user.id, sourceProjectId: active.project.id,
         sourceChatId: chat.id, sourceTurnRunId: active.turnRunId })
-      : memory.delete({ ...args, userId: active.user.id });
+      : memory.delete({ ...args, userId: active.user.id, scopeProjectId: memory.scopeForProject(active.user.id, active.project.id) });
     const affected = memory.invalidateThreads([args.id]);
     // Never wait for this tool's own turn to drain. It may acknowledge, but cannot do more work.
     await Promise.all(affected.filter((id) => id !== chat.id).map(interruptOther));

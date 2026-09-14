@@ -15,6 +15,8 @@
 
 ## 请求链路
 
+隐私项目通过 `AgentRuntimeService` 路由至独立 `LocalDeepSeekService`/DSH worker，复用 Portal 的 HTTP/SSE、容量、审批、文件与记忆工具。普通项目仍使用原 CodexService；独立的 CodexSearchService 只接收经策略批准的搜索词。组件与信任边界详见 [本地隐私项目](10-local-private-projects.md)。
+
 ```text
 Browser request
   -> session / status / role / CSRF / Origin

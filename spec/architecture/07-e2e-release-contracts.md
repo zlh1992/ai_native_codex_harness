@@ -2,6 +2,8 @@
 
 ## 门控入口
 
+`test/tool-details.test.mjs` 固定明细状态/退出码、输入输出、秘密/记忆省略、异步批量不阻塞、撤权后不发布、隐私不调用云端、重启中断、前端转义/展开与切换竞态；`test/local-search.test.mjs` 额外验证独立无搜索/无工具 Luna-low 摘要协议。隐私 HTTP E2E 验证明细返回、员工及跨 chat run 拒绝。合成上游不代表真实 Luna 可用性。
+
 ```bash
 npm run gate
 ```
@@ -11,6 +13,12 @@ npm run gate
 HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake app-server，不接触生产账号或生产项目。它验证 Portal 状态机和网络接口；真实 Codex/公网链路由单独的受控冒烟证据覆盖。
 
 ## 固定自动 HTTP E2E
+
+### E2E-LOCAL 隐私项目补充门控
+
+`test/e2e/local-private.test.mjs` 使用真实 DSH 核心、macOS Seatbelt、临时 SQLite 与合成 OpenAI-compatible 回环模型，验证 Codex 不可用时的 HTTP 登录/队列/审批/文件/历史、员工不可见、禁止分享/工作图、不可变类型、项目记忆与普通记忆双向隔离。`test/local-private.test.mjs` 覆盖跨 chat 持久化、恢复/显式 reset lineage、本地串行容量、停止取消审批、manual 编辑搜索词、审批期间文件变化与下一 step steer，以及 EDIT/auto 命令策略；即使用户允许联网，隐私命令访问另一回环服务也必须失败。`test/local-search.test.mjs` 验证独立进程只接收 query、固定 Luna-low、无继承配置或环境秘密。前端测试固定本地引擎的执行、审批后继续和完成标识。
+
+这些合成模型测试不等于真实 DeepSeek 的 tool-call 质量、上下文长度或吞吐验收；启用生产前须另做真实本机模型推理与工具测试。原有普通项目发布契约不变。
 
 以下契约已经由 `test/e2e/portal-gate.test.mjs` 贯通，修改时不得无替代地删除或弱化。
 
@@ -83,6 +91,7 @@ HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake ap
 - 事件/消息：journal cursor 有序、敏感正文省略、fallback 幂等、超过 5000 条分页恢复。
 - 协议：精确 CLI 版本、所需方法/事件/字段和固定 Luna 子代理策略存在。
 - 原生记忆：启动参数和每个 thread config 都固定关闭，`config/read` 返回任一开启值时 app-server 不得 ready。
+- 工作图审核上游证据：真实 Git 快照测试验证同名当前/上游文件分别读取固定字节，后续工作区修改不影响审核；跨项目/缺失 handoff、异步绑定变化、未读取引用均拒绝；预算省略显式标记，本次输出或被引用上游覆盖缺失不能自动应用。
 
 ## 已完成的真实公网冒烟
 
@@ -133,6 +142,12 @@ HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake ap
 
 ## E2E-015 多人 Work Graph
 
+`test/task-graph-filter.test.mjs` 覆盖员工工作图 ID 分组、跨项目同名图、已完成/旧线性/无图任务、选择保留与失效回退、文本搜索组合和标题转义；身份退出清理由导航测试覆盖。选项仅使用已有获准任务，不新增内容接口。
+
+`test/workflow-recovery.test.mjs` 与 `test/work-graph.test.mjs` 固定规划网络失败窄分类、有界调度重试、历史保留、失租约拒绝、回执复用、owner retry API 的授权/活跃拒绝/确认规则，以及状态卡片转义和恢复分类。真实上游网络故障率不由合成测试保证。
+
+`test/task-flow.test.mjs` 覆盖提交后撤下重复提交、禁用失效对话输入、保留草稿、返工新版本入口、暂停/完成提示、自动共享项目同步及旧轮询不能回滚新状态。工作图 HTTP 用例核对列表和 chat 的有效审核方式/运行状态投影，浏览器实测证据独立记录。
+
 `test/e2e/work-graph.test.mjs` 通过真实 HTTP 与 fake 原生业务工具回调验证：三员工资料、生成图、自动 files_only 分享、当前权限裁剪、人工幂等提交、自动打回和版本更新、并行分支、汇合及最终完成。故意调用 workspace 写工具必须失败。旧发布用例全部保留。
 
 `test/work-graph.test.mjs` 补充真实 Git 前序成果同步、固定产物 ACL、配额批量原子性、脏树保留、计划/任务历史、暂停围栏、策略 epoch、租约恢复、模型工作串行与容量等待、取消清理。真实模型质量单独记录于实施报告，不能用 fake 判断代替。
@@ -140,6 +155,24 @@ HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake ap
 附件扩展契约：真实 PUT 上传与工作区绝对路径混合提交、去重、跨员工/越界拒绝；老板通过前可读固定附件但 owner 工作区尚未合入；原文件变化不改变下载/位图预览。assisted 节点保持 submitted 等待老板，auto 节点对可读成果自动打回/重提/通过并推进；不完整文件转人工。原有全自动 fan-out/join 用例不移除。文档提取单测使用合成 PDF/DOCX 在真实 Seatbelt 下验证正文、嵌入内容覆盖与损坏文件失败闭合，异步提取后复验撤权/停用。
 
 `test/frontend.test.mjs` 固定三种工作图投影的选中态与用途说明、仅依赖图可缩放、长标题不做行数截断，以及依赖图节点和任务列表的纵向滚动契约；布局步长必须容纳固定高度节点，避免同层任务重叠。
+
+默认新增任务看板投影，不移除上述三种视图。`test/navigation.test.mjs` 通过 Node DOM 测试固定卡片转义、同列排序、用户命名空间、员工可用性、原详情/管理入口及四种工作图视图；这些行为测试不代替真实浏览器视觉验收。
+
+## 登录与导航回归契约
+
+员工标签页会话：`test/e2e/public-ingress.test.mjs` 在同一 Cookie jar 同时携带两名员工 Cookie，以各自 selector 验证 me、项目/对话隔离、原始文件和项目事件 query、跨账号拒绝、CSRF 不可互换、单独 selector 无授权、退出一方另一方及老板不退出；不同模拟公网 IP 的同账号新会话可访问同一 chat，其他会话退出不撤销它。`test/employee-session.test.mjs` 固定标签页存储/刷新、老板兼容、请求及非 fetch 资源携带选择，`test/navigation.test.mjs` 保留退出失败不清理状态并补选择清理断言。独立 HTTP Cookie 测试不能代替同一浏览器 Cookie jar 测试。
+
+老板/员工共用工作台的 820px 以下聊天布局保持至少 360px 可滚动消息区、96px 多行输入区和 48px 发送目标；辅助进度、审批、待发队列独立限高滚动，不隐藏其操作。聊天保持普通页面流，项目和文件仍可访问。`test/mobile-chat.test.mjs` 固定静态样式约束，不替代手机软键盘实测。
+
+原始文件预览的单 byte-range 请求支持后缀、开放结束和超出文件长度的终点裁剪；不可满足范围返回 416 与 `Content-Range: bytes */length`。多范围暂不支持。范围处理不得绕过 session、项目 ACL 或路径校验；由 `test/http-utils.test.mjs` 与固定域名 HTTP 夹具共同覆盖。
+
+工作台控件按整组换行，不得将短标签逐字挤成竖排；对话列表不按剩余栏高拉伸单一卡片。820px 以下文件面板必须可通过正常页面滚动到达，不能隐藏全部文件功能或固定遮挡对话；静态布局回归与实际桌面/窄屏截图分别记录，不相互替代。
+
+前端入口使用全包内容版本 URL，相对模块与动态 vendor 导入保持同一版本。`test/static-assets.test.mjs` 固定快照不可变性与任一依赖变更后的版本更新，固定域名 HTTP 用例遍历入口和依赖资源，并验证未知版本/非公开文件拒绝。
+
+`test/navigation.test.mjs` 覆盖安全 returnTo、角色规范路径、连接错误不注销、旧身份响应废弃、退出清理、项目 A→B→A、历史恢复竞态和按对话草稿。页面必须初始遮罩并明确区分首页导航和退出。
+
+`test/e2e/public-ingress.test.mjs` 使用真实 HTTP 和隔离夹具，覆盖角色域名根路径与查询参数、末尾斜杠规范化、未知页面 404、固定本站 SortableJS 资源、Host/Origin/Secure Cookie、错误角色登录，以及注销后两个 turn SSE 关闭而另一有效会话仍可读取并中断原运行。
 
 ## E2E-016 按用户记忆与分享确认
 

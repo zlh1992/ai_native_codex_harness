@@ -1,5 +1,7 @@
 # 04 安全与信任边界
 
+隐私项目的本地模型、DSH Worker、禁网命令、项目记忆、逐项审批与 query-only 云端搜索边界见 [第 10 章](10-local-private-projects.md)。只有普通项目可以分享；本地模型及 Agent 并不消除公网 Cloudflare 的传输信任，也不承诺自动搜索词绝不含敏感内容。
+
 ## 威胁模型
 
 当前防护目标是阻止普通 Portal 用户：
@@ -24,7 +26,15 @@
 - 写请求必须同时通过 session、active user、Origin 与 session-bound CSRF 校验。
 - 登录按来源 IP 做进程内滑动窗口限速，成功与失败均进入审计。
 
+员工 Web 入口采用标签页独立会话选择：每次登录创建新的随机 selector，sessionStorage 仅保存该公开选择标识；凭据仍为同名后缀的 host-only HttpOnly/Secure Cookie，SQLite 仍只存 token hash。fetch 用 `X-Portal-Session`，不能附加 header 的 SSE/图片/下载/预览用 `portal_session` query；selector 单独无授权能力，必须同时提供对应 Cookie。显式 selector 无效、Cookie 缺失或 header/query 冲突时返回 401，禁止回退默认会话。CSRF 仍绑定所选 session；退出只撤销及过期所选 Cookie，关闭该 session 流，不影响另一账号或另一设备的独立 session。
+
+新员工标签页不继承默认 Cookie 登录；刷新保持本标签选择，新登录始终创建新 selector，不覆盖另一标签的 Cookie。复制标签页可能继承同一 sessionStorage/会话，主动登录不同账号后独立。浏览器同源脚本本身不是敌对安全边界；此机制避免无意串号，不承诺对同一浏览器 profile 的恶意脚本隔离。关闭标签页不等于服务器退出，Cookie/session 按 TTL 过期。老板入口及未指定 selector 的旧 API 保持默认 Cookie、多设备独立会话；同一账号的数据按 user_id 共享，而非按 IP 分库。升级后员工须刷新页面重新登录，旧 API 会话不批量撤销。
+
 登录限速目前不是跨进程持久化安全控制；可信代理必须清洗 `X-Forwarded-For` 与 `X-Forwarded-Proto`。直接把 Portal 暴露到不可信反向代理会破坏来源与 Secure Cookie 判断。
+
+浏览器将“验证中 / 已登录 / 未登录 / 连接失败”分开显示。初始 HTML 与 BFCache 返回前遮住登录表单、私有工作台及弹窗；仅明确 401 才按会话失效处理，网络错误和 5xx 提供重试，不伪装为退出。注销失败不得假定 Cookie 已撤销；成功注销或失效须清空私有内存、表单、订阅并废弃旧请求响应。同源标签页收到身份变化通知后复验 `/api/me`，广播中不包含身份或令牌。
+
+`returnTo` 只保留当前角色可用的本站页面及受限视图、项目、对话参数，不能重定向外站或登录页形成循环。服务器仍复验所有内容 ACL；URL 中的资源 ID 不授予访问权。退出与返回首页采用明确文字、分离动作，不因普通导航删除 session。
 
 ## 授权
 
@@ -90,6 +100,8 @@ App Server 启动时关闭内置 Shell、unified exec、浏览器、插件、外
 Seatbelt 不是容器。完全不可信用户需要独立 OS 用户、VM/容器、独立磁盘 quota、独立 Codex 身份和独立 worker。
 
 ## 持久化与日志脱敏
+
+工具明细是受原 chat ACL 的独立业务快照，不是全局日志；具体保留与脱敏规则见 [事件恢复](06-persistence-events-and-recovery.md)。普通项目 Luna 摘要只接收同 run 的脱敏限长工具片段，独立 ephemeral 进程复用 query-only 搜索的隔离容器，但关闭 web_search，禁止所有动态工具/原生操作请求与代理。固定 gpt-5.6-luna/low；开始前和异步完成后复验活动用户、原 access 与 chat，撤权后不发布摘要。工具正文视为不可信数据，不得成为指令。local_private 在捕获和出队两处禁止云端摘要，唯一云端例外仍是显式 web_search query。
 
 不得进入 `audit_log` 或 `turn_events`：
 

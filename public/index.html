@@ -6,8 +6,10 @@
   <meta name="color-scheme" content="dark">
   <title>员工工作台 · Codex Harness</title>
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/portal-ui.css">
 </head>
-<body>
+<body data-auth="checking">
+  <section id="auth-status" class="auth-status" role="status"><strong>CODEX HARNESS</strong><p>正在验证登录状态…</p><button class="primary" hidden>重试连接</button></section>
   <div class="grain"></div>
   <main id="login-view" class="login-shell">
     <section class="login-copy">
@@ -22,7 +24,7 @@
     <section class="login-card">
       <div class="status-pill"><i></i><span id="login-health">正在连接本机服务</span></div>
       <h2>员工登录</h2>
-      <p>使用管理员分配给你的账号。</p>
+      <p>使用管理员分配给你的账号。每个标签页独立登录，可同时使用不同员工账号。</p>
       <form id="login-form">
         <label>用户名<input id="login-username" name="username" autocomplete="username" required autofocus></label>
         <label>密码<input id="login-password" name="password" type="password" autocomplete="current-password" required></label>
@@ -35,19 +37,20 @@
 
   <div id="app-view" class="app-shell hidden">
     <header class="topbar">
-      <button class="brand-button" data-view="workbench"><span class="mark small">C</span><span>CODEX<br><b>HARNESS</b></span></button>
+      <button class="brand-button" data-view="tasks" title="返回任务看板"><span class="mark small">C</span><span>CODEX<br><b>HARNESS</b></span></button>
       <nav>
-        <button id="tasks-nav" class="nav-button active" data-view="tasks">任务首页</button>
+        <button id="tasks-nav" class="nav-button active" data-view="tasks">任务看板</button>
         <button class="nav-button" data-view="workbench">工作台</button>
         <button class="nav-button" data-view="memories">我的记忆</button>
-        <button id="boss-nav" class="nav-button hidden">驾驶舱</button>
+        <button id="boss-nav" class="nav-button hidden">团队管理</button>
       </nav>
       <div class="topbar-right">
         <span id="codex-status" class="backend-status"><i></i> Codex</span>
         <span id="model-badge" class="model-badge"></span>
         <select id="model-select" class="model-badge hidden" aria-label="对话模型" title="选择当前对话的模型；任务和队列结束后可切换" disabled></select>
         <span id="user-chip" class="user-chip"></span>
-        <button id="logout-button" class="icon-button" title="退出登录">↪</button>
+        <button id="home-button" class="icon-button" data-view="tasks" title="返回任务看板，保留登录">返回首页</button>
+        <button id="logout-button" class="icon-button logout-button" title="退出当前账号">退出登录</button>
       </div>
     </header>
 
@@ -62,13 +65,13 @@
         <div><span>已通过</span><b id="task-passed-count">0</b></div>
         <div><span>可见项目</span><b id="visible-project-count">0</b></div>
       </div>
-      <div class="task-section-title"><div><p class="eyebrow">DELIVERY TASKS</p><h2>交付队列</h2></div><button id="refresh-tasks" class="secondary">刷新</button></div>
+      <div class="task-section-title board-toolbar"><div><h2>我的交付</h2></div><label class="task-graph-choice">工作图<select id="task-graph-filter" aria-label="按工作图筛选我的任务"><option value="">全部工作图</option></select></label><label class="board-search">搜索<input id="task-search" type="search" placeholder="任务、项目、工作图或状态" aria-label="搜索我的任务"></label><button id="refresh-tasks" class="secondary">刷新</button></div>
       <div id="task-list" class="task-board empty-state">暂无分配任务</div>
       <section id="work-graph-panel" class="hidden" aria-label="团队项目工作图"></section>
     </section>
 
     <section id="memories-view" class="memory-home hidden">
-      <div class="memory-hero"><div><p class="eyebrow">PRIVATE USER MEMORY</p><h1>我的记忆</h1><p>只属于当前 Portal 账号；可跨你当前有权访问的项目召回。Codex 原生长期记忆已固定关闭。</p></div><span id="memory-index-state" class="status-pill">正在检查索引</span></div>
+      <div class="memory-hero"><div><p class="eyebrow">PRIVATE USER MEMORY</p><h1>我的记忆</h1><p id="memory-scope-description">普通记忆可跨当前账号的普通项目召回；隐私项目记忆完全独立。Codex 原生长期记忆固定关闭。</p><label>记忆范围<select id="memory-scope"><option value="">我的普通项目记忆</option></select></label></div><span id="memory-index-state" class="status-pill">正在检查索引</span></div>
       <form id="memory-create-form" class="memory-create-card">
         <label for="memory-create-body">新增长期事实、偏好或约定</label>
         <textarea id="memory-create-body" maxlength="4000" rows="4" required placeholder="例如：所有客户报告默认使用中文，并在结论前列出数据口径。"></textarea>
@@ -101,6 +104,7 @@
         <div class="stage-header">
           <div><p id="project-kicker" class="eyebrow">SELECT A PROJECT</p><h2 id="chat-title">欢迎使用 Codex Harness</h2></div>
           <div class="turn-controls">
+            <label id="local-control-label" class="hidden" title="人工确认：文件变更、命令和搜索须批准；完全接管：模型可自行执行，搜索词会外发云端。">本地控制<select id="local-control"><option value="manual">人工确认</option><option value="auto">完全接管</option></select></label>
             <label title="允许 Codex 按需调用 memory_search"><input id="use-memory" type="checkbox" checked disabled>搜索记忆</label>
             <label title="允许 Codex 自主新增、修改和删除当前账号记忆"><input id="save-memory" type="checkbox" checked disabled>管理记忆</label>
             <label>模式<select id="mode-select"><option value="execute">EXECUTE · 文件＋命令</option><option value="edit">EDIT · 仅文件读写</option></select></label>
@@ -124,6 +128,7 @@
           <details id="memory-ref-panel" class="insight-card hidden"><summary>本轮引用</summary><div></div></details>
         </section>
         <form id="composer" class="composer">
+          <section id="task-flow-notice" class="task-flow-notice" aria-label="当前任务进度" hidden></section>
           <section id="input-queue" class="input-queue hidden" aria-label="待发送消息"></section>
           <textarea id="prompt-input" rows="1" maxlength="100000" placeholder="告诉 Codex 你想构建什么…" disabled></textarea>
           <button id="send-button" class="send-button" type="submit" disabled>↑</button>
@@ -167,6 +172,7 @@
     <form method="dialog" id="project-form" class="dialog-form">
       <div class="dialog-title"><span class="mark small">C</span><div><p class="eyebrow">NEW WORKSPACE</p><h2>创建隔离项目</h2></div></div>
       <label>项目名称<input name="name" maxlength="80" required placeholder="例如：客户门户"></label>
+      <label id="project-type-label" class="hidden">项目类型<select name="projectType"><option value="standard">普通项目 · Codex · 可协作</option><option value="local_private">隐私项目 · 本地 DeepSeek + DSH · 永不可分享</option></select><small>创建后不可切换。隐私项目文件/对话/记忆留在本机；仅主动搜索的搜索词发给云端 Luna。公网访问仍经过 Cloudflare。</small></label>
       <label>项目说明<textarea name="description" maxlength="1000" rows="3" placeholder="目标、技术栈或上下文"></textarea></label>
       <p class="form-error"></p>
       <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button value="default" class="primary">创建项目</button></div>
@@ -214,6 +220,7 @@
   </dialog>
 
   <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+  <dialog id="leave-editor-dialog"><form method="dialog" class="dialog-form"><h2>文件有未保存的修改</h2><p>离开将丢弃这些修改。你可以取消并先保存文件。</p><div class="dialog-actions"><button class="secondary" value="cancel">继续编辑</button><button class="danger-button" value="discard">丢弃修改并离开</button></div></form></dialog>
   <dialog id="work-graph-drawer" class="work-graph-drawer" aria-label="工作图任务与验收"></dialog>
   <script type="module" src="/app.js"></script>
   <dialog id="queue-edit-dialog">

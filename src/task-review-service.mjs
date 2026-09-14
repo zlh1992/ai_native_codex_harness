@@ -26,13 +26,15 @@ export class TaskReviewService {
       status: verdict === 'passed' ? 'passed' : 'failed', comment: feedback, evidence: [] })) : []);
     invariant(Array.isArray(items) && items.length === task.checklist.length
       && new Set(items.map((i) => i?.id)).size === items.length, 400, 'REVIEW_CHECKLIST_REQUIRED', '审核须覆盖本轮全部清单项。');
-    const references = new Set(['result_summary', 'final_reply', ...submission.outputsManifest.map((f) => f.path)]);
+    const upstream = task.workflowRunId ? this.graphs.reviewInputs(task) : [];
+    const references = new Set(['result_summary', 'final_reply', ...submission.outputsManifest.map((f) => f.path),
+      ...upstream.flatMap(input => input.outputs.map(output => output.evidenceRef))]);
     const criteria = task.checklist.map((item) => {
       const result = items.find((i) => i?.id === item.id);
       invariant(result && ['passed', 'failed', 'unknown'].includes(result.status), 400, 'INVALID_REVIEW_ITEM', '清单审核结果无效。');
       const evidence = result.evidence || [];
       invariant(Array.isArray(evidence) && evidence.length <= 30 && evidence.every((ref) => references.has(ref)),
-        400, 'INVALID_REVIEW_EVIDENCE', '审核引用须来自本次提交的成果。');
+        400, 'INVALID_REVIEW_EVIDENCE', '审核引用须来自本次提交或获准的固定上游成果。');
       invariant(source !== 'ai' || result.status !== 'passed' || evidence.length > 0,
         400, 'REVIEW_EVIDENCE_REQUIRED', '自动审核的通过项必须引用具体成果。');
       return { id: item.id, status: result.status, comment: graphText(result.comment || '', '逐项意见', 2000, true), evidence };
@@ -75,8 +77,12 @@ export class TaskReviewService {
         409, 'REVIEW_JOB_CHANGED', '审核任务关联已变化。');
       const mode = nodeReviewMode(this.graphs.node(task), run.reviewPolicy);
       invariant(mode === 'auto', 403, 'AUTO_REVIEW_NOT_AUTHORIZED', '该节点未授权自动审核。');
-      invariant(submission.outputsManifest.every(output => review.detail.coverage?.some(f => f.path === output.path && f.complete)),
+      invariant(submission.outputsManifest.every(output => review.detail.coverage?.some(f => !f.evidenceRef && f.path === output.path && f.complete)),
         409, 'REVIEW_NEEDS_OWNER', '交付文件未完整读取，请老板核对。');
+      const references = new Set(review.detail.items.flatMap(item => item.evidence));
+      invariant(this.graphs.reviewInputs(task).every(input => input.outputs.every(output => !references.has(output.evidenceRef)
+        || review.detail.coverage?.some(f => f.evidenceRef === output.evidenceRef && f.complete))),
+      409, 'REVIEW_NEEDS_OWNER', '固定上游文件未完整读取，请老板核对。');
       invariant(!this.graphs.node(task).requiresIndependentValidation, 409, 'INDEPENDENT_VALIDATION_REQUIRED', '此任务需要老板核对独立验证结果。');
       invariant(review.verdict !== 'passed' || !task.foreignWorkSeen, 409, 'DELIVERY_SCOPE_REVIEW_REQUIRED', '期间存在无关工作，请老板核对交付范围。');
       invariant(review.verdict !== 'rework' || task.version <= run.reviewPolicy.maxRework,

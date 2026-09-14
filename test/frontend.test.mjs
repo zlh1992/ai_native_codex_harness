@@ -126,6 +126,22 @@ test('per-user memory UI exposes chat controls, multiline editing, references, a
   assert.ok(boss.includes('memoryConfirmationToken'));
 });
 
+test('private chat UI labels the local engine and keeps approvals and project memory explicit', () => {
+  assert.match(html, /id="project-type-label"[^>]*>[\s\S]*?<select name="projectType">/);
+  assert.ok(html.includes('id="memory-scope"'));
+  assert.ok(html.includes('id="local-control"'));
+  assert.ok(app.includes('data-search-query'));
+  assert.ok(app.includes('DEEPSEEK · LOCAL'));
+  const apply = frontendFunction('applyJournalEvent');
+  const entry = { engineLabel: '本地 DeepSeek', mode: 'edit', events: [] };
+  apply(entry, { eventType: 'turn_status', payload: { status: 'running' } });
+  assert.equal(entry.statusText, '本地 DeepSeek 正在执行 · EDIT');
+  apply(entry, { eventType: 'approval_resolved' });
+  assert.equal(entry.statusText, '本地 DeepSeek 继续执行…');
+  apply(entry, { eventType: 'turn_completed' });
+  assert.equal(entry.statusText, '本地 DeepSeek 已完成');
+});
+
 test('work graph keeps long task titles readable and distinguishes its three projections', () => {
   assert.ok(styles.includes('.graph-canvas .graph-node{position:absolute;height:176px;min-height:0;overflow-y:auto'));
   assert.ok(styles.includes('.graph-node-title{font-size:15px;line-height:1.45'));
@@ -166,9 +182,11 @@ test('running turn recovery never synthesizes an empty user message', () => {
 
 test('model selector restores each chat and prevents edits while saving or without a chat', () => {
   const source = app.match(/function updateModelSelect\([^)]*\) \{[\s\S]*?\n\}/)[0];
-  const select = {};
+  const select = { classList: { toggle() {} } };
   const state = { selectedChat: null };
-  const update = Function('state', '$', `${source}; return updateModelSelect;`)(state, () => select);
+  const other = { classList: { toggle() {} }, closest() { return this; } };
+  const update = Function('state', '$', 'selectedChatRunning', 'updateConcurrencyIndicator', `${source}; return updateModelSelect;`)(state,
+    selector => selector === '#model-select' ? select : other, () => false, () => {});
   update(); assert.equal(select.disabled, true); assert.equal(select.value, '');
   state.selectedChat = { preferredModel: 'gpt-6-astra' };
   update(); assert.equal(select.disabled, false); assert.equal(select.value, 'gpt-6-astra');
@@ -191,8 +209,8 @@ test('running chats keep the composer enabled and show editable, escaped queued 
   const source = app.match(/function setComposer\([^)]*\) \{[\s\S]*?\n\}/)[0];
   const selected = { id: 'chat', title: 'Running', status: 'running', threadState: 'ready' };
   const state = { selectedChat: selected, selectedProject: { name: 'Project' }, selectedTask: null, queueSending: false };
-  const setComposer = Function('state', '$', 'selectedChatRunning', 'renderInputQueue', 'renderModelSelector',
-    `${source}; return setComposer;`)(state, element, () => true, () => {}, () => {});
+  const setComposer = Function('state', '$', 'selectedChatRunning', 'renderInputQueue', 'updateModelSelect', 'taskConversationState', 'renderTaskNotice',
+    `${source}; return setComposer;`)(state, element, () => true, () => {}, () => {}, () => ({ canWork: true }), () => {});
   setComposer(true);
   assert.equal(element('#prompt-input').disabled, false);
   assert.equal(element('#send-button').disabled, false);

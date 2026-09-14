@@ -19,6 +19,7 @@
 | [08 运维、协议升级与演进](08-operations-protocol-and-evolution.md) | 如何启动、升级 Codex 协议、发布和继续演进？ |
 
 | [09 多人 Work Graph](09-human-work-graph.md) | 真实员工 DAG、自动共享、交付审核与持久调度如何闭环？ |
+| [10 老板隐私项目与本地引擎](10-local-private-projects.md) | 不可分享项目、本地 DSH、项目记忆及审批/搜索例外如何隔离？ |
 
 ## 已接受的核心决策
 
@@ -31,7 +32,8 @@
 7. EDIT 只允许项目文件读写，EXECUTE 额外允许项目内命令；chat 独立持久化模式且默认 EXECUTE。通过 ACL、路径和保留目录校验的项目内文件变更与 EXECUTE 命令由 Portal 自动接受，不要求老板或员工逐次点击。
 8. 单 App Server、单 `CODEX_HOME`、单上游 Codex 登录只适用于内部互信 Pilot，不宣称敌对租户级隔离。
 9. App Server 协议使用精确 CLI 版本 pin，并用该版本重新生成 schema；不能靠模糊版本匹配掩盖协议漂移。
-10. Portal 启动的 Codex app-server 原生长期记忆永久关闭并在 ready 前验证；跨项目长期记忆只由 Portal 以 `user_id` 为边界、以当前项目授权为条件显式实现。
+10. Portal 启动的 Codex app-server 原生长期记忆永久关闭并在 ready 前验证；普通项目记忆以 user_id 和当前 access 为边界；隐私项目使用独立 user_id + project_id 作用域，双向禁止跨域召回。
+11. 上述共享、Codex 执行及项目内自动放行默认描述普通项目。不可变 local_private 项目只走本地 DSH/DeepSeek、永不分享，默认人工确认；唯一云端例外为按策略提交的独立搜索词，详见第 10 章。
 
 ## 变更规则
 

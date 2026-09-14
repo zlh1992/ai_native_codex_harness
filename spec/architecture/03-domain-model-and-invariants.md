@@ -2,6 +2,8 @@
 
 ## 实体关系
 
+下图的共享/task 分支仅适用于 standard 项目。`local_private` 项目类型不可变，只保留老板 owner access；chat 绑定 local_session_id 而非 Codex thread，并独立保存 control_mode（manual 默认 / auto）。`user_memories.scope_project_id` 为 null 表示普通用户记忆，否则必须为当前老板的同一隐私项目，不能迁移作用域。恢复 lineage 增加 engine。详见 [本地隐私项目](10-local-private-projects.md)。
+
 ```text
 User
   1 -> N owned Project
