@@ -2,7 +2,7 @@
 
 | 字段 | 内容 |
 | --- | --- |
-| 状态 | 实施中 |
+| 状态 | 完成 |
 | 日期 | 2026-09-15 |
 | 负责人 | Codex |
 | 关联目标 | 员工按工作图查看任务、提交现有 graph 改动并重启验证登录 |
@@ -59,12 +59,21 @@
 | node --test test/task-graph-filter.test.mjs test/navigation.test.mjs test/task-flow.test.mjs | 通过 | 26 项 |
 | git diff --check | 通过 | 无空白错误 |
 | Node 检查变更 Markdown 相对链接及常见秘密模式 | 通过 | 96 个变更文件，0 断链/模式命中；不替代完整 DLP |
-| 四个入口登录 | 待执行 | 只读会话验证并退出 |
+| 本地老板、员工登录 | 通过 | Chrome 实际提交登录并确认身份；员工选择工作图后只显示对应两项任务，刷新保留选择，搜索可进一步过滤；验收会话已退出 |
+| 公网老板、员工登录 | 通过（HTTPS 接口） | 两个页面 HTTP 200；真实登录、/api/me 身份校验及退出均为 200，TLS 校验未关闭；Chrome 自动导航超时，未计为公网浏览器验收通过 |
+| ./bin/stop-tunnel.sh && ./bin/stop-local.sh && ./bin/start-local.sh && ./bin/start-tunnel.sh | 通过 | 重启前无活跃 turn / leased workflow job；Portal 及其受管子进程、命名隧道重新启动 |
+| ./bin/status.sh 与 ./bin/healthcheck.sh | 通过 | Portal、固定隧道运行；Codex ready、记忆索引 ready、原生记忆关闭；本地 DeepSeek 按原配置 disabled，未额外启用 |
+
+## 发布与清理
+
+- graph 全部当时工作区变更已提交为 `16e357d` 并推送到 origin/graph；本报告验收结果随后单独提交。
+- 固定入口保持不变：本地 127.0.0.1:4310 的 /boss/login、/employee；公网 workbench1.winy.cc/boss/login、workbench2.winy.cc/employee。
+- 本次验证不创建或修改业务任务、账号或密码；仅产生正常登录审计，临时验证会话已退出。未改动其他用户既有浏览器标签页。
 
 ## 结论
 
-代码与门控完成，待推送和上线验证；不以合成 HTTP 测试代替真实登录。
+员工工作图筛选已上线，现有 graph 改动已推送，受管服务已重启。完整发布门控与四个入口的真实认证验证通过；公网浏览器自动化超时与 HTTPS 认证成功分别记录，不混淆验收层级。
 
 ## 遗留事项
 
-- 待完成验证、发布及临时会话清理。
+- 公网 Chrome 端到端页面交互仍未完成自动验收；本次以真实 HTTPS 认证和本地 Chrome 交互验证覆盖，不声称公网浏览器全流程通过。
