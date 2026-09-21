@@ -194,3 +194,16 @@ test('a newly opened database preserves queue drafts and startup recovery pauses
     assert.equal(reopened.runtimeForChat(chat.id).busy, false);
   } finally { reopened.close(); }
 });
+
+test('queue resolves role and chat effort at enqueue and preserves the frozen explicit choice', async t => {
+  const {db,codex,queue,chat,enqueue,calls,finish}=fixture(t);
+  const first=enqueue('role default',{effort:undefined}); assert.equal(first.effort,'medium');
+  db.updateChat(chat.id,{preferredEffort:'max'});
+  const second=enqueue('chat preference',{effort:undefined});assert.equal(second.effort,'max');
+  const third=enqueue('explicit',{effort:'low'});assert.equal(third.effort,'low');
+  assert.throws(()=>enqueue('invalid',{effort:'invalid'}),{code:'INVALID_EFFORT'});
+  // A settings change outside the API cannot rewrite already persisted queue choices.
+  db.updateChat(chat.id,{preferredEffort:'high'});
+  for(let i=0;i<3;i++){queue.pump();await running(codex,chat);finish();await tick();}
+  assert.deepEqual(calls.filter(c=>c.method==='turn/start').map(c=>c.params.effort),['medium','max','low']);
+});

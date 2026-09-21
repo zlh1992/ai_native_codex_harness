@@ -30,7 +30,7 @@ export class ToolDetailsService {
   constructor({ db, config, summarize }) {
     this.db = db; this.config = config; this.queue = []; this.busy = false; this.stopped = false;
     this.cloud = new CodexSearchService(config);
-    this.summarize = summarize || ((text, signal) => this.cloud.summarize(text, signal));
+    this.summarize = summarize || ((text, signal, metering) => this.cloud.summarize(text, signal, metering));
     this.revision = Number(db.db.prepare('SELECT COALESCE(MAX(revision),0) AS n FROM tool_details').get().n);
     // Restart never replays cloud requests or pretends a interrupted tool succeeded.
     for (const row of db.db.prepare("SELECT * FROM tool_details WHERE json_extract(payload,'$.status')='running' OR json_extract(payload,'$.summaryStatus')='pending'").all()) {
@@ -117,7 +117,8 @@ export class ToolDetailsService {
       // One short bounded batch, no transcript, project name, paths to extra files or memory.
       const input = JSON.stringify(items.map((item, index) => ({ index, name: item.name, status: item.status, exitCode: item.exitCode,
         input: item.input.slice(0, 1200), output: item.output.slice(0, 1800) })));
-      const answer = await this.summarize(input, this.controller.signal);
+      const answer = await this.summarize(input, this.controller.signal, { ledger: this.db.tokenUsage, user: this.db.getUserById(run.userId),
+        projectId: run.projectId, chatId: run.chatId, runId: run.id });
       if (this.stopped || this.controller.signal.aborted || !this.authorized(run, first.accessId)) return;
       const parsed = JSON.parse(answer.text.replace(/^```(?:json)?\s*|\s*```$/g, ''));
       for (let index = 0; index < batch.length; index++) {

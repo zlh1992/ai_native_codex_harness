@@ -183,13 +183,16 @@ test('running turn recovery never synthesizes an empty user message', () => {
 test('model selector restores each chat and prevents edits while saving or without a chat', () => {
   const source = app.match(/function updateModelSelect\([^)]*\) \{[\s\S]*?\n\}/)[0];
   const select = { classList: { toggle() {} } };
-  const state = { selectedChat: null };
+  const state = { selectedChat: null, inputQueues: new Map() };
   const other = { classList: { toggle() {} }, closest() { return this; } };
   const update = Function('state', '$', 'selectedChatRunning', 'updateConcurrencyIndicator', `${source}; return updateModelSelect;`)(state,
     selector => selector === '#model-select' ? select : other, () => false, () => {});
   update(); assert.equal(select.disabled, true); assert.equal(select.value, '');
-  state.selectedChat = { preferredModel: 'gpt-6-astra' };
+  state.selectedChat = { id: 'chat', preferredModel: 'gpt-6-astra', preferredEffort: 'max' };
   update(); assert.equal(select.disabled, false); assert.equal(select.value, 'gpt-6-astra');
+  assert.equal(other.value, 'max');
+  state.inputQueues.set('chat', [{}]); update(); assert.equal(select.disabled, true); assert.equal(other.disabled, true);
+  state.inputQueues.clear();
   state.selectedChat = { preferredModel: 'gpt-5.6-terra' };
   update(); assert.equal(select.value, 'gpt-5.6-terra');
   state.modelSaving = true;

@@ -407,7 +407,26 @@ test('fixed Portal release gate', { timeout: 60_000 }, async (t) => {
     assert.ok(fork.sharedAt);
     assert.equal(fork.preferredMode, 'edit');
     assert.equal(fork.preferredModel, null);
-    await request(first, `/api/chats/${fork.id}`, { method: 'PATCH', body: { preferredModel: 'gpt-6-astra' }, expect: 403 });
+    assert.equal((await json(first, '/api/me')).defaultEffort, 'medium');
+    assert.equal((await json(boss, '/api/me')).defaultEffort, 'high');
+    assert.equal((await json(first, '/api/me')).models.length, 7);
+    assert.equal(fork.preferredEffort, null);
+    for (const model of (await json(first, '/api/me')).models) {
+      const changed = await json(first, `/api/chats/${fork.id}`, { method: 'PATCH', body: { preferredModel: model.id, preferredEffort: 'max' } });
+      assert.equal(changed.chat.preferredModel, model.id); assert.equal(changed.chat.preferredEffort, 'max');
+    }
+    assert.equal((await json(first, `/api/chats/${fork.id}`)).chat.preferredEffort, 'max');
+    await request(first, `/api/chats/${other.id}`, { method: 'PATCH', body: { preferredEffort: 'low' }, expect: 403 });
+    await request(first, `/api/chats/${fork.id}`, { method: 'PATCH', body: { preferredEffort: 'invalid' }, expect: 400 });
+    await request(first, `/api/chats/${fork.id}`, { method: 'PATCH', body: { preferredModel: 'invalid' }, expect: 400 });
+    await request(first, `/api/chats/${fork.id}/turns`, { method: 'POST', body: { prompt: 'invalid options', effort: 'invalid' }, expect: 400 });
+    await request(first, '/api/admin/token-usage', { expect: 403 });
+    const usage = await json(boss, '/api/admin/token-usage');
+    assert.ok(usage.totals.gpt.totalTokens > 0);
+    assert.equal(usage.timezone, 'Asia/Shanghai'); assert.ok(usage.startedAt);
+    assert.equal(usage.totals.gpt.totalTokens, usage.totals.bossGpt.totalTokens + usage.totals.employeeGpt.totalTokens);
+    assert.equal(JSON.stringify(usage).includes('finalReplySnapshot'), false);
+    await request(boss, '/api/admin/token-usage?from=2026-02-30', { expect: 400 });
     assert.notEqual(fork.id, original.id);
     assert.notEqual(fork.codexThreadId, original.codexThreadId);
     assert.notEqual(fork.codexThreadId, other.codexThreadId);
@@ -432,7 +451,7 @@ test('fixed Portal release gate', { timeout: 60_000 }, async (t) => {
     const source = (await json(boss, `/api/projects/${busyProject.id}/chats`, { method: 'POST', body: { title: 'Busy owner' }, expect: 201 })).chat;
     const running = request(boss, `/api/chats/${source.id}/turns`, { method: 'POST', body: { prompt: '[[hold]] owner working', mode: 'edit' } });
     await waitUntil(async () => (await json(boss, `/api/chats/${source.id}`)).latestTurnRun?.status === 'running', 'owner turn not running');
-    await request(boss, `/api/chats/${source.id}`, { method: 'PATCH', body: { preferredModel: 'gpt-6-astra' }, expect: 409 });
+    await request(boss, `/api/chats/${source.id}`, { method: 'PATCH', body: { preferredModel: 'gpt-6-astra', preferredEffort: 'low' }, expect: 409 });
     const rejected = await json(boss, `/api/admin/projects/${busyProject.id}/shares`, { method: 'POST', body: { userId: firstUser.id }, expect: 409 });
     assert.equal(rejected.error.code, 'WORKSPACE_BUSY');
     await request(boss, `/api/chats/${source.id}/interrupt`, { method: 'POST' });

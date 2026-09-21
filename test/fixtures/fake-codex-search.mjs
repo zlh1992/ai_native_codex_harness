@@ -21,14 +21,15 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   if (method === 'thread/start') {
     assert.equal(params.ephemeral, true); assert.equal(params.model, 'gpt-5.6-luna'); assert.deepEqual(params.dynamicTools, []);
     assert.equal(params.config.web_search, summary ? 'disabled' : 'live'); assert.equal(params.cwd, process.cwd());
-    send({ id, result: { thread: { id: 'search-test' } } });
+    send({ id, result: { thread: { id: `search-test-${process.pid}` } } });
   }
   if (method === 'turn/start') {
     assert.equal(params.model, 'gpt-5.6-luna'); assert.equal(params.effort, 'low');
     assert.deepEqual(params.input, [{ type: 'text', text: summary ? '[{"index":0,"name":"workspace_exec","output":"synthetic"}]' : 'public test query', text_elements: [] }]);
-    send({ id, result: { turn: { id: 'search-turn' } } });
-    if (!summary) send({ method: 'item/completed', params: { threadId: 'search-test', item: { type: 'webSearch', id: 'web-one' } } });
-    send({ method: 'item/completed', params: { threadId: 'search-test', item: { type: 'agentMessage', text: summary ? '[{"index":0,"summary":"测试命令完成"}]' : 'Synthetic public source https://example.com/' } } });
-    send({ method: 'turn/completed', params: { threadId: 'search-test', turn: { id: 'search-turn', status: 'completed' } } });
+    send({ id, result: { turn: { id: `search-turn-${process.pid}` } } });
+    send({ method: 'thread/tokenUsage/updated', params: { threadId: `search-test-${process.pid}`, turnId: `search-turn-${process.pid}`, tokenUsage: { total: { inputTokens: 50, outputTokens: 10, totalTokens: 60 }, last: { inputTokens: 50, outputTokens: 10, totalTokens: 60 } } } });
+    if (!summary) send({ method: 'item/completed', params: { threadId: `search-test-${process.pid}`, item: { type: 'webSearch', id: 'web-one' } } });
+    send({ method: 'item/completed', params: { threadId: `search-test-${process.pid}`, item: { type: 'agentMessage', text: summary ? '[{"index":0,"summary":"测试命令完成"}]' : 'Synthetic public source https://example.com/' } } });
+    send({ method: 'turn/completed', params: { threadId: `search-test-${process.pid}`, turn: { id: `search-turn-${process.pid}`, status: 'completed' } } });
   }
 });

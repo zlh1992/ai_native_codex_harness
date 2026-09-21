@@ -47,13 +47,16 @@ test('model preference migrates nullable, persists across reopen and stays indep
     const project = db.createProject({ userId: user.id, slug: 'models', name: 'Models' });
     const args = { projectId: project.id, userId: user.id, projectAccessId: project.accessId, treePath: project.treePath, title: 'Model' };
     const first = db.createChat(args);
-    db.db.exec('ALTER TABLE chats DROP COLUMN preferred_model');
+    db.db.exec('ALTER TABLE chats DROP COLUMN preferred_model; ALTER TABLE chats DROP COLUMN preferred_effort');
     db.close(); db = new HarnessDatabase(config);
     assert.equal(db.getChat(first.id).preferredModel, null);
+    assert.equal(db.getChat(first.id).preferredEffort, null);
     const second = db.createChat(args);
-    db.updateChat(first.id, { preferredModel: 'gpt-6-astra' });
+    db.updateChat(first.id, { preferredModel: 'gpt-6-astra', preferredEffort: 'max' });
     db.close(); db = new HarnessDatabase(config);
     assert.equal(db.getChat(first.id).preferredModel, 'gpt-6-astra');
     assert.equal(db.getChat(second.id).preferredModel, null);
+    assert.equal(db.getChat(first.id).preferredEffort, 'max');
+    assert.equal(db.getChat(second.id).preferredEffort, null);
   } finally { db.close(); fs.rmSync(base, { recursive: true, force: true }); }
 });

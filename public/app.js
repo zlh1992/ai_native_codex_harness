@@ -13,7 +13,7 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
 const initialState = () => ({
-  me: null, csrf: '', modelSaving: false, projects: [], chats: [], selectedProject: null, selectedChat: null,
+  me: null, csrf: '', modelSaving: false, defaultEffort: null, projects: [], chats: [], selectedProject: null, selectedChat: null,
   selectedFile: null, selectedFileInfo: null, fileEntries: [], fileContent: null, viewerMode: 'preview',
   runningTurns: new Map(), maxConcurrentTurns: 11, tasks: [], selectedTask: null, taskGraphId: '',
   codexCapacity: null, pendingSubmission: null, pendingUpload: null,
@@ -209,8 +209,9 @@ async function restoreSession() {
   document.title = bossWorkbench ? '老板工作台 · Codex Harness' : '员工工作台 · Codex Harness';
   $('#user-chip').textContent = `${data.user.displayName} · ${data.user.role === 'admin' ? '超级管理员' : data.user.username}`;
   $('#model-badge').textContent = data.model;
-  $('#model-badge').classList.toggle('hidden', data.user.role === 'admin');
-  $('#model-select').classList.toggle('hidden', data.user.role !== 'admin');
+  state.defaultEffort = data.defaultEffort;
+  $('#model-badge').classList.add('hidden');
+  $('#model-select').classList.remove('hidden');
   $('#model-select').replaceChildren(...[{ id: '', label: `默认 · ${data.model}` }, ...(data.models || [])].map((model) => new Option(model.label, model.id)));
   updateModelSelect();
   $('#codex-status').classList.toggle('online', data.codex.ready);
@@ -220,7 +221,8 @@ async function restoreSession() {
   state.maxConcurrentTurns = data.codex.maxRootTurns || 11;
   updateConcurrencyIndicator();
   updateCapacity(data.codex);
-  $('#effort-select').innerHTML = data.efforts.map((value) => `<option value="${value}" ${value === data.defaultEffort ? 'selected' : ''}>${value}</option>`).join('');
+  $('#effort-select').replaceChildren(...[new Option(`默认 · ${data.defaultEffort}`, ''), ...data.efforts.map(value => new Option(value, value))]);
+  updateModelSelect();
   updateUsage(data.usage, data.user.maxStorageBytes);
 
   const requestedProject = new URLSearchParams(location.search).get('project');
@@ -567,7 +569,7 @@ function setComposer(enabled) {
     && state.selectedChat.threadState !== 'resume_failed' && flow.canWork;
   renderTaskNotice(flow);
   $('#prompt-input').disabled = !usable;
-  $('#send-button').disabled = !usable || state.queueSending;
+  $('#send-button').disabled = !usable || state.queueSending || Boolean(state.modelSaving);
   $('#send-button').setAttribute('aria-label', selectedChatRunning() ? '加入消息队列' : '发送消息');
   $('#prompt-input').placeholder = selectedChatRunning() ? '继续输入，发送后排队…' : state.selectedProject?.projectType === 'local_private' ? '告诉本地 DeepSeek 你想完成什么…' : '告诉 Codex 你想构建什么…';
   renderInputQueue();
@@ -817,6 +819,7 @@ async function resumePersistedTurn(chatData) {
 }
 
 function renderInputQueue() {
+  updateModelSelect();
   const root = $('#input-queue');
   const inputs = state.inputQueues.get(state.selectedChat?.id) || [];
   root.classList.toggle('hidden', !inputs.length);
@@ -876,7 +879,7 @@ async function submitQueuedInput() {
   const chatId = state.selectedChat?.id;
   const prompt = $('#prompt-input').value.trim();
   if (!chatId || !prompt || state.queueSending) return;
-  const body = { prompt, mode: $('#mode-select').value, effort: $('#effort-select').value };
+  const body = { prompt, mode: $('#mode-select').value, effort: $('#effort-select').value || state.defaultEffort };
   const signature = JSON.stringify([chatId, body]);
   // Reuse the input ID on a network retry so an accepted message cannot be sent twice.
   if (state.pendingInput?.signature !== signature) state.pendingInput = { signature, id: crypto.randomUUID() };
@@ -1167,6 +1170,7 @@ async function restoreLocation() {
 
 function switchView(view, push = true) {
   if (!['tasks', 'workbench', 'memories'].includes(view)) return;
+  if (state.view !== view) workGraphUI.closeDetail();
   state.view = view;
   $('#tasks-view').classList.toggle('hidden', view !== 'tasks');
   $('#workbench-view').classList.toggle('hidden', view !== 'workbench');
@@ -1256,6 +1260,7 @@ $('#login-form').addEventListener('submit', async (event) => {
   } catch (error) { $('#login-error').textContent = error.message; }
   finally { submit.disabled = false; }
 });
+$('#login-form button[type=submit]').disabled = false;
 
 $('#logout-button').addEventListener('click', async (event) => {
   const button = event.currentTarget;
@@ -1632,8 +1637,8 @@ setupResizers(); health(); bootstrap();
 function updateModelSelect() {
   const local = state.selectedProject?.projectType === 'local_private';
   const select = $('#model-select');
-  select.classList.toggle('hidden', local || state.me?.role !== 'admin');
-  $('#model-badge').classList.toggle('hidden', !local && state.me?.role === 'admin');
+  select.classList.toggle('hidden', local);
+  $('#model-badge').classList.toggle('hidden', !local);
   if (local) $('#model-badge').textContent = `${state.codexCapacity?.runtimes?.deepseek?.model || 'DeepSeek'} · DSH · 不可分享`;
   $('#local-control-label').classList.toggle('hidden', !local);
   $('#local-control').value = state.selectedChat?.controlMode || 'manual';
@@ -1641,7 +1646,10 @@ function updateModelSelect() {
   $('#effort-select').closest('label').classList.toggle('hidden', local);
   updateConcurrencyIndicator();
   select.value = state.selectedChat?.preferredModel || '';
-  select.disabled = !state.selectedChat || Boolean(state.modelSaving);
+  const locked = !state.selectedChat || Boolean(state.modelSaving) || selectedChatRunning() || Boolean(state.inputQueues.get(state.selectedChat?.id)?.length);
+  select.disabled = locked;
+  $('#effort-select').value = state.selectedChat?.preferredEffort || '';
+  $('#effort-select').disabled = locked;
 }
 
 $('#local-control').addEventListener('change', async (event) => {
@@ -1658,18 +1666,20 @@ $('#local-control').addEventListener('change', async (event) => {
   else try { await save(); } catch (error) { toast(error.message, 'error'); }
 });
 
-$('#model-select').addEventListener('change', async (event) => {
-  const chatId = state.selectedChat?.id;
-  if (!chatId) return;
-  const preferredModel = event.target.value || null;
+async function saveModelPreference(key, value) {
+  const chatId = state.selectedChat?.id, generation = sessionClient.generation();
+  if (!chatId || state.modelSaving) return;
   state.modelSaving = true;
-  event.target.disabled = true;
+  setComposer(true);
   try {
-    const data = await api(`/api/chats/${chatId}`, { method: 'PATCH', body: { preferredModel } });
+    const data = await api(`/api/chats/${chatId}`, { method: 'PATCH', body: { [key]: value || null } });
+    if (generation !== sessionClient.generation()) return;
     if (state.selectedChat?.id === chatId) Object.assign(state.selectedChat, data.chat);
     const local = state.chats.find((chat) => chat.id === chatId);
     if (local) Object.assign(local, data.chat);
-    toast('对话模型已保存，下次发送时生效。');
-  } catch (error) { toast(error.message, 'error'); }
-  finally { state.modelSaving = false; updateModelSelect(); }
-});
+    toast('对话模型和推理强度已保存，下次发送时生效。');
+  } catch (error) { if (generation === sessionClient.generation()) toast(error.message, 'error'); }
+  finally { if (generation === sessionClient.generation()) { state.modelSaving = false; setComposer(Boolean(state.selectedChat)); } }
+}
+$('#model-select').addEventListener('change', event => saveModelPreference('preferredModel', event.target.value));
+$('#effort-select').addEventListener('change', event => saveModelPreference('preferredEffort', event.target.value));

@@ -137,9 +137,17 @@ queued -> starting -> running -> completed
 
 同一分享内文件基线与历史在 owner 写入屏障下取得；员工续聊不得复用 owner native thread。之后 owner 新增的内容不会自动流入员工，员工续聊不会流回 owner 或其他员工。恢复保留的 revoked access 保留其已有对话而不重新复制；既有 active share 不做隐式迁移。对话列表只列出当前 access 下的 chat；来源字段只是 lineage，不授予访问原 chat 的权限。分享失败不发布部分授权；失败创建的上游线程可能成为无 Portal 映射的孤立副本，原线程不删除。
 
-## 老板对话模型偏好
+## 对话模型与推理强度偏好
 
-`chats.preferred_model` 为 nullable、按对话持久化的 root 模型偏好；新建和迁移后的旧对话为 null，使用 `CODEX_MODEL`。老板只能修改自己的有效 access 下的 chat，选择 Portal 白名单中的 Astra、Sol、Terra、Luna、GPT-5.5、Mini 或 Spark，或恢复默认。员工继续使用服务默认模型；分享副本不继承老板模型偏好。
+`chats.preferred_model` 与 `chats.preferred_effort` 为 nullable、按对话保存的 root 偏好。老板与员工均可在自己的普通项目/任务对话选择七种 Portal 白名单 GPT；默认模型仍为 CODEX_MODEL。员工默认强度 medium，老板默认 CODEX_REASONING_EFFORT（默认 high）；强度解析依次为本次显式请求、chat 偏好、角色默认，非法值拒绝。已有模型偏好保留，旧 chat 强度为 null，不回写历史运行。分享的新副本不复制模型/强度偏好，采用接收者默认；恢复既有授权保留原 chat 偏好。隐私项目不能设置这些 GPT 偏好，后台 planner/reviewer 不接受浏览器修改。
+
+模型和强度仅在没有运行、恢复或待处理输入时修改；队列保存入队时的强度，run 冻结模型/强度。后续偏好不能改写已经派发或排队的工作；steer 沿用当前 turn 配置。上游不支持模型/强度时显式失败，不静默降级。
+
+## 模型用量事实
+
+`token_usage_calls` 保存独立调用归属、引擎、模型、强度、类别、创建时间及上游数值计量，不引用对话正文。根运行、子代理、独立搜索/摘要及本地每次 HTTP 推理请求分别记录；辅助请求归属发起运行用户。模型/强度是调用快照，禁止从 chat 当前偏好反推。input 包含缓存，output 包含已报告的 reasoning，细项不重复相加。DSH 的未缓存 input + cacheRead/cacheWrite 需转换为含缓存的输入口径；本地原始 SSE prompt_tokens 已含缓存。
+
+账本不随 chat/project 删除，不回填上线前零散 journal，不包含网站外调用。未上报、不确定基线或未完成调用显式标记 incomplete；零值只表示已知上报量，不能宣称未知消耗为零。
 
 ## 私有输入队列
 

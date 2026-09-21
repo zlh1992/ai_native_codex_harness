@@ -30,6 +30,8 @@
 
 新员工标签页不继承默认 Cookie 登录；刷新保持本标签选择，新登录始终创建新 selector，不覆盖另一标签的 Cookie。复制标签页可能继承同一 sessionStorage/会话，主动登录不同账号后独立。浏览器同源脚本本身不是敌对安全边界；此机制避免无意串号，不承诺对同一浏览器 profile 的恶意脚本隔离。关闭标签页不等于服务器退出，Cookie/session 按 TTL 过期。老板入口及未指定 selector 的旧 API 保持默认 Cookie、多设备独立会话；同一账号的数据按 user_id 共享，而非按 IP 分库。升级后员工须刷新页面重新登录，旧 API 会话不批量撤销。
 
+登录 HTML 表单必须显式使用 POST，提交按钮在脚本绑定 submit 处理器前保持 disabled；模块加载失败或未就绪时不能回退 GET 将凭据带入 URL。
+
 登录限速目前不是跨进程持久化安全控制；可信代理必须清洗 `X-Forwarded-For` 与 `X-Forwarded-Proto`。直接把 Portal 暴露到不可信反向代理会破坏来源与 Secure Cookie 判断。
 
 浏览器将“验证中 / 已登录 / 未登录 / 连接失败”分开显示。初始 HTML 与 BFCache 返回前遮住登录表单、私有工作台及弹窗；仅明确 401 才按会话失效处理，网络错误和 5xx 提供重试，不伪装为退出。注销失败不得假定 Cookie 已撤销；成功注销或失效须清空私有内存、表单、订阅并废弃旧请求响应。同源标签页收到身份变化通知后复验 `/api/me`，广播中不包含身份或令牌。
@@ -127,7 +129,7 @@ Seatbelt 不是容器。完全不可信用户需要独立 OS 用户、VM/容器�
 
 分享历史前若检测到跨项目记忆引用，Portal 只向 owner 返回条数、接收者和短期确认挑战，不返回记忆正文；确认必须单次、限时且绑定快照。失效引用不得通过确认绕过来源 ACL。
 
-老板可经既有 chat PATCH 接口修改 `preferredModel`（白名单 id 或 null）；此操作要求 admin、原 chat ACL、CSRF/Origin 且 chat 无运行/恢复/排队输入。员工无该权限，运行服务也强制员工使用默认模型。`/api/me` 的 `models` 仅向老板返回受控目录，目录不表示上游账号保证可用。
+老板与员工可经既有 chat PATCH 接口修改自己普通 chat 的 `preferredModel` / `preferredEffort`（白名单值或 null）；要求原 chat ACL、CSRF/Origin 且 chat 无运行/恢复/排队输入。`/api/me` 向双方返回同一受控模型目录，目录不表示上游账号保证可用。
 
 ## 后台业务工具边界
 
@@ -136,3 +138,7 @@ planner/reviewer 仅暴露受限 work_graph_* 工具，禁止原生写入与命�
 交付文档提取只接收固定 Git blob 的字节，不向解析器提供项目路径。PDF/DOCX 在独立 Seatbelt 子进程中提取文本：仅开放解析器源码/依赖及系统运行库读取，不开放项目、凭据或网络；清空继承环境，限制输入、解压预算、JS 堆、墙钟和输出。解析错误不返回底层异常或文档正文至日志。提取异步返回后复验 owner/access、员工策略、任务版本和 pending 状态；tool 返回前额外复验原 job lease/generation。
 
 reviewer root 必须在当前 turn 读取固定上下文，方可提交审核意见；read proof 只保存本轮标识、文件路径和覆盖元数据。有附件的通过意见须引用已提供的文件内容。解析覆盖不足时不得自动应用，模型生成的计划不能自行指定节点自动验收授权。
+
+## 模型选择与用量看板
+
+普通项目的老板/员工均可为自己的 chat 选择白名单 GPT 和有效强度；这不改变 provider、沙箱、内容 ACL 或 Luna 子代理策略。隐私项目仍仅老板访问且不可改 GPT 偏好。GET /api/admin/token-usage 只允许活动 admin，跨用户仅返回用量元数据（人员、模型、日期与计数），不返回 prompt、文件、搜索词、chat/native thread/run 标识或正文。生产诊断只输出计数和状态。

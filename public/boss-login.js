@@ -37,3 +37,4 @@ form.addEventListener('submit', async (event) => {
   } catch (error) { errorLabel.textContent = error.message; }
   finally { button.disabled = false; }
 });
+form.querySelector('button[type=submit]').disabled = false;

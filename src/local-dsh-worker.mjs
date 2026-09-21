@@ -1,3 +1,4 @@
+import { createLocalUsageMeter } from './local-usage.mjs';
 // Trusted, sandboxed DSH composition. No web bundle, user profile, plugin loader or telemetry.
 import readline from 'node:readline';
 import { Context } from '@deepseek-ai/cordis';
@@ -17,6 +18,7 @@ import { localModelUrl } from './private-projects.mjs';
 process.umask(0o077);
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 const pending = new Map();
+const usageMeter = createLocalUsageMeter(send);
 let ctx, handle, initialized = false, running = false, stopped = false, toolSequence = 0;
 const message = (text, id) => Object.freeze({ ...createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }), ...(id ? { id } : {}) });
 function parameters(schema) {
@@ -31,11 +33,14 @@ async function init(input) {
   globalThis.fetch = (target, options = {}) => {
     const url = new URL(typeof target === 'string' || target instanceof URL ? target : target.url);
     if (![`${baseUrl}/chat/completions`, `${baseUrl}/models`].includes(url.href)) throw new Error('LOCAL_EGRESS_DENIED');
-    return nativeFetch(target, { ...options, redirect: 'error' });
+    return url.pathname.endsWith('/chat/completions')
+      ? usageMeter.fetchMetered(nativeFetch, target, { ...options, redirect: 'error' })
+      : nativeFetch(target, { ...options, redirect: 'error' });
   };
   ctx = new Context();
   // Never forward a framework error's raw message to Portal logs.
   await ctx.plugin(Llm);
+  ctx.on('llm/stream', usageMeter.stream);
   await ctx.plugin(Sessions);
   await ctx.plugin(Prompt, { includeHarnessIdentity: false, includeRuntimeContext: false, persona: input.instructions });
   await ctx.plugin(Tools, { mode: 'native' });

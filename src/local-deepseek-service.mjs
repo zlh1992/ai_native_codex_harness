@@ -150,6 +150,7 @@ export class LocalDeepSeekService extends EventEmitter {
     const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
     const steers = new Map(); const tools = new Set();
     let closed = false;
+    const usageCalls = new Map();
     const exited = new Promise((resolve) => child.once('close', resolve));
     const rejectAll = (error) => { readyReject(error); runReject?.(error); for (const item of steers.values()) { clearTimeout(item.timer); item.reject(error); } steers.clear(); };
     child.stderr.resume(); // Runtime stderr may contain prompts/errors. Do not log it.
@@ -160,6 +161,14 @@ export class LocalDeepSeekService extends EventEmitter {
     active.controller.signal.addEventListener('abort', abort, { once: true });
     readline.createInterface({ input: child.stdout }).on('line', (line) => {
       let packet; try { packet = JSON.parse(line); } catch { return; }
+      if (packet.type === 'usage_start' && typeof packet.id === 'string' && packet.id.length <= 80) {
+        const id = this.db.tokenUsage.start({ id: `local:${active.turnRunId}:${packet.id}`, user: active.user,
+          projectId: active.project.id, chatId: active.chat.id, runId: active.turnRunId, engine: 'deepseek',
+          model: this.config.localDeepSeekModel, kind: packet.kind === 'compaction' ? 'compaction' : 'root' });
+        usageCalls.set(packet.id, id);
+      }
+      if (packet.type === 'usage_sample' && usageCalls.has(packet.id)) this.db.tokenUsage.sample(usageCalls.get(packet.id), packet.usage, 'gpt');
+      if (packet.type === 'usage_end' && usageCalls.has(packet.id)) this.db.tokenUsage.finish(usageCalls.get(packet.id));
       if (packet.type === 'ready') readyResolve();
       if (packet.type === 'error') rejectAll(localError(packet.code));
       if (packet.type === 'delta') {
@@ -182,6 +191,10 @@ export class LocalDeepSeekService extends EventEmitter {
       send({ type: 'dispose' });
       const timer = setTimeout(() => { if (!closed) child.kill('SIGKILL'); }, 2000);
       await exited; clearTimeout(timer); await Promise.allSettled(tools);
+      for (const id of usageCalls.values()) {
+        const row = this.db.db.prepare('SELECT finished FROM token_usage_calls WHERE id=?').get(id);
+        if (!row?.finished) this.db.tokenUsage.finish(id, true);
+      }
     };
     send({ type: 'init', sessionId, resume: Boolean(chat.localSessionId && !reset), sessionRoot: path.join(sessionRoot, 'events'),
       baseUrl: this.config.localDeepSeekBaseUrl, model: this.config.localDeepSeekModel, contextWindow: this.config.localDeepSeekContextWindow,
@@ -240,7 +253,8 @@ export class LocalDeepSeekService extends EventEmitter {
       this.authorize(active);
       if (kind === 'file') invariant(before === this.fingerprint(active.project, args.path), 409, 'FILE_VERSION_CONFLICT', '审批期间文件已变化，请重新读取并提出修改。');
       const result = name === 'web_search'
-        ? await this.search.search(args.query, active.controller.signal)
+        ? await this.search.search(args.query, active.controller.signal, { ledger: this.db.tokenUsage, user: active.user,
+          projectId: active.project.id, chatId: active.chat.id, runId: active.turnRunId })
         : await this.standard.executeWorkspaceTool(active, name, args);
       this.authorize(active); detailResult = result; success = true; return result;
     } catch (error) { detailResult = { error: error.message }; throw error;

@@ -4,6 +4,8 @@ import readline from 'node:readline';
 import path from 'node:path';
 
 const threads = new Map();
+const usageByThread = new Map();
+const usage = n => ({ inputTokens: 100*n, outputTokens: 20*n, totalTokens: 120*n, cachedInputTokens: 10*n, cacheWriteInputTokens: 0, reasoningOutputTokens: 5*n });
 const heldTurns = new Map();
 const threadTools = new Map();
 const toolResponses = new Map();
@@ -130,10 +132,12 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     const threadId = `fake-thread-${process.pid}-${nextThread++}`;
     const fork = structuredClone(source);
     fork.id = threadId;
+    usageByThread.set(threadId, usageByThread.get(params.threadId) || 0);
     threads.set(threadId, fork);
     return respond(id, { thread: fork });
   }
   if (method === 'thread/resume') {
+    notify('thread/tokenUsage/updated', { threadId: params.threadId, turnId: 'previous', tokenUsage: { total: usage(usageByThread.get(params.threadId) || 0), last: usage(0) } });
     if (process.env.FAKE_FAIL_RESUME === '1') return fail(id, -32000, '/private/fake/secret resume failure');
     if (!threads.has(params.threadId)) threads.set(params.threadId, { id: params.threadId, modelProvider: 'openai_http', turns: [], goal: null });
     threadTools.set(params.threadId, (params.dynamicTools || []).map((tool) => tool.name));
@@ -149,6 +153,9 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     const turnId = `fake-turn-${process.pid}-${nextTurn++}`;
     const prompt = inputText(params);
     respond(id, { turn: { id: turnId, status: 'running' } });
+    notify('turn/started', { threadId: params.threadId, turn: { id: turnId, status: 'running' } });
+    const count = (usageByThread.get(params.threadId) || 0) + 1; usageByThread.set(params.threadId, count);
+    notify('thread/tokenUsage/updated', { threadId: params.threadId, turnId, tokenUsage: { total: usage(count), last: usage(1) } });
     if (threadTools.get(params.threadId)?.includes('work_graph_context')) { void workflowTurn(params.threadId, turnId, prompt); return; }
     if (prompt.includes('[[memory-tools]]')) { void memoryTurn(params.threadId, turnId, prompt); return; }
     if (prompt.includes('[[hold]]')) heldTurns.set(turnId, { threadId: params.threadId, prompt, steers: [] });

@@ -70,12 +70,25 @@ export class WorkGraphUI {
   constructor({ api, toast, openTask, openFile, refreshTasks }) {
     Object.assign(this, { api, toast, openTaskChat: openTask, openFile, refreshTasks });
     this.zoom = 1; this.graphs = []; this.mode = 'kanban'; this.events = []; this.jobs = []; this.selection = 0;
+    this.generationKeys = new Map();
+    this.detailEpoch = 0;
+  }
+  clearDetail() {
+    this.detailEpoch++;
+    for (const entry of this.detail?.uploads || []) if (entry.preview) URL.revokeObjectURL(entry.preview);
+    this.detail = null;
+  }
+  closeDetail() {
+    if (this.detail?.submitting) return;
+    this.clearDetail();
+    if (this.drawer?.open) this.drawer.close();
   }
   dispose() {
     this.selection++; this.source?.close(); this.source = null; clearInterval(this.poller); clearTimeout(this.refreshTimer);
     this.handlers?.abort(); this.kanban?.destroy(); this.kanban = null;
-    for (const entry of this.detail?.uploads || []) if (entry.preview) URL.revokeObjectURL(entry.preview);
+    this.clearDetail();
     this.detail = null; this.current = null; this.events = []; this.graphs = []; this.jobs = []; this.projectId = ''; this.graphId = null;
+    this.generationKeys = new Map(); this.generationJobId = null; this.generationJob = null;
     this.initialized = false; this.refreshing = false; this.employeeRefresh = null; this.owner = false;
     this.panel?.replaceChildren(); this.panel?.classList.add('hidden');
   }
@@ -87,9 +100,10 @@ export class WorkGraphUI {
     this.initialized = true;
     this.handlers = new AbortController(); const options = { signal: this.handlers.signal };
     this.drawer.addEventListener('click', (event) => this.drawerAction(event).catch((e) => this.toast(e.message, 'error')), options);
-    this.drawer.addEventListener('cancel', event => { if (this.detail?.submitting) event.preventDefault(); }, options);
+    this.drawer.addEventListener('cancel', event => { event.preventDefault(); this.closeDetail(); }, options);
     this.drawer.addEventListener('close', () => {
-      for (const entry of this.detail?.uploads || []) if (entry.preview) URL.revokeObjectURL(entry.preview);
+      // Native close events can arrive after a different drawer has already opened.
+      if (!this.drawer.open && this.detail) this.clearDetail();
     }, options);
     this.panel.addEventListener('click', (event) => this.action(event).catch((e) => this.toast(e.message, 'error')), options);
     this.panel.addEventListener('change', (event) => {
@@ -147,14 +161,17 @@ export class WorkGraphUI {
       const node = graph.nodes.find(node => node.key === detail.node.key);
       if (node && (JSON.stringify(node) !== JSON.stringify(detail.node) || graph.run?.status !== detail.graph.run?.status)) {
         const scroll = this.drawer.scrollTop;
-        this.showNode(graph, node.key); this.drawer.scrollTop = scroll;
+        this.showNode(graph, node.key, null, true); this.drawer.scrollTop = scroll;
       }
     } finally { if (this.employeeRefresh === token) this.employeeRefresh = null; }
   }
   async selectProject(id) {
+    this.closeDetail();
     const selection = ++this.selection;
     this.kanban?.destroy(); this.kanban = null; this.current = null;
     this.source?.close(); clearInterval(this.poller); this.projectId = id; this.graphId = null; this.events = []; this.generationJob = null;
+    this.generationJobId = null;
+    $('#graph-generation-status').textContent = '';
     if (!id) { $('#graph-board').textContent = '先在驾驶舱或工作台创建项目。'; return; }
     const data = await this.api(`/api/projects/${id}/work-graphs/candidates`);
     if (id !== this.projectId || selection !== this.selection) return;
@@ -199,8 +216,9 @@ export class WorkGraphUI {
       } else { this.current = null; this.jobs = []; }
       $('#graph-select').innerHTML = this.graphs.map((g) => `<option value="${escape(g.id)}" ${g.id === this.graphId ? 'selected' : ''}>${escape(g.title)} · V${g.version}</option>`).join('');
       if (this.generationJobId) {
-        const { job } = await this.api(`/api/work-graph-jobs/${this.generationJobId}`);
-        if (selection !== this.selection || projectId !== this.projectId) return;
+        const jobId = this.generationJobId;
+        const { job } = await this.api(`/api/work-graph-jobs/${jobId}`);
+        if (selection !== this.selection || projectId !== this.projectId || jobId !== this.generationJobId) return;
         this.generationJob = job;
         $('#graph-generation-status').textContent = `计划生成：${labels[job.status] || job.status} · ${jobProgress(job)}${job.status === 'retry_wait' ? ` · 下次尝试 ${date(job.dueAt)}（调度 ${job.attempt}/${job.maxAttempts}）` : job.status === 'needs_attention' ? ' · 请查看下方恢复卡片' : ''}`;
         if (job.status === 'succeeded') { localStorage.removeItem(`work-graph-job:${projectId}`); this.generationJobId = null; }
@@ -271,12 +289,12 @@ export class WorkGraphUI {
     $('#graph-job-list').innerHTML = [...this.jobs, ...(this.generationJob?.status === 'needs_attention' && !this.jobs.some(j => j.id === this.generationJob.id) ? [this.generationJob] : [])].filter((j) => j.status === 'needs_attention').map(jobAttentionMarkup).join('');
     all('[data-ack]').forEach(node => { node.checked = acknowledged.has(node.dataset.ack); });
     all('[data-retry-job]').forEach(node => { node.disabled ||= this.retryingJob === node.dataset.retryJob; });
-    if (this.drawer.open && this.detail?.graph.owner && graph?.id === this.detail.graph.id) {
+    if (this.drawer.open && this.detail?.graph.owner && !this.detail.reviewing && graph?.id === this.detail.graph.id) {
       const node = graph.nodes.find(n => n.key === this.detail.node.key);
       if (node && JSON.stringify(node) !== JSON.stringify(this.detail.node)) {
         const feedback = $('#graph-review-feedback', this.drawer)?.value || '';
         const scroll = this.drawer.scrollTop;
-        this.showNode(graph, node.key);
+        this.showNode(graph, node.key, null, true);
         if ($('#graph-review-feedback', this.drawer)) $('#graph-review-feedback', this.drawer).value = feedback;
         this.drawer.scrollTop = scroll;
       }
@@ -284,16 +302,23 @@ export class WorkGraphUI {
   }
   async generate(event) {
     const form = event.currentTarget; const data = new FormData(form);
-    this.generationKey ||= crypto.randomUUID();
+    const projectId = this.projectId; const selection = this.selection;
+    const keys = this.generationKeys;
+    const key = keys.get(projectId) || crypto.randomUUID(); keys.set(projectId, key);
     const mode = data.get('reviewMode');
     const paths = String(data.get('paths')).split('\n').map((s) => s.trim()).filter(Boolean);
     const buttons = all('button[type=submit]', form); buttons.forEach((b) => { b.disabled = true; });
     try {
-      const { job } = await this.api(`/api/projects/${this.projectId}/work-graphs/generate`, { method: 'POST', body: {
+      const { job } = await this.api(`/api/projects/${projectId}/work-graphs/generate`, { method: 'POST', body: {
         prompt: data.get('prompt'), candidateIds: data.getAll('candidate'), ...(paths.length ? { paths } : {}),
-        autoStart: !event.submitter?.dataset.preview, reviewPolicy: { mode, finalMode: data.get('finalMode') === 'same' ? mode : 'assisted' }, idempotencyKey: this.generationKey } });
-      this.generationKey = null; this.generationJobId = job.id;
-      localStorage.setItem(`work-graph-job:${this.projectId}`, job.id); await this.refresh();
+        autoStart: !event.submitter?.dataset.preview, reviewPolicy: { mode, finalMode: data.get('finalMode') === 'same' ? mode : 'assisted' }, idempotencyKey: key } });
+      // An accepted request belongs to its initiating project, even after navigation.
+      // A disposed session must never restore its private in-memory state.
+      if (keys !== this.generationKeys) return;
+      keys.delete(projectId);
+      localStorage.setItem(`work-graph-job:${projectId}`, job.id);
+      if (selection !== this.selection || projectId !== this.projectId) return;
+      this.generationJobId = job.id; await this.refresh();
     } finally { buttons.forEach((b) => { b.disabled = false; }); }
   }
   async action(event) {
@@ -314,7 +339,7 @@ export class WorkGraphUI {
       await this.refresh();
     } else if (button.dataset.jobChat) {
       const selection = this.selection; const chatId = button.dataset.jobChat;
-      this.detail = null;
+      this.clearDetail();
       this.drawer.innerHTML = '<button class="secondary" data-close-drawer>关闭</button><p>正在读取后台记录…</p>';
       this.drawer.showModal();
       const pending = this.drawer.firstElementChild;
@@ -331,12 +356,21 @@ export class WorkGraphUI {
     }
   }
   async inspect(task, native = null) {
+    if (this.detail?.submitting) return;
+    this.closeDetail();
+    const epoch = this.detailEpoch;
     const data = await this.api(`/api/projects/${task.projectId}/work-graphs`);
+    if (!this.initialized || epoch !== this.detailEpoch) return;
     const graph = data.graphs.find((g) => g.nodes.some((n) => n.taskId === task.id));
     if (graph) this.showNode(graph, graph.nodes.find((n) => n.taskId === task.id).key, native);
   }
-  showNode(graph, key, native = null) {
-    const node = graph.nodes.find((n) => n.key === key); this.detail = { graph, node, native, uploads: [] };
+  showNode(graph, key, native = null, preserve = false) {
+    const node = graph.nodes.find((n) => n.key === key);
+    const existing = preserve && this.detail?.graph.id === graph.id && this.detail.node.key === key
+      && this.detail.node.version === node.version ? this.detail : null;
+    const preview = existing ? $('#graph-artifact-preview', this.drawer) : null;
+    if (existing) Object.assign(existing, { graph, node });
+    else { this.clearDetail(); this.detail = { graph, node, native, uploads: [] }; }
     const task = node.task; const editable = task && ['active', 'rework'].includes(task.status) && graph.run?.status === 'running';
     const latest = node.submissions?.find((s) => s.taskVersion === node.version);
     this.drawer.innerHTML = `<div class="graph-drawer-top"><div><p class="eyebrow">${escape(node.assigneeName)} · V${node.version}</p><h2>${escape(node.title)}</h2></div><button class="secondary" data-close-drawer aria-label="关闭">×</button></div>
@@ -356,6 +390,7 @@ export class WorkGraphUI {
       <label>已知限制 / 备注<textarea name="note" rows="2" maxlength="4000"></textarea></label>
       <p class="form-error" role="alert"></p><div class="dialog-actions"><button class="secondary" type="button" data-open-task>进入任务对话</button><button class="secondary" type="button" data-save-checklist>保存清单</button><button class="primary" type="submit">提交验收</button></div></form>` : ''}
       ${graph.owner && latest?.verdict === 'pending' && graph.run?.status === 'running' ? `<label>审核意见 / 修改要求<textarea id="graph-review-feedback" rows="4" maxlength="8000"></textarea></label><div class="dialog-actions"><button class="secondary" data-verdict="rework">打回重做</button><button class="primary" data-verdict="passed">通过并交付</button></div>` : ''}`;
+    if (preview) this.drawer.append(preview);
     if (!this.drawer.open) this.drawer.showModal();
     $('#graph-submit-form', this.drawer)?.addEventListener('submit', (event) => {
       event.preventDefault(); const form = event.currentTarget;
@@ -393,11 +428,12 @@ export class WorkGraphUI {
     }; });
   }
   async checkDeliveryFiles() {
+    const detail = this.detail;
     const form = $('#graph-submit-form', this.drawer);
     const outputs = String(new FormData(form).get('outputs') || '').split('\n').map(s => s.trim()).filter(Boolean);
     const { files } = await this.api(`/api/tasks/${this.detail.node.task.id}/delivery-files`, { method: 'POST', body: {
       taskVersion: this.detail.node.version, outputs: [...outputs, ...this.detail.uploads.filter(e => e.uploaded).map(e => e.path)] } });
-    $('#graph-files-result', this.drawer).textContent = files.map(f => `${f.path} · ${f.size} B`).join('\n') || '没有工作区附件';
+    if (this.detail === detail && this.drawer.open) $('#graph-files-result', this.drawer).textContent = files.map(f => `${f.path} · ${f.size} B`).join('\n') || '没有工作区附件';
     return outputs;
   }
   async saveChecklist() {
@@ -408,89 +444,114 @@ export class WorkGraphUI {
     node.task = task; return task;
   }
   async submitDetail(form) {
+    const detail = this.detail;
+    const ensureCurrent = () => {
+      if (this.detail !== detail || !this.drawer.open) throw new DOMException('已忽略过期任务提交', 'AbortError');
+    };
     const data = new FormData(form); const button = $('button[type=submit]', form); button.disabled = true;
-    this.detail.submitting = true;
+    detail.submitting = true;
     all('input,textarea,button,select', form).forEach(e => { e.disabled = true; });
     all('[data-item]', this.drawer).forEach(e => { e.disabled = true; });
     try {
-      if (!this.detail.submissionBody) {
+      if (!detail.submissionBody) {
         const outputs = String(data.get('outputs') || '').split('\n').map(s => s.trim()).filter(Boolean);
-        const { task: current } = await this.api(`/api/tasks/${this.detail.node.task.id}`);
-        if (current.version !== this.detail.node.version || !['active', 'rework'].includes(current.status)) throw new Error('任务已变化，请刷新后提交。');
-        if (!this.detail.uploads.length) await this.api(`/api/tasks/${current.id}/delivery-files`, { method: 'POST', body: { taskVersion: current.version, outputs } });
+        const { task: current } = await this.api(`/api/tasks/${detail.node.task.id}`);
+        ensureCurrent();
+        if (current.version !== detail.node.version || !['active', 'rework'].includes(current.status)) throw new Error('任务已变化，请刷新后提交。');
+        if (!detail.uploads.length) await this.api(`/api/tasks/${current.id}/delivery-files`, { method: 'POST', body: { taskVersion: current.version, outputs } });
       }
       // Keep the same destination on retries; no duplicate uploads or submissions.
-      for (const entry of this.detail.uploads) {
+      ensureCurrent();
+      for (const entry of detail.uploads) {
+        ensureCurrent();
         if (entry.uploaded) continue;
         button.textContent = `正在上传 ${entry.file.name}…`;
         try {
-          await this.api(`/api/projects/${this.detail.graph.projectId}/file?path=${encodeURIComponent(entry.path)}`, { method: 'PUT', body: entry.file });
-          entry.owned = true;
+          await this.api(`/api/projects/${detail.graph.projectId}/file?path=${encodeURIComponent(entry.path)}`, { method: 'PUT', body: entry.file });
+          ensureCurrent(); entry.owned = true;
         } catch (error) {
+          ensureCurrent();
           if (error.code !== 'FILE_EXISTS') throw error;
-          const response = await sessionFetch(`/api/projects/${this.detail.graph.projectId}/raw?path=${encodeURIComponent(entry.path)}`, { credentials: 'same-origin' });
+          const response = await sessionFetch(`/api/projects/${detail.graph.projectId}/raw?path=${encodeURIComponent(entry.path)}`, { credentials: 'same-origin' });
+          ensureCurrent();
           if (!response.ok) throw error;
           const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', await entry.file.arrayBuffer()))].map(b => b.toString(16).padStart(2, '0')).join('');
           const actual = [...new Uint8Array(await crypto.subtle.digest('SHA-256', await response.arrayBuffer()))].map(b => b.toString(16).padStart(2, '0')).join('');
           if (actual !== hash) throw new Error('目标已存在且内容不同：请选择新增附件，或先在工作区处理该文件。');
         }
-        entry.uploaded = true; this.renderUploads();
+        ensureCurrent(); entry.uploaded = true; this.renderUploads();
       }
       button.textContent = '正在提交验收…';
-      if (!this.detail.submissionBody) await this.api(`/api/tasks/${this.detail.node.task.id}/delivery-files`, { method: 'POST', body: {
-        taskVersion: this.detail.node.version, outputs: [...String(data.get('outputs') || '').split('\n').map(s => s.trim()).filter(Boolean), ...this.detail.uploads.map(e => e.path)] } });
-      const task = this.detail.submissionBody ? this.detail.node.task : await this.saveChecklist();
-      this.detail.submissionKey ||= crypto.randomUUID();
-      this.detail.submissionBody ||= {
-        kind: this.detail.native ? 'codex' : 'manual', ...(this.detail.native || {}), taskVersion: task.version,
-        checklistRevision: task.checklistRevision, idempotencyKey: this.detail.submissionKey, resultSummary: data.get('summary'),
-        outputs: [...String(data.get('outputs') || '').split('\n').map((s) => s.trim()).filter(Boolean), ...this.detail.uploads.map(e => e.path)], note: data.get('note') };
-      await this.api(`/api/tasks/${task.id}/submissions`, { method: 'POST', body: this.detail.submissionBody });
-      this.drawer.close(); this.toast('成果已提交，等待验收'); await this.refreshTasks();
+      if (!detail.submissionBody) await this.api(`/api/tasks/${detail.node.task.id}/delivery-files`, { method: 'POST', body: {
+        taskVersion: detail.node.version, outputs: [...String(data.get('outputs') || '').split('\n').map(s => s.trim()).filter(Boolean), ...detail.uploads.map(e => e.path)] } });
+      ensureCurrent();
+      const task = detail.submissionBody ? detail.node.task : await this.saveChecklist();
+      ensureCurrent();
+      detail.submissionKey ||= crypto.randomUUID();
+      detail.submissionBody ||= {
+        kind: detail.native ? 'codex' : 'manual', ...(detail.native || {}), taskVersion: task.version,
+        checklistRevision: task.checklistRevision, idempotencyKey: detail.submissionKey, resultSummary: data.get('summary'),
+        outputs: [...String(data.get('outputs') || '').split('\n').map((s) => s.trim()).filter(Boolean), ...detail.uploads.map(e => e.path)], note: data.get('note') };
+      await this.api(`/api/tasks/${task.id}/submissions`, { method: 'POST', body: detail.submissionBody });
+      ensureCurrent();
+      detail.submitting = false; this.closeDetail(); this.toast('成果已提交，等待验收'); await this.refreshTasks();
     } catch (error) {
-      if (error.status && error.status < 500) this.detail.submissionBody = null;
+      if (error.status && error.status < 500) detail.submissionBody = null;
       throw error;
     } finally {
-      this.detail.submitting = false;
-      all('input,textarea,button,select', form).forEach(e => { e.disabled = Boolean(this.detail.submissionBody); });
-      all('[data-upload-target]', form).forEach(e => { e.disabled ||= this.detail.uploads[Number(e.dataset.uploadTarget)].uploaded; });
-      all('[data-item]', this.drawer).forEach(e => { e.disabled = Boolean(this.detail.submissionBody); });
-      button.disabled = false; button.textContent = this.detail.submissionBody ? '确认提交结果（重试）' : '提交验收';
+      detail.submitting = false;
+      if (this.detail === detail && this.drawer.open) {
+        all('input,textarea,button,select', form).forEach(e => { e.disabled = Boolean(detail.submissionBody); });
+        all('[data-upload-target]', form).forEach(e => { e.disabled ||= detail.uploads[Number(e.dataset.uploadTarget)].uploaded; });
+        all('[data-item]', this.drawer).forEach(e => { e.disabled = Boolean(detail.submissionBody); });
+        button.disabled = false; button.textContent = detail.submissionBody ? '确认提交结果（重试）' : '提交验收';
+      }
     }
   }
   async drawerAction(event) {
     const button = event.target.closest('button'); if (!button) return;
     if (this.detail?.submitting) return;
-    if (button.hasAttribute('data-close-drawer')) this.drawer.close();
+    if (button.hasAttribute('data-close-drawer')) this.closeDetail();
     else if (button.hasAttribute('data-check-files')) await this.checkDeliveryFiles();
     else if (button.hasAttribute('data-remove-upload')) {
+      const detail = this.detail;
       if (this.detail.submissionBody) return;
       const index = Number(button.dataset.removeUpload); const entry = this.detail.uploads[index];
       if (entry.uploaded && entry.owned) await this.api(`/api/projects/${this.detail.graph.projectId}/file?path=${encodeURIComponent(entry.path)}`, { method: 'DELETE' });
+      if (this.detail !== detail || !this.drawer.open) return;
       if (entry.preview) URL.revokeObjectURL(entry.preview);
       this.detail.uploads.splice(index, 1); this.detail.submissionBody = null; this.renderUploads();
     }
-    else if (button.hasAttribute('data-save-checklist')) { await this.saveChecklist(); this.toast('清单已保存'); }
-    else if (button.hasAttribute('data-open-task')) { this.drawer.close(); await this.openTaskChat(this.detail.node.task.id); }
-    else if (button.dataset.openOutput) { this.drawer.close(); await this.openFile(this.detail.graph.projectId, button.dataset.openOutput); }
+    else if (button.hasAttribute('data-save-checklist')) {
+      const detail = this.detail; await this.saveChecklist();
+      if (this.detail === detail && this.drawer.open) this.toast('清单已保存');
+    }
+    else if (button.hasAttribute('data-open-task')) { const id = this.detail.node.task.id; this.closeDetail(); await this.openTaskChat(id); }
+    else if (button.dataset.openOutput) { const id = this.detail.graph.projectId; this.closeDetail(); await this.openFile(id, button.dataset.openOutput); }
     else if (button.dataset.previewSubmission) {
+      const detail = this.detail; const request = Symbol(); detail.previewRequest = request;
       const endpoint = sessionUrl(`/api/task-submissions/${encodeURIComponent(button.dataset.previewSubmission)}/artifact?path=${encodeURIComponent(button.dataset.path)}`);
       const { file } = await this.api(endpoint);
+      if (this.detail !== detail || !this.drawer.open || detail.previewRequest !== request) return;
       let preview = $('#graph-artifact-preview', this.drawer);
       if (!preview) { preview = document.createElement('section'); preview.id = 'graph-artifact-preview'; this.drawer.append(preview); }
       preview.innerHTML = `<h3>${escape(file.path)} · 固定提交版本</h3><a class="text-link" href="${escape(endpoint)}&download=1" download>下载成果</a><pre class="graph-preserve">${escape(file.content ?? '此文件请下载查看。')}</pre>`;
       preview.scrollIntoView({ block: 'nearest' });
     }
     else if (button.dataset.verdict) {
-      const { node } = this.detail; const submission = node.submissions.find((s) => s.taskVersion === node.version && s.verdict === 'pending');
+      const detail = this.detail; const { node } = detail; const submission = node.submissions.find((s) => s.taskVersion === node.version && s.verdict === 'pending');
+      detail.reviewing = true;
       button.disabled = true;
       try { await this.api(`/api/admin/task-submissions/${submission.id}/review`, { method: 'POST', body: {
         verdict: button.dataset.verdict, expectedVersion: node.version, feedback: $('#graph-review-feedback').value } });
-      this.drawer.close(); await this.refresh(); this.toast('验收结果已保存'); }
-      finally { button.disabled = false; }
+      if (this.detail !== detail || !this.drawer.open) return;
+      this.closeDetail(); await this.refresh(); this.toast('验收结果已保存'); }
+      finally { detail.reviewing = false; button.disabled = false; }
     }
   }
   editPlan() {
+    this.clearDetail();
+    const epoch = this.detailEpoch;
     const graph = structuredClone(this.current.plan.graph);
     const version = this.current.version; const graphId = this.graphId;
     const collect = () => {
@@ -538,7 +599,8 @@ export class WorkGraphUI {
         try {
           collect();
           await this.api(`/api/work-graphs/${graphId}/plan`, { method: 'PATCH', body: { expectedVersion: version, graph } });
-          this.drawer.close(); await this.refresh();
+          if (epoch !== this.detailEpoch || !this.drawer.open) return;
+          this.closeDetail(); await this.refresh();
         } catch (error) { $('.form-error', form).textContent = error.message; }
         finally { button.disabled = false; }
       };

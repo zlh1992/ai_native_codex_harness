@@ -38,7 +38,8 @@ async function model(t, reply) {
     const choice = await reply(body, requests.length);
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     const packet = (delta, finish_reason = null) => res.write(`data: ${JSON.stringify({ id: 'synthetic', object: 'chat.completion.chunk', created: 1, model: 'test-deepseek', choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
-    packet({ role: 'assistant', ...choice.delta }); packet({}, choice.finish || 'stop'); res.end('data: [DONE]\n\n');
+    packet({ role: 'assistant', ...choice.delta }); packet({}, choice.finish || 'stop');
+    res.write(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120, prompt_tokens_details: { cached_tokens: 25 } } })}\n\n`); res.end('data: [DONE]\n\n');
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
@@ -104,6 +105,11 @@ test('real sandboxed DSH core streams, calls Portal tools, persists and resumes 
   await service.runTurn({ chat: saved, project, user, prompt: 'Continue the same local conversation', mode: 'edit' });
   assert.equal(db.getChat(chat.id).localSessionId, saved.localSessionId);
   assert.match(JSON.stringify(mock.requests.at(-1).messages), /Create a synthetic test file/);
+  const usage = db.tokenUsage.dashboard().totals.deepseek;
+  assert.equal(usage.calls, mock.requests.length);
+  assert.equal(usage.totalTokens, mock.requests.length * 120);
+  assert.equal(usage.cachedInputTokens, mock.requests.length * 25);
+  assert.equal(usage.incompleteCalls, 0);
   assert.equal(service.capacity.status().activeRootTurns, 0);
 });
 
@@ -135,7 +141,9 @@ test('search sends only the edited approved query and never private history, fil
   const row = service.pendingApprovalsForChat(chat.id, user.id)[0]; assert.equal(row.kind, 'web_search');
   service.resolveApproval({ chatId: chat.id, userId: user.id, approvalId: row.id, decision: 'accept', query: 'public generic query' });
   await run;
-  assert.equal(calls.length, 1); assert.equal(calls[0][0], 'public generic query'); assert.equal(calls[0].length, 2);
+  assert.equal(calls.length, 1); assert.equal(calls[0][0], 'public generic query'); assert.equal(calls[0].length, 3);
+  assert.equal(calls[0][2].user.id, user.id); assert.equal(calls[0][2].ledger, db.tokenUsage);
+  assert.equal(calls[0][2].projectId, project.id);
   assert.ok(calls[0][1] instanceof AbortSignal);
   assert.equal(db.getApproval(row.id).request.query, 'public generic query');
   assert.doesNotMatch(JSON.stringify(db.listTurnEvents(chat.id)), /sensitive original|public generic|Synthetic private/);

@@ -509,7 +509,7 @@ test('share publishing rolls back access and earlier chats when a later chat fai
   reopened.close();
 });
 
-test('boss model preference reaches resumed thread and each native turn; employees retain default', async () => {
+test('boss and employee model preferences reach resumed thread and each turn with role/chat effort', async () => {
   const { base, db, workspace, config, user, project, chat } = fixture();
   const service = new CodexService({ config, db, workspace });
   const calls = [];
@@ -530,6 +530,46 @@ test('boss model preference reaches resumed thread and each native turn; employe
     assert.equal(calls.find((call) => call.method === 'thread/resume').params.model, 'gpt-6-astra');
     db.db.prepare("UPDATE users SET role='user' WHERE id=?").run(user.id);
     await assert.rejects(service.runTurn({ chat: db.getChat(chat.id), project, user, prompt: 'employee model test', mode: 'edit', emit() {} }), /intentional test stop/);
-    assert.equal(calls.filter((call) => call.method === 'turn/start').at(-1).params.model, config.codexModel);
+    assert.equal(calls.filter((call) => call.method === 'turn/start').at(-1).params.model, 'gpt-5.6-terra');
+    assert.equal(calls.filter((call) => call.method === 'turn/start').at(-1).params.effort, 'medium');
+    db.updateChat(chat.id, { preferredEffort: 'max' });
+    await assert.rejects(service.runTurn({ chat: db.getChat(chat.id), project, user, prompt: 'effort', mode: 'edit', emit() {} }), /intentional test stop/);
+    assert.equal(calls.filter((call) => call.method === 'turn/start').at(-1).params.effort, 'max');
   } finally { db.close(); fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('native usage counts child and root exactly once, attributes late samples and survives chat deletion', async () => {
+  const {base,db,workspace,config,user,project,chat}=fixture();
+  const service=new CodexService({config,db,workspace});
+  const emit=(method,params)=>service.client.emit('notification',{method,params});
+  const counts=(n)=>({inputTokens:100*n,outputTokens:20*n,totalTokens:120*n});
+  service.client.start=async()=>{service.client.started=true;};
+  service.client.request=async(method)=>{
+    if(method==='thread/resume'){
+      emit('thread/tokenUsage/updated',{threadId:'old-thread',turnId:'past',tokenUsage:{total:counts(5),last:counts(1)}});
+      return {thread:{id:'old-thread',modelProvider:config.codexModelProvider}};
+    }
+    if(method==='turn/start'){
+      emit('turn/started',{threadId:'old-thread',turn:{id:'root-turn'}});
+      emit('thread/started',{thread:{id:'child-thread',parentThreadId:'old-thread',forkedFromId:null}});
+      emit('thread/settings/updated',{threadId:'child-thread',threadSettings:{model:config.subagentModel,effort:'medium'}});
+      emit('turn/started',{threadId:'child-thread',turn:{id:'child-turn'}});
+      emit('thread/tokenUsage/updated',{threadId:'child-thread',turnId:'child-turn',tokenUsage:{total:counts(1),last:counts(1)}});
+      emit('turn/completed',{threadId:'child-thread',turn:{id:'child-turn',status:'completed'}});
+      emit('thread/tokenUsage/updated',{threadId:'old-thread',turnId:'root-turn',tokenUsage:{total:counts(6),last:counts(1)}});
+      emit('turn/completed',{threadId:'old-thread',turn:{id:'root-turn',status:'completed'}});
+      return {turn:{id:'root-turn'}};
+    }
+    return {};
+  };
+  try{
+    await service.runTurn({chat,project,user,prompt:'Synthetic usage',mode:'edit',emit(){}});
+    assert.equal(db.tokenUsage.dashboard().totals.employeeGpt.totalTokens,240);
+    assert.equal(db.tokenUsage.dashboard().totals.employeeGpt.incompleteCalls,0);
+    emit('thread/tokenUsage/updated',{threadId:'child-thread',turnId:'child-turn',tokenUsage:{total:counts(2),last:counts(1)}});
+    assert.equal(db.tokenUsage.dashboard().totals.employeeGpt.totalTokens,360);
+    assert.equal(db.tokenUsage.dashboard().models.find(m=>m.model===config.subagentModel).effort,'medium');
+    db.db.prepare('DELETE FROM chats WHERE id=?').run(chat.id);
+    assert.equal(db.tokenUsage.dashboard().totals.employeeGpt.totalTokens,360);
+  }finally{service.stop();db.close();fs.rmSync(base,{recursive:true,force:true});}
 });

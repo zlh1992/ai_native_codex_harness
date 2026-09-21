@@ -17,6 +17,19 @@ export function validateModel(model) {
 }
 
 export function rootModel(config, chat, user) {
-  return user.role === 'admin' && chat?.preferredModel
+  return chat?.preferredModel
     ? validateModel(chat.preferredModel) : config.codexModel;
+}
+
+export const EFFORTS = new Set(['none', 'low', 'medium', 'high', 'xhigh', 'max']);
+export function defaultEffort(config, user) {
+  return user.role === 'user' ? 'medium' : config.codexReasoningEffort || 'high';
+}
+export function validateEffort(value) {
+  invariant(value === null || EFFORTS.has(value), 400, 'INVALID_EFFORT', '请选择支持的推理强度。');
+  return value;
+}
+export function rootEffort(config, chat, user, explicit) {
+  if (explicit !== undefined && explicit !== null) return validateEffort(explicit);
+  return validateEffort(chat?.preferredEffort ?? defaultEffort(config, user));
 }

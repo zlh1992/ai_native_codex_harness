@@ -52,10 +52,12 @@ Portal 保留同一 HTTP/SSE、文件工作台和队列。`AgentRuntimeService` 
 
 ## 接口与运维
 
-`POST /api/projects` 增加 projectType，项目/chat payload 返回类型/控制模式但不暴露 local_session_id。`PATCH /api/chats/:id` 增加 controlMode；隐私项目禁止 preferredModel。
+`POST /api/projects` 增加 projectType，项目/chat payload 返回类型/控制模式但不暴露 local_session_id。`PATCH /api/chats/:id` 增加 controlMode；隐私项目禁止 preferredModel 与 preferredEffort。
 
 `/api/projects/:id/memories[/:memoryId]` 提供 GET/POST/PATCH/DELETE，复用现有版本/失效语义；普通 `/api/memories` 不得访问隐私记忆 ID。派生 ONNX/Milvus 文档以 user/project 的散列 namespace 分开，SQLite 再次过滤所有候选；删除或撤权后的旧索引命中不能返回正文。删除并不保证清除备份、旧 session 或所有派生磁盘残留。
 
 `/api/health.localDeepSeek` 与 `/api/me.codex.runtimes.deepseek` 独立报告 disabled/starting/ready/unavailable。ready 是模型目录/运行接通状态，不代替真实推理验收。默认脚本仍要求 Codex ready；显式启用本地引擎后，可在本地 ready 时以部分能力运行，不能称普通 Codex 同时可用。
 
 详见 [操作指南](../../docs/LOCAL_PRIVATE_PROJECTS.md)。关闭本地功能可暂停使用但必须保留隐私 ACL；禁止用不认识 project_type 的旧代码运行现有数据库。备份须一致性包含 DB、项目/回收站、JSONL、记忆派生数据（可重建）和模型配置。
+
+本地 usage 计量在 Worker 的 HTTP 流边界只提取上游数值元数据，逐请求覆盖推理与本地 compaction；原始 SSE 正文不会另存计量表。缺失 usage 保持 incomplete，不使用 dsh-token-meter 的上下文估算补账。独立 Luna 搜索消费记入老板 GPT，不混入本地 DeepSeek，也不因此附带隐私上下文。

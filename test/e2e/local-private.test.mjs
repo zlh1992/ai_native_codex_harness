@@ -73,6 +73,7 @@ test('private project HTTP ACL, scoped memory, manual approval and queue work wi
   const { chat } = await json(boss, `/api/projects/${project.id}/chats`, { title: 'Private chat' }, 201);
   assert.equal(chat.controlMode, 'manual'); assert.equal(chat.localSessionId, undefined);
   await json(boss, `/api/chats/${chat.id}`, { preferredModel: 'gpt-5.6-luna' }, 403, 'PATCH');
+  await json(boss, `/api/chats/${chat.id}`, { preferredEffort: 'medium' }, 403, 'PATCH');
   await json(boss, `/api/chats/${chat.id}/queue`, { id: randomUUID(), prompt: 'Create a synthetic local file', mode: 'edit' });
   let approval;
   await until(async () => {

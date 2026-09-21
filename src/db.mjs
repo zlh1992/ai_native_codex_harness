@@ -1,3 +1,4 @@
+import { TokenUsageLedger } from './token-usage.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -318,6 +319,7 @@ export class HarnessDatabase {
     this.#ensureColumn('chats', 'thread_state', "TEXT NOT NULL DEFAULT 'ready'");
     this.#ensureColumn('chats', 'thread_error', 'TEXT');
     this.#ensureColumn('chats', 'preferred_model', 'TEXT');
+    this.#ensureColumn('chats', 'preferred_effort', 'TEXT');
     this.#ensureColumn('chats', 'use_memory', 'INTEGER NOT NULL DEFAULT 1');
     this.#ensureColumn('chats', 'save_memory', 'INTEGER NOT NULL DEFAULT 1');
     this.#ensureColumn('chats', 'memory_context_reset_at', 'TEXT');
@@ -334,6 +336,7 @@ export class HarnessDatabase {
     migrateWorkGraph(this.db);
     migratePrivateProjects(this.db);
     migrateToolDetails(this.db);
+    this.tokenUsage = new TokenUsageLedger(this.db);
   }
 
   #ensureColumn(table, name, definition) {
@@ -707,6 +710,7 @@ export class HarnessDatabase {
       purpose: row.purpose || 'normal', workflowJobId: row.workflow_job_id || null,
       preferredMode: row.preferred_mode || 'execute',
       preferredModel: row.preferred_model || null,
+      preferredEffort: row.preferred_effort || null,
       controlMode: row.control_mode || 'manual', localSessionId: row.local_session_id || null,
       useMemory: row.use_memory === undefined ? true : Boolean(row.use_memory),
       saveMemory: row.save_memory === undefined ? true : Boolean(row.save_memory),
@@ -743,7 +747,7 @@ export class HarnessDatabase {
     for (const [key, column] of [
       ['title', 'title'], ['codexThreadId', 'codex_thread_id'], ['status', 'status'],
       ['taskId', 'task_id'], ['taskVersion', 'task_version'], ['threadState', 'thread_state'],
-      ['threadError', 'thread_error'], ['preferredMode', 'preferred_mode'], ['preferredModel', 'preferred_model'],
+      ['threadError', 'thread_error'], ['preferredMode', 'preferred_mode'], ['preferredModel', 'preferred_model'], ['preferredEffort', 'preferred_effort'],
       ['controlMode', 'control_mode'], ['localSessionId', 'local_session_id'],
       ['useMemory', 'use_memory'], ['saveMemory', 'save_memory'],
     ]) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { ROOT_MODELS, validateModel } from './models.mjs';
+import { ROOT_MODELS, validateModel, validateEffort, defaultEffort, rootEffort } from './models.mjs';
 import { DEFAULT_SESSION_COOKIE, validSessionSelector, selectedCookieName, requestSessionCookieName } from './session-selection.mjs';
 import { requestIngress, validateRequestOrigin } from './public-ingress.mjs';
 import { pageRoute } from './page-routes.mjs';
@@ -74,6 +74,7 @@ const db = new HarnessDatabase(config);
 // Runtime rows describe this Portal process, so only the server startup path
 // may recover them. Administrative CLI processes must never interrupt turns.
 db.recoverInterruptedRuntime();
+db.tokenUsage.recover();
 const workspace = new WorkspaceService(config);
 const worktrees = new WorktreeService(config);
 const memory = new UserMemoryService({ config, db });
@@ -366,7 +367,7 @@ async function route(req, res) {
     sendJson(res, 200, {
       workGraphEnabled: config.workGraphEnabled,
       user: session.user, csrfToken: session.csrfToken, usage,
-      model: config.codexModel, models: session.user.role === 'admin' ? ROOT_MODELS : [], defaultEffort: config.codexReasoningEffort,
+      model: config.codexModel, models: ROOT_MODELS, defaultEffort: defaultEffort(config, session.user),
       efforts: [...EFFORTS], turnModes: [...TURN_MODES], codex: codex.status(), memory: memory.status(),
     }, config);
     return;
@@ -709,11 +710,12 @@ async function route(req, res) {
     const patch = {};
     if (body.title !== undefined) patch.title = shortText(body.title, '对话标题', 120);
     if (body.preferredMode !== undefined) patch.preferredMode = turnMode(body.preferredMode);
-    if (body.preferredModel !== undefined) {
+    if (body.preferredModel !== undefined || body.preferredEffort !== undefined) {
       assertStandardProject(db.getProject(chat.projectId));
-      invariant(session.user.role === 'admin', 403, 'ADMIN_REQUIRED', '只有老板可以选择模型。');
+      invariant(!chat.purpose || chat.purpose === 'normal', 403, 'WORKFLOW_JOB_REQUIRED', '后台对话由工作图调度器管理。');
       invariant(!codex.chatBusy(chat.id) && !db.listChatInputs(chat.id).length, 409, 'CHAT_RUNNING', '请等待当前任务和消息队列结束后切换模型。');
-      patch.preferredModel = validateModel(body.preferredModel);
+      if (body.preferredModel !== undefined) patch.preferredModel = validateModel(body.preferredModel);
+      if (body.preferredEffort !== undefined) patch.preferredEffort = validateEffort(body.preferredEffort);
     }
     if (body.controlMode !== undefined) {
       invariant(isPrivateProject(db.getProject(chat.projectId)), 400, 'PRIVATE_PROJECT_REQUIRED', '只有隐私项目支持本地控制模式。');
@@ -787,6 +789,7 @@ async function route(req, res) {
     invariant(project.accessId === chat.projectAccessId, 403, 'PROJECT_ACCESS_REVOKED', '该对话对应的项目授权已撤销。');
     invariant(!codex.sharingAccesses.has(project.accessId), 409, 'WORKSPACE_BUSY', '项目正在共享，请稍后重试。');
     const mode = turnMode(body.mode, chat.preferredMode || 'execute');
+    const effort = rootEffort(config, chat, session.user, body.effort);
     if (chat.preferredMode !== mode) chat = db.updateChat(chat.id, { preferredMode: mode });
     sseHeaders(res, config);
     const close = () => {
@@ -802,9 +805,9 @@ async function route(req, res) {
       sse(res, event, data);
     };
     const heartbeat = setInterval(() => emit('ping', { at: Date.now() }), 15_000);
-    audit(req, session, 'turn.start', 'chat', chat.id, { effort: body.effort || config.codexReasoningEffort, mode });
+    audit(req, session, 'turn.start', 'chat', chat.id, { effort, mode });
     try {
-      await codex.runTurn({ chat, project, user: session.user, prompt: body.prompt, effort: body.effort, mode, emit });
+      await codex.runTurn({ chat, project, user: session.user, prompt: body.prompt, effort, mode, emit });
     } catch (error) {
       if (!error.turnEventEmitted) emit('turn_error', { message: error.message, code: error.code || 'TURN_FAILED' });
     } finally {
@@ -1103,6 +1106,10 @@ async function route(req, res) {
       { taskId: result.task.id, verdict: body.verdict, deliveryCommitSha: result.delivery?.deliveryCommitSha || null,
         alreadyDelivered: result.delivery?.alreadyDelivered || false });
     sendJson(res, 200, { submission: result.submission, task: result.task }, config);
+    return;
+  }
+  if (req.method === 'GET' && pathname === '/api/admin/token-usage') {
+    sendJson(res, 200, { ...db.tokenUsage.dashboard(Object.fromEntries(url.searchParams)), localDeepSeek: codex.local.status() }, config);
     return;
   }
   if (req.method === 'GET' && pathname === '/api/admin/dashboard') {

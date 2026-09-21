@@ -1,4 +1,4 @@
-import { rootModel } from './models.mjs';
+import { rootModel, rootEffort, EFFORTS } from './models.mjs';
 import { InputQueueService } from './input-queue-service.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -12,7 +12,6 @@ import { MEMORY_TOOLS, callMemoryTool } from './memory-tools.mjs';
 import { assertStandardProject } from './private-projects.mjs';
 import { ToolDetailsService } from './tool-details.mjs';
 
-const EFFORTS = new Set(['none', 'low', 'medium', 'high', 'xhigh', 'max']);
 const TURN_MODES = new Set(['edit', 'execute']);
 
 const DYNAMIC_TOOLS = Object.freeze([
@@ -100,6 +99,7 @@ export class CodexService extends EventEmitter {
     this.activeByChat = new Map();
     this.activeByThread = new Map();
     this.parentBySubagent = new Map();
+    this.subagentSettings = new Map();
     this.pendingChats = new Set();
     this.recoveringChats = new Set();
     this.sharingAccesses = new Set();
@@ -233,6 +233,7 @@ export class CodexService extends EventEmitter {
   }
 
   async #resumeThread(threadId, context) {
+    this.db.tokenUsage.stream(threadId);
     const resumed = await this.client.request('thread/resume', { threadId, ...this.#threadOptions(context) }, this.#controlTimeoutMs());
     invariant(resumed.thread?.modelProvider === this.config.codexModelProvider, 409, 'CODEX_PROVIDER_MISMATCH', '旧会话使用了不同的 Codex provider。');
     this.loadedThreads.add(threadId);
@@ -247,6 +248,7 @@ export class CodexService extends EventEmitter {
       ...this.#threadOptions(context),
     }, this.#controlTimeoutMs());
     const threadId = result.thread.id;
+    this.db.tokenUsage.stream(threadId, true);
     this.loadedThreads.add(threadId);
     this.contextByThread.set(threadId, context);
     this.client.request('thread/name/set', { threadId, name: context.chat.title }, 10_000).catch(() => {});
@@ -553,7 +555,7 @@ export class CodexService extends EventEmitter {
     const userActive = [...this.activeByChat.values()].filter((entry) => entry.user.id === user.id).length;
     const userPending = this.pendingByUser.get(user.id) || 0;
     invariant(userActive + userPending < user.maxConcurrentTurns, 429, 'USER_CONCURRENCY_LIMIT', '已达到该用户的并发任务上限。');
-    const reasoningEffort = EFFORTS.has(effort) ? effort : this.config.codexReasoningEffort;
+    const reasoningEffort = rootEffort(this.config, chat, user, effort);
     if (chat.taskId) {
       const task = this.db.getTaskForUser(chat.taskId, user.id);
       invariant(task && task.projectId === project.id, 403, 'TASK_FORBIDDEN', '任务不存在或不属于你。');
@@ -587,7 +589,7 @@ export class CodexService extends EventEmitter {
       this.db.db.exec('COMMIT');
     } catch (error) { this.db.db.exec('ROLLBACK'); throw error; }
     const persistentEmit = (event, data) => this.#emitPersistent({ turnRunId: turnRun.id, chatId: chat.id, emit }, event, data);
-    const context = { chat, project, user, mode, model, turnRunId: turnRun.id, workflowLeaseToken };
+    const context = { chat, project, user, mode, model, effort: reasoningEffort, turnRunId: turnRun.id, workflowLeaseToken };
     this.pendingChats.add(chat.id);
     this.globalPending += 1;
     this.pendingByUser.set(user.id, userPending + 1);
@@ -648,9 +650,9 @@ export class CodexService extends EventEmitter {
     this.contextByThread.set(threadId, context);
     const active = {
       chat, project, user, threadId, turnId: null, emit: persistentEmit, workflowLeaseToken,
-      turnRunId: turnRun.id, mode, capacityToken,
+      turnRunId: turnRun.id, mode, model, effort: reasoningEffort, capacityToken,
       assistantText: '', agentItemsWithDelta: new Set(), completed: false,
-      finalItemId: null, diff: '', plan: [], subagentThreadIds: new Set(),
+      pendingUsage: [], finalItemId: null, diff: '', plan: [], subagentThreadIds: new Set(),
       fileChangePathsByItem: new Map(),
       interruptRequested: false,
       commandControllers: new Set(), turnTimer: null, interruptFallbackTimer: null,
@@ -676,6 +678,9 @@ export class CodexService extends EventEmitter {
       context.project = project;
       active.user = user;
       active.project = project;
+      active.usageId = this.db.tokenUsage.start({ id: `root:${active.turnRunId}`, user: active.user, projectId: project.id, chatId: chat.id,
+        runId: active.turnRunId, model, effort: reasoningEffort, streamId: threadId });
+      this.db.tokenUsage.stream(threadId);
       const result = await this.client.request('turn/start', {
         threadId,
         input: [
@@ -690,6 +695,9 @@ export class CodexService extends EventEmitter {
         sandboxPolicy: { type: 'readOnly', networkAccess: false },
       }, this.#controlTimeoutMs());
       active.turnId = result.turn.id;
+      this.db.tokenUsage.bind(active.usageId, threadId, active.turnId);
+      for (const sample of active.pendingUsage) if (sample.turnId === active.turnId) this.db.tokenUsage.codex(sample, active.usageId);
+      active.pendingUsage = [];
       this.db.updateTurnRun(turnRun.id, { codexTurnId: active.turnId });
       if (active.completed) return completion;
       let startBoundaryError = null;
@@ -974,6 +982,7 @@ export class CodexService extends EventEmitter {
     if (!thread?.id) return;
     active.subagentThreadIds.add(thread.id);
     this.parentBySubagent.set(thread.id, active);
+    this.db.tokenUsage.stream(thread.id, !thread.forkedFromId);
     const violatesCount = active.subagentThreadIds.size > this.config.maxSubagentsPerRoot;
     this.db.updateTurnRun(active.turnRunId, { subagentCount: active.subagentThreadIds.size });
     this.#emit(active, 'subagent_updated', {
@@ -1016,14 +1025,38 @@ export class CodexService extends EventEmitter {
 
   #onNotification(message) {
     const params = message.params || {};
+    const ledger = this.db.tokenUsage;
+    // Meter before active-root filtering, including child and late terminal samples.
+    if (message.method === 'turn/started' && params.threadId) {
+      const root = this.activeByThread.get(params.threadId), parent = this.parentBySubagent.get(params.threadId);
+      if (!root && parent && params.turn?.id) ledger.start({ id: `child:${params.threadId}:${params.turn.id}`, user: parent.user,
+        projectId: parent.project.id, chatId: parent.chat.id, runId: parent.turnRunId, model: this.subagentSettings.get(params.threadId)?.model || this.config.subagentModel,
+        effort: this.subagentSettings.get(params.threadId)?.effort || 'medium', kind: 'subagent', streamId: params.threadId, turnId: params.turn.id });
+    }
+    if (message.method === 'thread/tokenUsage/updated') {
+      const root = this.activeByThread.get(params.threadId), parent = this.parentBySubagent.get(params.threadId);
+      let callId = ledger.find(params.threadId, params.turnId)?.id;
+      if (!callId && root?.usageId && root.turnId === params.turnId) callId = root.usageId;
+      const waitingForIdentity = !callId && root?.usageId && !root.turnId;
+      if (waitingForIdentity) root.pendingUsage.push(params);
+      if (!callId && parent && params.turnId) callId = ledger.start({ id: `child:${params.threadId}:${params.turnId}`, user: parent.user,
+        projectId: parent.project.id, chatId: parent.chat.id, runId: parent.turnRunId, model: this.subagentSettings.get(params.threadId)?.model || this.config.subagentModel,
+        effort: this.subagentSettings.get(params.threadId)?.effort || 'medium', kind: 'subagent', streamId: params.threadId, turnId: params.turnId });
+      if (!waitingForIdentity) ledger.codex(params, callId);
+    }
+    if (message.method === 'turn/completed') {
+      const call = ledger.find(params.threadId, params.turn?.id);
+      if (call) ledger.finish(call.id);
+    }
     if (message.method === 'thread/started' && params.thread?.parentThreadId) {
-      const parent = this.activeByThread.get(params.thread.parentThreadId);
+      const parent = this.activeByThread.get(params.thread.parentThreadId) || this.parentBySubagent.get(params.thread.parentThreadId);
       if (parent) this.#trackSubagentThread(parent, params.thread);
       return;
     }
     if (message.method === 'thread/settings/updated' && this.parentBySubagent.has(params.threadId)) {
       const parent = this.parentBySubagent.get(params.threadId);
       const model = params.threadSettings?.model;
+      this.subagentSettings.set(params.threadId, { model, effort: params.threadSettings?.effort });
       this.#emit(parent, 'subagent_updated', {
         phase: 'settings', item: { type: 'subagentThread', id: params.threadId },
         count: parent.subagentThreadIds.size, limit: this.config.maxSubagentsPerRoot, model: model || this.config.subagentModel,
@@ -1413,6 +1446,11 @@ export class CodexService extends EventEmitter {
   #finish(active, error = null, turn = null) {
     if (active.completed) return;
     active.completed = true;
+    if (active.usageId) {
+      const missingChild = [...active.subagentThreadIds].some(id => !this.db.db.prepare(
+        "SELECT 1 FROM token_usage_calls WHERE run_id=? AND stream_id=? AND kind='subagent'").get(active.turnRunId, id));
+      this.db.tokenUsage.finish(active.usageId, !turn || missingChild);
+    }
     if (active.turnTimer) clearTimeout(active.turnTimer);
     if (active.interruptFallbackTimer) clearTimeout(active.interruptFallbackTimer);
     for (const controller of active.commandControllers) controller.abort();
@@ -1452,8 +1490,9 @@ export class CodexService extends EventEmitter {
     this.activeByChat.delete(active.chat.id);
     this.activeByThread.delete(active.threadId);
     for (const [threadId, parent] of this.parentBySubagent) {
-      if (parent === active) this.parentBySubagent.delete(threadId);
+      if (parent === active) { this.parentBySubagent.delete(threadId); this.subagentSettings.delete(threadId); }
     }
+    this.db.db.prepare("UPDATE token_usage_calls SET finished=1,uncertain=1 WHERE run_id=? AND kind='subagent' AND finished=0").run(active.turnRunId);
     this.globalActive = Math.max(0, this.globalActive - 1);
     active.capacityToken?.release();
     if (error) {

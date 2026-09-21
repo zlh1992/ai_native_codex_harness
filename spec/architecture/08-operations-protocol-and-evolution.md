@@ -106,3 +106,9 @@ Portal 启动时冻结 public HTML/JS/CSS 与固定 Sortable 模块的内存快�
 ## 工作图运行
 
 工作图仍使用精确 CLI pin，无原生协议升级。通过独立开关控制创建入口、后台派发和自动应用审核；降级不得直接使用不认识 manual 提交的旧版本。 详细契约见 [多人 Work Graph](09-human-work-graph.md)，操作见 [工作图指南](../../docs/WORK_GRAPH.md)。
+
+## 模型偏好与用量运维
+
+/api/me 返回同一 GPT 模型目录及角色默认强度；PATCH chat 支持 preferredModel/preferredEffort（null 恢复默认）。GET /api/admin/token-usage 使用 from/to（北京时间 YYYY-MM-DD，包含终止日）、userId、engine（gpt/deepseek）、model 筛选，缺省近 7 天；返回 totals/days/employees/models/kinds、startedAt、updatedAt 与本地引擎状态。前端可见时每 30 秒刷新，支持手动刷新；统计为本网站调用上报量，不是共享账号账单或费用。
+
+发布先排空运行并一致性备份 SQLite；新增账本不删除既有数据。回退本次代码可以保留 nullable 列与计量表，但回退期间不会继续采集，统计完整性须注明该空窗；不能回退到不支持隐私项目的版本。DeepSeek disabled 与未上报用量分别显示，真实本机推理未验收前不因看板上线而启用模型。

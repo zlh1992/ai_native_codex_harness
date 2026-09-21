@@ -108,7 +108,7 @@ completed task turn
 
 ## Root 模型选择
 
-老板模型偏好在 run 创建前解析、校验并冻结到本次 context；thread/start、thread/resume 和 turn/start 使用同一模型。已有 loaded thread 的下一 turn 仍显式传 model，无需重建 thread 或丢失历史。运行/恢复或存在待发输入时拒绝修改模型，防止队列配置漂移。该选择不改变 provider、沙箱、容量或固定 Luna 子代理策略；上游拒绝模型时沿用失败与恢复流程，不静默降级。
+老板和员工的模型与强度偏好在 run 创建前解析、校验并冻结到本次 context；thread/start、thread/resume 和 turn/start 使用同一模型。已有 loaded thread 的下一 turn 仍显式传 model，无需重建 thread 或丢失历史。运行/恢复或存在待发输入时拒绝修改模型，防止队列配置漂移。该选择不改变 provider、沙箱、容量或固定 Luna 子代理策略；上游拒绝模型时沿用失败与恢复流程，不静默降级。
 
 ## 运行中输入与队列调度
 
@@ -121,3 +121,9 @@ queued/steering 输入加入 chat/access/project 的持久生命周期与文件�
 ## 持久工作图调度
 
 工作图以独立持久 job 调度，模型工作最多一个，复用 root 配额；暂停/取消围栏旧 generation，账号策略变化和撤权排空相关审核。 详细契约见 [多人 Work Graph](09-human-work-graph.md)，操作见 [工作图指南](../../docs/WORK_GRAPH.md)。
+
+## 调用用量采集
+
+Codex 主客户端在 active-root 过滤之前计量 root/子代理和迟到通知，使用 native thread/turn 绑定归属。新线程基线为零，resume/fork 先接收已有累计基线；若首个调用没有已知基线，只计 last 的可证明下限并标记 incomplete。重复累计值不重复加；倒退/乱序累计值不降低水位，不确定调用标记 incomplete。搜索和摘要的独立客户端携带父运行计量归属；固定 Luna-low，隐私搜索仍只把 query 发给模型。
+
+本地 DSH 在 llm/stream 作用域识别 compaction，逐个实际 /chat/completions HTTP 请求生成独立标识，从经过的原始 SSE usage 提取数值（不存正文）；每个请求的样本替换更新，缺失 usage 不采用框架零值或上下文估算。异常/取消也保留已上报计量，Worker 退出关闭未完成记录并标为不确定。

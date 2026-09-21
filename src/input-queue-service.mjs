@@ -1,7 +1,7 @@
 import { invariant } from './errors.mjs';
 
 const MODES = new Set(['edit', 'execute']);
-const EFFORTS = new Set(['none', 'low', 'medium', 'high', 'xhigh', 'max']);
+import { EFFORTS, rootEffort } from './models.mjs';
 
 // Private message content lives in chat_inputs/messages, never in audit or the event journal.
 export class InputQueueService {
@@ -43,13 +43,13 @@ export class InputQueueService {
   }
 
   enqueue(chatId, { id, prompt, mode, effort }) {
-    const { chat } = this.policy(chatId);
+    const { chat, user } = this.policy(chatId);
     invariant(typeof id === 'string' && /^[a-zA-Z0-9-]{16,80}$/.test(id), 400, 'INVALID_INPUT_ID', '消息标识无效。');
     const existing = this.db.getChatInput(chatId, id);
     if (existing) return existing; // Retrying an acknowledged or cancelled input cannot send it twice.
     prompt = this.text(prompt);
     mode ||= chat.preferredMode || 'execute';
-    effort ||= this.codex.config.codexReasoningEffort;
+    effort = rootEffort(this.codex.config, chat, user, effort);
     invariant(MODES.has(mode) && EFFORTS.has(effort), 400, 'INVALID_INPUT_OPTIONS', '消息模式或推理强度无效。');
     const pending = this.db.listChatInputs(chatId);
     invariant(pending.length < 50 && pending.reduce((sum, input) => sum + input.prompt.length, prompt.length) <= 1_000_000,

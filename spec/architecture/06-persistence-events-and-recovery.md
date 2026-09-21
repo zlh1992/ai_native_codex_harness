@@ -127,3 +127,9 @@ submission 的 chat/run 外键使用 `ON DELETE SET NULL`，同时保存不可�
 工作图 submission 支持 manual 空原生身份，业务事件采用接收者 ACL。Portal 启动恢复 job；completed 原生运行与持久结构化回执可收敛，其他不确定原生投递需人工确认重试。 详细契约见 [多人 Work Graph](09-human-work-graph.md)，操作见 [工作图指南](../../docs/WORK_GRAPH.md)。
 
 在线规划的明确终态网络失败可按第 09 章的窄条件恢复，不改变进程重启/失租约时的保守策略；手动重试不能丢弃已持久回执。旧 turn 留存用于计数与核对，不重置原生 thread 映射。
+
+## Token 用量账本
+
+新增 token_usage_calls、token_usage_streams、数值样本去重表 token_usage_samples 和 token_usage_meta，使用幂等 CREATE TABLE/INDEX；chats.preferred_effort 为 nullable 幂等迁移。账本与内容表无级联外键，保留删除后的历史消费归属。计量更新和累计水位在同一 SQLite savepoint 提交；相同 native thread/turn 绑定唯一，迟到通知仍可定位原调用。Portal 启动将未结束计量标记 incomplete/finished，不推断未知消耗、不重新发送模型请求；普通 CLI 打开数据库不做运行恢复。
+
+看板按 Asia/Shanghai 的调用开始日期分桶，支持最多 366 天范围，当前请求的累计消费归于其开始日。返回采集起点、更新时间、未上报/不完整/进行中数量；没有真实 usage 的调用不能显示已完整计量。历史 journal 不回填；用量数据库本身保留上游数值而非模型正文。

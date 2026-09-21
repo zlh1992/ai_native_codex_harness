@@ -1,3 +1,4 @@
+import { TokenDashboard } from './token-dashboard.js';
 import { KanbanBoard } from './kanban.js';
 import { loginPage, defaultPage } from './navigation.js';
 import { createSessionClient, setAuthState, watchSession } from './session-ui.js';
@@ -5,9 +6,11 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = { me: null, csrf: '', data: null, pendingRevoke: null, pendingMemoryShare: null };
 let employeeBoard; let checkingSession = false;
+const tokenDashboard = new TokenDashboard({ root: $('#token-usage'), api });
 const sessionClient = createSessionClient({ getCsrf: () => state.csrf, onExpired: expireSession });
 const sessionChanges = watchSession(bootstrap);
 function expireSession() {
+  tokenDashboard.stop();
   sessionClient.reset(); employeeBoard?.destroy(); employeeBoard = null;
   state.me = null; state.csrf = ''; state.data = null; state.pendingRevoke = null; state.pendingMemoryShare = null;
   for (const dialog of $$('dialog')) { if (dialog.open) dialog.close(); }
@@ -134,6 +137,7 @@ async function load() {
   $('#codex-light').classList.toggle('online', data.codex.ready);
   $('#codex-label').textContent = data.codex.ready ? 'Codex 在线' : '服务已启动 / Codex 连接中';
   renderMetrics();
+  tokenDashboard.start(data.users);
   renderEmployees();
   renderProjects();
   await loadAudit();
