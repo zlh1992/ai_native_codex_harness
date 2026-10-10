@@ -75,8 +75,8 @@ export function validateGraph(input, { candidateIds = null, employeeFor = null }
     invariant(Array.isArray(node.outputs) && node.outputs.length <= 30,
       400, 'INVALID_OUTPUTS', '成果须为最多 30 个相对文件路径；人工说明任务可为空。');
     const outputs = node.outputs.map(graphRelativePath);
-    invariant(node.reviewMode == null || ['auto', 'assisted'].includes(node.reviewMode),
-      400, 'INVALID_REVIEW_POLICY', '节点审核仅支持自动审核或老板审核。');
+    invariant(node.reviewMode == null || ['manual', 'auto', 'assisted'].includes(node.reviewMode),
+      400, 'INVALID_REVIEW_POLICY', '节点审核方式无效。');
     invariant(new Set(outputs).size === outputs.length, 400, 'INVALID_OUTPUTS', '成果路径不能重复。');
     let dueAt = null;
     if (node.dueAt) {

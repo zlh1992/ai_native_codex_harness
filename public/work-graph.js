@@ -32,7 +32,7 @@ export function jobAttentionMarkup(job) {
     ${job.recovery === 'confirm' ? `<label><input type="checkbox" data-ack="${escape(job.id)}"> 已查看记录，确认重新调用</label>` : ''}
     <button class="secondary" data-retry-job="${escape(job.id)}" ${job.recovery === 'blocked' ? 'disabled' : ''}>${resume ? '恢复后续步骤' : '重新尝试'}</button></div>`;
 }
-const reviewLabel = mode => mode === 'auto' ? 'AI 自动审核 · 推进 / 打回' : mode === 'manual' ? '老板人工审核（旧模式）' : '老板审核 · AI 提供意见';
+const reviewLabel = mode => mode === 'auto' ? 'AI 自动审核 · 推进 / 打回' : mode === 'manual' ? '老板人工审核' : '老板审核 · AI 提供意见';
 const coverageLabel = code => ({ UNSUPPORTED_FORMAT: '格式暂不支持内容审核', NO_EXTRACTABLE_TEXT: '未提取到正文',
   DOCX_NON_TEXT_CONTENT: '含图片/嵌入内容或解析警告', PDF_NON_TEXT_CONTENT: '含图片或无文本页',
   TEXT_LIMIT: '文本超出审核预算', PAGE_LIMIT: '超过页数预算', REVIEW_BUDGET: '超过本轮审核预算',
@@ -124,8 +124,8 @@ export class WorkGraphUI {
     this.panel.innerHTML = `<div class="graph-project-row"><label>项目<select id="graph-project">${projects.filter((p) => p.accessKind === 'owner')
       .map((p) => `<option value="${escape(p.id)}">${escape(p.name)}</option>`).join('')}</select></label><span>每个项目一张活动工作图 · 员工独立交付</span></div>
       <details class="graph-generate-details"><summary>＋ 规划新任务 · 设置参与员工与验收方式</summary><form id="graph-generate-form" class="graph-generate"><label class="graph-goal">这次想完成什么？<textarea name="prompt" rows="2" maxlength="8000" required placeholder="例如：请团队完成新版产品方案，设计和实现并行，最后汇总验收"></textarea></label>
-      <div class="graph-options"><label>默认审核方式<select name="reviewMode"><option value="assisted">老板审核 · AI 提供意见</option><option value="auto">AI 自动审核 · 推进 / 打回</option></select></label>
-      <label>最终交付<select name="finalMode"><option value="same">跟随审核方式</option><option value="assisted">老板最终验收 · AI 提供意见</option></select></label>
+      <div class="graph-options"><label>默认审核方式<select name="reviewMode"><option value="manual">老板人工审核</option><option value="assisted">老板审核 · AI 提供意见</option><option value="auto">AI 自动审核 · 推进 / 打回</option></select></label>
+      <label>最终交付<select name="finalMode"><option value="same">跟随审核方式</option><option value="manual">老板最终人工验收</option><option value="assisted">老板最终验收 · AI 提供意见</option><option value="auto">AI 最终自动审核</option></select></label>
       <button class="secondary" type="submit" data-preview="true">生成预览</button><button class="primary" type="submit">EXECUTE · 生成并启动</button></div>
       <details class="graph-sources"><summary>参与员工与项目资料</summary><div id="graph-candidates" class="graph-candidates"></div>
       <label>使用的项目文件（每行一个；留空自动选取文本资料）<textarea name="paths" rows="2" placeholder="README.md"></textarea></label>
@@ -306,12 +306,13 @@ export class WorkGraphUI {
     const keys = this.generationKeys;
     const key = keys.get(projectId) || crypto.randomUUID(); keys.set(projectId, key);
     const mode = data.get('reviewMode');
+    const finalMode = data.get('finalMode');
     const paths = String(data.get('paths')).split('\n').map((s) => s.trim()).filter(Boolean);
     const buttons = all('button[type=submit]', form); buttons.forEach((b) => { b.disabled = true; });
     try {
       const { job } = await this.api(`/api/projects/${projectId}/work-graphs/generate`, { method: 'POST', body: {
         prompt: data.get('prompt'), candidateIds: data.getAll('candidate'), ...(paths.length ? { paths } : {}),
-        autoStart: !event.submitter?.dataset.preview, reviewPolicy: { mode, finalMode: data.get('finalMode') === 'same' ? mode : 'assisted' }, idempotencyKey: key } });
+        autoStart: !event.submitter?.dataset.preview, reviewPolicy: { mode, finalMode: finalMode === 'same' ? mode : finalMode }, idempotencyKey: key } });
       // An accepted request belongs to its initiating project, even after navigation.
       // A disposed session must never restore its private in-memory state.
       if (keys !== this.generationKeys) return;
@@ -376,7 +377,7 @@ export class WorkGraphUI {
     this.drawer.innerHTML = `<div class="graph-drawer-top"><div><p class="eyebrow">${escape(node.assigneeName)} · V${node.version}</p><h2>${escape(node.title)}</h2></div><button class="secondary" data-close-drawer aria-label="关闭">×</button></div>
       <p><span class="status-tag ${escape(node.status)}">${labels[node.status]}</span> ${escape(reason(node.blockedReason))}</p>
       <p>${escape(reviewLabel(node.reviewMode))}</p>
-      ${latest ? `<p role="status">AI 审核：${node.reviewJob ? escape(labels[node.reviewJob.status] || node.reviewJob.status) : node.reviewMode === 'manual' ? '旧模式未启用 AI' : '等待调度'}${node.reviewJob?.errorCode ? ` · ${escape(reason(node.reviewJob.errorCode))}` : ''}</p>` : ''}
+      ${latest ? `<p role="status">审核：${node.reviewJob ? escape(labels[node.reviewJob.status] || node.reviewJob.status) : node.reviewMode === 'manual' ? '等待老板审核' : '等待 AI 审核'}${node.reviewJob?.errorCode ? ` · ${escape(reason(node.reviewJob.errorCode))}` : ''}</p>` : ''}
       ${task ? `<h3>验收标准</h3><p class="graph-preserve">${escape(task.acceptance)}</p><h3>任务清单</h3>
         <div id="graph-checklist">${task.checklist.map((i) => `<label><input type="checkbox" data-item="${escape(i.id)}" ${i.done ? 'checked' : ''} ${!editable || graph.owner ? 'disabled' : ''}> ${escape(i.text)}</label>`).join('')}</div>` : '<p>启动计划后下发任务。</p>'}
       ${(task?.inputManifest || []).map((h) => `<section class="graph-handoff"><h3>上游成果</h3><p class="graph-preserve">${escape(h.summary)}</p>${h.outputs.map((f) => `<button class="text-link" data-open-output="${escape(f.path)}">${escape(f.path)}</button>`).join('')}</section>`).join('')}
@@ -578,7 +579,7 @@ export class WorkGraphUI {
         <label>等待哪些任务完成？<select name="depends" multiple>${graph.nodes.filter(p => p.key !== n.key).map(p => `<option value="${escape(p.key)}" ${n.dependsOn.includes(p.key) ? 'selected' : ''}>${escape(p.title)}</option>`).join('')}</select></label>
         <label>验收标准<textarea name="acceptance" required>${escape(n.acceptance)}</textarea></label><label>任务清单（每行一项）<textarea name="checklist" required>${escape(n.checklist.map(i => typeof i === 'string' ? i : i.text).join('\n'))}</textarea></label>
         <label>必需交付文件（每行一个）<textarea name="outputs">${escape(n.outputs.join('\n'))}</textarea></label>
-        <label>本节点验收<select name="nodeReviewMode"><option value="" ${!n.reviewMode ? 'selected' : ''}>继承默认方式</option><option value="auto" ${n.reviewMode === 'auto' ? 'selected' : ''}>AI 自动审核 · 推进 / 打回</option><option value="assisted" ${n.reviewMode === 'assisted' ? 'selected' : ''}>老板审核 · AI 提供意见</option></select></label>
+        <label>本节点验收<select name="nodeReviewMode"><option value="" ${!n.reviewMode ? 'selected' : ''}>继承默认方式</option><option value="manual" ${n.reviewMode === 'manual' ? 'selected' : ''}>老板人工审核</option><option value="auto" ${n.reviewMode === 'auto' ? 'selected' : ''}>AI 自动审核 · 推进 / 打回</option><option value="assisted" ${n.reviewMode === 'assisted' ? 'selected' : ''}>老板审核 · AI 提供意见</option></select></label>
         <label>截止时间<input name="due" type="datetime-local" value="${n.dueAt ? new Date(Date.parse(n.dueAt) - new Date(n.dueAt).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : ''}"></label>
         <label><input name="final" type="checkbox" ${n.completionGate ? 'checked' : ''}> 最终交付节点（整张图仅一个）</label>
         <label><input name="independent" type="checkbox" ${n.requiresIndependentValidation ? 'checked' : ''}> 需要老板核对独立验证</label>

@@ -105,7 +105,7 @@ function renderProjects() {
     let actions = '<span class="share-state">🔒 老板无内容访问权</span>';
     if (mine) {
       if (project.projectType === 'local_private') {
-        actions = `<span class="share-state">隐私项目 · 本地 DeepSeek + DSH · 永不可分享</span><a class="secondary" href="/boss/workbench?project=${project.id}">打开</a>`;
+        actions = `<span class="share-state">隐私项目 · 本地 Qwen + DSH · 永不可分享</span><a class="secondary" href="/boss/workbench?project=${project.id}">打开</a>`;
       } else if (project.repoKind !== 'git') {
         actions = `<button class="primary" data-init-git="${project.id}">初始化 Git</button><a class="secondary" href="/boss/workbench?project=${project.id}">打开</a>`;
       } else {

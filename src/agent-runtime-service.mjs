@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { CodexService } from './codex-service.mjs';
-import { LocalDeepSeekService } from './local-deepseek-service.mjs';
+import { LocalQwenService } from './local-qwen-service.mjs';
 import { InputQueueService } from './input-queue-service.mjs';
 import { isPrivateProject } from './private-projects.mjs';
 import { invariant } from './errors.mjs';
@@ -11,7 +11,7 @@ export class AgentRuntimeService extends EventEmitter {
     super();
     Object.assign(this, options);
     this.standard = new CodexService(options);
-    this.local = new LocalDeepSeekService({ ...options, standard: this.standard });
+    this.local = new LocalQwenService({ ...options, standard: this.standard });
     this.capacity = this.standard.capacity;
     this.sharingAccesses = this.standard.sharingAccesses;
     this.inputQueue = new InputQueueService(this);
@@ -44,7 +44,7 @@ export class AgentRuntimeService extends EventEmitter {
   isReady(id) { return this.engine(id).isReady(); }
   async start() { this.inputQueue.start(); this.local.start(); return this.standard.start(); }
   stop() { this.inputQueue.stop(); this.local.stop(); this.standard.stop(); }
-  status() { return { ...this.standard.status(), runtimes: { codex: this.standard.status().ready ? 'ready' : 'unavailable', deepseek: this.local.status() } }; }
+  status() { return { ...this.standard.status(), runtimes: { codex: this.standard.status().ready ? 'ready' : 'unavailable', qwen: this.local.status() } }; }
   runTurn(context) {
     invariant(this.globalActive + this.globalPending < this.config.codexMaxConcurrentTurns, 429, 'CODEX_BUSY', '本机运行队列已满。');
     const count = [...this.activeByChat.values()].filter((a) => a.user.id === context.user.id).length + (this.pendingByUser.get(context.user.id) || 0);

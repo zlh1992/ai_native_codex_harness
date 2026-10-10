@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/_common.sh"
+validate_codex_upstream
 ensure_runtime_dirs
 
 SERVER_PID="$(launch_job_pid "$SERVER_LABEL")"
 if launch_job_exists "$SERVER_LABEL" && [[ -n "$SERVER_PID" ]]; then
-  if local_health; then
+  if codex_health; then
     echo "本地服务：运行中（PID ${SERVER_PID}）"
-    curl -fsS --max-time 5 "http://127.0.0.1:$PORT/api/health" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const h=JSON.parse(s);console.log(`引擎：Codex ${h.codexState} / 本地 DeepSeek ${h.localDeepSeek?.state||"disabled"}`)})'
+    curl -fsS --max-time 5 "http://127.0.0.1:$PORT/api/health" | "$NODE_BIN" -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const h=JSON.parse(s);console.log(`引擎：Codex ${h.codexState} / 本地 Qwen ${h.localQwen?.state||"disabled"}`)})'
+    echo "普通项目/微信渠道模型：ChatGPT 官方（本机登录）"
+    echo "老板隐私项目模型：本机 Qwen（OpenAI-compatible / DSH 适配）"
     print_portal_addresses "http://127.0.0.1:$PORT"
   elif local_codex_failed; then
     echo "本地服务：Web 进程运行中，但 Codex app-server 启动失败（PID ${SERVER_PID}）"
@@ -17,7 +20,11 @@ if launch_job_exists "$SERVER_LABEL" && [[ -n "$SERVER_PID" ]]; then
     echo "本地服务：进程存在但健康检查未就绪（PID ${SERVER_PID}）"
   fi
 else
-  echo "本地服务：已停止"
+  if local_web_health; then
+    echo "本地服务：HTTP 可用，但进程未纳管；请核对启动方式。"
+  else
+    echo "本地服务：已停止"
+  fi
 fi
 
 MODE="$(sed -n '1p' "$TUNNEL_MODE_FILE" 2>/dev/null || true)"

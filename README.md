@@ -16,12 +16,27 @@ Codex 的项目工具
   → 自有项目主目录 / 老板共享项目独立 Git worktree
 ```
 
+## 当前 Mac 一键管理
+
+```bash
+/Users/starwin/Documents/ChatGPT/codex-harness-remote/start.command
+/Users/starwin/Documents/ChatGPT/codex-harness-remote/stop.command
+/Users/starwin/Documents/ChatGPT/codex-harness-remote/restart.command
+/Users/starwin/Documents/ChatGPT/codex-harness-remote/status.command
+/Users/starwin/Documents/ChatGPT/codex-harness-remote/health.command
+/Users/starwin/Documents/ChatGPT/codex-harness-remote/reset-wechat-qr.command
+```
+
+以上入口管理 Portal、公网隧道和老板微信 relay。启动会等待就绪；重置二维码后需要重新扫码。[完整操作说明](docs/SERVICE_CONTROL.md)。
+
 ## 快速开始
 
 要求：macOS、Node.js 22.13+，以及已经完成 `codex login` 的 Codex/ChatGPT App。
 
+模型边界：老板和员工的普通项目、微信固定项目均使用本机已登录的 ChatGPT 官方 Codex 订阅；项目配置固定为 `openai_http` + `https://chatgpt.com/backend-api/codex`，启动脚本会拒绝其他上游地址。老板新建的 `local_private` 隐私项目当前使用显式开启的本机回环 Qwen OpenAI-compatible 服务（配置统一使用 `LOCAL_QWEN_*`），不会作为普通项目或微信渠道的 fallback。
+
 ```bash
-cd /Users/zlh1992_home/Documents/ChatGPT/codex-harness-remote
+cd /Users/starwin/Documents/ChatGPT/codex-harness-remote
 ./bin/install-mac.sh
 ./bin/create-super-admin.sh
 ./bin/start-public.sh
@@ -44,7 +59,7 @@ cd /Users/zlh1992_home/Documents/ChatGPT/codex-harness-remote
 ./bin/stop.sh            # 按顺序停止公网和本地服务
 ```
 
-macOS `launchd` 使用独立标签 `com.codex-harness-remote.server` 与 `com.codex-harness-remote.tunnel` 托管进程；退出启动终端不会停止服务。日志位于 `~/Library/Logs/CodexHarnessRemote/`。
+默认 macOS `launchd` 使用独立标签 `com.codex-harness-remote.server` 与 `com.codex-harness-remote.tunnel` 托管进程；退出启动终端不会停止服务。当前 Mac 使用显式 detached 模式，由相同脚本记录和核验进程身份；退出启动终端不停止，系统重启后需重新启动。日志位于 `~/Library/Logs/CodexHarnessRemote/`。
 
 公网同样分为 `<公网地址>/boss/login` 与 `<公网地址>/employee`；老板登录后进入驾驶舱，并可打开 `/boss/workbench`。
 

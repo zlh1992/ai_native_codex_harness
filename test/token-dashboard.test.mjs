@@ -4,8 +4,8 @@ import { parseHTML } from 'linkedom';
 import { TokenDashboard, usageValue } from '../public/token-dashboard.js';
 const bucket = (total = 0) => ({ totalTokens:total,inputTokens:total,outputTokens:0,cachedInputTokens:0,cacheWriteInputTokens:0,reasoningOutputTokens:0,calls:0,missingCalls:0,incompleteCalls:0,pendingCalls:0 });
 const data = () => ({ from:'2026-09-22',to:'2026-09-22',startedAt:'2026-09-22T00:00:00Z',updatedAt:'2026-09-22T01:00:00Z',availableModels:['<unsafe>'],
-  totals:{gpt:bucket(100),bossGpt:bucket(100),employeeGpt:bucket(),deepseek:bucket()},days:[{date:'2026-09-22',gpt:bucket(100),deepseek:bucket()}],
-  employees:[],models:[{...bucket(100),model:'<unsafe>',effort:'medium'}],kinds:[],localDeepSeek:{enabled:false} });
+  totals:{gpt:bucket(100),bossGpt:bucket(100),employeeGpt:bucket(),qwen:bucket()},days:[{date:'2026-09-22',gpt:bucket(100),qwen:bucket()}],
+  employees:[],models:[{...bucket(100),model:'<unsafe>',effort:'medium'}],kinds:[],localQwen:{enabled:false} });
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 function fixture(t,api) {
   const {document,window}=parseHTML('<html><body><section id="root"></section></body></html>');

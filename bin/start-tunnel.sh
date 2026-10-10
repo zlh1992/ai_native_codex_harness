@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/_common.sh"
+validate_codex_upstream
 ensure_runtime_dirs
 
-if ! local_health; then
+if ! codex_health; then
   echo "本地服务尚未就绪，请先运行 ./bin/start-local.sh。" >&2
   exit 1
 fi
@@ -19,7 +20,7 @@ if [[ "$MODE" == "named" ]]; then
   TOKEN_FILE="${PUBLIC_TUNNEL_TOKEN_FILE:-.data/cloudflare-tunnel.token}"
   [[ "$TOKEN_FILE" = /* ]] || TOKEN_FILE="$ROOT_DIR/$TOKEN_FILE"
   [[ -s "$TOKEN_FILE" ]] || { echo "缺少 named tunnel token；保留现有隧道。" >&2; exit 2; }
-  node --input-type=module -e '
+  "$NODE_BIN" --input-type=module -e '
     const { loadConfig } = await import(process.argv[1]);
     const config = loadConfig();
     const target = String(process.env.PUBLIC_URL || "").replace(/\/$/, "");
@@ -61,7 +62,7 @@ rm -f "$PUBLIC_URL_FILE" "$TUNNEL_MODE_FILE"
 
 case "$MODE" in
   quick)
-    launchctl submit -l "$TUNNEL_LABEL" -o "$TUNNEL_LOG" -e "$TUNNEL_LOG" -- "$CLOUDFLARED_BIN" tunnel --no-autoupdate --protocol http2 --url "http://127.0.0.1:$PORT"
+    start_managed_job "$TUNNEL_LABEL" "$TUNNEL_LOG" "$CLOUDFLARED_BIN" tunnel --no-autoupdate --protocol http2 --url "http://127.0.0.1:$PORT"
     printf 'quick\n' > "$TUNNEL_MODE_FILE"
     chmod 600 "$TUNNEL_MODE_FILE"
     ADDRESS=""
@@ -84,7 +85,7 @@ case "$MODE" in
     [[ -s "$TOKEN_FILE" ]] || { echo "隧道 token 文件不存在：$TOKEN_FILE" >&2; exit 2; }
     [[ "${PUBLIC_URL:-}" =~ ^https://[A-Za-z0-9.-]+/?$ ]] || { echo "named 模式必须设置 PUBLIC_URL=https://你的域名" >&2; exit 2; }
     ADDRESS="${PUBLIC_URL%/}"
-    launchctl submit -l "$TUNNEL_LABEL" -o "$TUNNEL_LOG" -e "$TUNNEL_LOG" -- "$CLOUDFLARED_BIN" tunnel --no-autoupdate --protocol "${CLOUDFLARED_PROTOCOL:-auto}" run --token-file "$TOKEN_FILE"
+    start_managed_job "$TUNNEL_LABEL" "$TUNNEL_LOG" "$CLOUDFLARED_BIN" tunnel --no-autoupdate --protocol "${CLOUDFLARED_PROTOCOL:-auto}" run --token-file "$TOKEN_FILE"
     printf 'named\n' > "$TUNNEL_MODE_FILE"
     chmod 600 "$TUNNEL_MODE_FILE"
     ;;
@@ -92,7 +93,7 @@ case "$MODE" in
     TAILSCALE_BIN="${TAILSCALE_BIN:-/usr/local/bin/tailscale}"
     [[ -x "$TAILSCALE_BIN" ]] || { echo "找不到 Tailscale CLI：$TAILSCALE_BIN" >&2; exit 2; }
     TAILSCALE_BE_CLI=1 "$TAILSCALE_BIN" funnel --bg --yes --https=443 "http://127.0.0.1:$PORT"
-    ADDRESS="$(TAILSCALE_BE_CLI=1 "$TAILSCALE_BIN" status --json | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const n=JSON.parse(s).Self.DNSName||"";process.stdout.write(n?`https://${n.replace(/\.$/,"")}`:"")})')"
+    ADDRESS="$(TAILSCALE_BE_CLI=1 "$TAILSCALE_BIN" status --json | "$NODE_BIN" -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const n=JSON.parse(s).Self.DNSName||"";process.stdout.write(n?`https://${n.replace(/\.$/,"")}`:"")})')"
     [[ -n "$ADDRESS" ]] || { echo "无法取得 Tailscale 公网地址。" >&2; exit 1; }
     printf 'tailscale\n' > "$TUNNEL_MODE_FILE"
     chmod 600 "$TUNNEL_MODE_FILE"
@@ -130,7 +131,7 @@ public_origin_health() {
 }
 
 ready_json() {
-  node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{try{const x=JSON.parse(s);process.exit(x.ok&&(x.codex||(x.localDeepSeek?.enabled&&x.localDeepSeek.state==="ready"))?0:1)}catch{process.exit(1)}})'
+  "$NODE_BIN" -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{try{const x=JSON.parse(s);process.exit(x.ok&&x.codex===true&&x.codexState==="ready"?0:1)}catch{process.exit(1)}})'
 }
 
 for _ in {1..45}; do

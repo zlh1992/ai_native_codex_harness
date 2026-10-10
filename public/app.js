@@ -285,7 +285,8 @@ function renderTaskNotice(flow) {
   const signature = JSON.stringify([state.selectedChat.id, state.selectedTask?.id, flow]);
   if (root.dataset.signature === signature) return;
   root.dataset.signature = signature;
-  root.innerHTML = `<p role="status">${escapeHtml(flow.message)}</p><div>${state.selectedTask?.workflowRunId ? '<button type="button" class="secondary" data-task-detail>查看任务 / 审核</button>' : ''}${flow.canOpenCurrent ? '<button type="button" class="secondary" data-task-current>进入当前版本</button>' : ''}<button type="button" class="secondary" data-task-board>返回任务看板</button></div>`;
+  const expanded = root.querySelector('.task-flow-disclosure')?.open === true;
+  root.innerHTML = `<details class="task-flow-disclosure" ${expanded ? 'open' : ''}><summary><span>当前任务进度</span><small>点击展开</small></summary><div class="task-flow-content"><p role="status">${escapeHtml(flow.message)}</p><div>${state.selectedTask?.workflowRunId ? '<button type="button" class="secondary" data-task-detail>查看任务 / 审核</button>' : ''}${flow.canOpenCurrent ? '<button type="button" class="secondary" data-task-current>进入当前版本</button>' : ''}<button type="button" class="secondary" data-task-board>返回任务看板</button></div></div></details>`;
 }
 
 async function loadMemories() {
@@ -514,14 +515,14 @@ function renderMessages(messages) {
   const root = $('#message-list');
   if (!messages.length) {
     renderPlanDiff();
-    root.innerHTML = `<div class="welcome-message"><span class="mark">C</span><h3>${state.selectedProject ? '准备开始构建。' : '从一个项目开始。'}</h3><p>${state.selectedProject?.projectType === 'local_private' ? '本地 DeepSeek 将在此隐私项目中工作；对话和记忆不发送给 Codex。云端搜索按当前确认策略单独处理。' : state.selectedProject ? '描述目标、错误或想修改的功能，Codex 会直接在这个隔离项目中工作。' : '创建或选择项目，再新建对话。Codex 会在隔离的本机目录中读取、编写和验证代码。'}</p></div>`;
+    root.innerHTML = `<div class="welcome-message"><span class="mark">C</span><h3>${state.selectedProject ? '准备开始构建。' : '从一个项目开始。'}</h3><p>${state.selectedProject?.projectType === 'local_private' ? '本机 Qwen 将在此隐私项目中工作；对话和记忆不发送给 Codex。云端搜索按当前确认策略单独处理。' : state.selectedProject ? '描述目标、错误或想修改的功能，Codex 会直接在这个隔离项目中工作。' : '创建或选择项目，再新建对话。Codex 会在隔离的本机目录中读取、编写和验证代码。'}</p></div>`;
   } else {
     root.innerHTML = messages.map(messageHtml).join('');
     const snapshot = [...messages].reverse().find((message) => message.role === 'assistant' && message.metadata);
     renderPlanDiff(snapshot?.metadata?.plan || [], snapshot?.metadata?.diffSnapshot || '');
   }
   if (state.selectedChat?.threadState === 'resume_failed') {
-    root.insertAdjacentHTML('afterbegin', `<article class="message error thread-recovery"><div class="message-label">THREAD RECOVERY</div><div class="message-body"><p>原 ${state.selectedProject?.projectType === 'local_private' ? 'DeepSeek 本地会话' : 'Codex 线程'}暂时无法恢复，映射和本地历史均已保留。</p><small>${escapeHtml(state.selectedChat.threadError || '')}</small><div class="message-actions"><button class="secondary" data-thread-recovery="retry">重试原线程</button><button class="danger-button" data-thread-recovery="reset">确认并新建空白线程</button></div></div></article>`);
+    root.insertAdjacentHTML('afterbegin', `<article class="message error thread-recovery"><div class="message-label">THREAD RECOVERY</div><div class="message-body"><p>原 ${state.selectedProject?.projectType === 'local_private' ? 'Qwen 本地会话' : 'Codex 线程'}暂时无法恢复，映射和本地历史均已保留。</p><small>${escapeHtml(state.selectedChat.threadError || '')}</small><div class="message-actions"><button class="secondary" data-thread-recovery="retry">重试原线程</button><button class="danger-button" data-thread-recovery="reset">确认并新建空白线程</button></div></div></article>`);
   }
   root.scrollTop = root.scrollHeight;
 }
@@ -531,7 +532,7 @@ function messageHtml(message) {
     const result = message.metadata?.result;
     return `<div class="message event"><div class="tool-event">↳ ${escapeHtml(message.content)} ${result?.exitCode !== undefined ? `· exit ${escapeHtml(result.exitCode)}` : ''}</div></div>`;
   }
-  const label = message.role === 'user' ? 'YOU' : message.role === 'error' ? 'ERROR' : state.selectedProject?.projectType === 'local_private' ? 'DEEPSEEK · LOCAL' : 'CODEX';
+  const label = message.role === 'user' ? 'YOU' : message.role === 'error' ? 'ERROR' : state.selectedProject?.projectType === 'local_private' ? 'QWEN · LOCAL' : 'CODEX';
   const canSubmit = message.role === 'assistant' && message.metadata?.turnRunId && message.metadata?.finalItemId
     && state.selectedTask && message.metadata.taskId === state.selectedTask.id
     && message.metadata.taskVersion === state.selectedTask.version && taskConversationState(state.selectedTask, state.selectedChat).canWork;
@@ -544,7 +545,7 @@ function appendMessage(role, content = '') {
   $('.welcome-message', root)?.remove();
   const article = document.createElement('article');
   article.className = `message ${role}`;
-  article.innerHTML = `<div class="message-label">${role === 'user' ? 'YOU' : role === 'error' ? 'ERROR' : state.selectedProject?.projectType === 'local_private' ? 'DEEPSEEK · LOCAL' : 'CODEX'}</div><div class="message-body"></div>`;
+  article.innerHTML = `<div class="message-label">${role === 'user' ? 'YOU' : role === 'error' ? 'ERROR' : state.selectedProject?.projectType === 'local_private' ? 'QWEN · LOCAL' : 'CODEX'}</div><div class="message-body"></div>`;
   $('.message-body', article).innerHTML = markdown(content);
   root.append(article); root.scrollTop = root.scrollHeight;
   return article;
@@ -553,8 +554,8 @@ function appendMessage(role, content = '') {
 function updateConcurrencyIndicator() {
   const active = state.runningTurns.size;
   const local = state.selectedProject?.projectType === 'local_private';
-  const runtime = state.codexCapacity?.runtimes?.deepseek;
-  $('#codex-status').innerHTML = local ? `<i></i> 本地 DeepSeek · ${escapeHtml(({ ready: '在线', starting: '连接中', disabled: '未启用', unavailable: '不可用' })[runtime?.state] || '待检查')}` : `<i></i> Codex · ${active}/${state.maxConcurrentTurns}`;
+  const runtime = state.codexCapacity?.runtimes?.qwen;
+  $('#codex-status').innerHTML = local ? `<i></i> 本地 Qwen · ${escapeHtml(({ ready: '在线', starting: '连接中', disabled: '未启用', unavailable: '不可用' })[runtime?.state] || '待检查')}` : `<i></i> Codex · ${active}/${state.maxConcurrentTurns}`;
   $('#codex-status').classList.toggle('online', local ? runtime?.state === 'ready' : Boolean(state.codexCapacity?.ready));
 }
 
@@ -571,7 +572,7 @@ function setComposer(enabled) {
   $('#prompt-input').disabled = !usable;
   $('#send-button').disabled = !usable || state.queueSending || Boolean(state.modelSaving);
   $('#send-button').setAttribute('aria-label', selectedChatRunning() ? '加入消息队列' : '发送消息');
-  $('#prompt-input').placeholder = selectedChatRunning() ? '继续输入，发送后排队…' : state.selectedProject?.projectType === 'local_private' ? '告诉本地 DeepSeek 你想完成什么…' : '告诉 Codex 你想构建什么…';
+  $('#prompt-input').placeholder = selectedChatRunning() ? '继续输入，发送后排队…' : state.selectedProject?.projectType === 'local_private' ? '告诉本地 Qwen 你想完成什么…' : '告诉 Codex 你想构建什么…';
   renderInputQueue();
   $('#stop-turn').classList.toggle('hidden', !selectedChatRunning());
   $('#composer-context').textContent = state.selectedChat
@@ -738,7 +739,7 @@ async function resumePersistedTurn(chatData) {
   if (!run || state.runningTurns.has(chatData.chat.id)) return state.runningTurns.get(chatData.chat.id) || null;
   const entry = {
     chatId: chatData.chat.id, projectId: chatData.chat.projectId, prompt: '', mode: run.mode || chatData.chat.preferredMode || 'execute', text: '',
-    engineLabel: state.projects?.find(project => project.id === chatData.chat.projectId)?.projectType === 'local_private' ? '本地 DeepSeek' : 'Codex',
+    engineLabel: state.projects?.find(project => project.id === chatData.chat.projectId)?.projectType === 'local_private' ? '本地 Qwen' : 'Codex',
     events: [], approvals: [], plan: [], diff: '', statusText: '正在恢复任务事件…', lastEventId: 0,
     turnRunId: run.id, recovered: true,
     controller: new AbortController(), sessionEpoch: sessionClient.generation(),
@@ -826,7 +827,8 @@ function renderInputQueue() {
   const signature = JSON.stringify([inputs, selectedChatRunning()]);
   if (root.dataset.signature === signature) return;
   root.dataset.signature = signature;
-  root.innerHTML = `<div class="queue-heading">待发送 · ${inputs.length}<span>按顺序执行</span></div>` + inputs.map((input, index) => {
+  const expanded = root.querySelector('.queue-disclosure')?.open === true;
+  root.innerHTML = `<details class="queue-disclosure" ${expanded ? 'open' : ''}><summary class="queue-heading"><span>待发送 · ${inputs.length}</span><small>按顺序执行 · 点击展开</small></summary><div class="queue-items">` + inputs.map((input, index) => {
     const busy = input.status === 'steering';
     const uncertain = input.reason === 'DELIVERY_UNCERTAIN';
     const status = busy ? '正在调整方向…' : uncertain ? '发送结果未确认，请核对对话' : input.status === 'paused' ? '已暂停' : '排队中';
@@ -838,7 +840,7 @@ function renderInputQueue() {
       ${input.status === 'paused' ? `<button type="button" class="secondary compact" data-queue-action="resume">${uncertain ? '核对后重发' : '继续排队'}</button>` : ''}
       <button type="button" class="queue-steer compact" data-queue-action="steer" ${busy || uncertain || !selectedChatRunning() ? 'disabled' : ''} title="把这条消息送入当前任务，调整运行方向">↑ 打断插队</button>
       </div></article>`;
-  }).join('');
+  }).join('') + '</div></details>';
 }
 
 async function refreshInputQueue({ history = false } = {}) {
@@ -1639,7 +1641,7 @@ function updateModelSelect() {
   const select = $('#model-select');
   select.classList.toggle('hidden', local);
   $('#model-badge').classList.toggle('hidden', !local);
-  if (local) $('#model-badge').textContent = `${state.codexCapacity?.runtimes?.deepseek?.model || 'DeepSeek'} · DSH · 不可分享`;
+  if (local) $('#model-badge').textContent = `${state.codexCapacity?.runtimes?.qwen?.model || 'Qwen'} · DSH · 不可分享`;
   $('#local-control-label').classList.toggle('hidden', !local);
   $('#local-control').value = state.selectedChat?.controlMode || 'manual';
   $('#local-control').disabled = !state.selectedChat || selectedChatRunning();

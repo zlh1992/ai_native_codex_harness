@@ -140,8 +140,26 @@ test('absolute delivery input is confined to this workspace; node overrides are 
   const graph = validateGraph(f.graph);
   assert.equal(nodeReviewMode(graph.nodes[0], { mode: 'auto' }), 'assisted');
   assert.equal(nodeReviewMode(graph.nodes[1], { mode: 'auto' }), 'auto');
+  f.graph.nodes[0].reviewMode = 'manual';
+  assert.equal(nodeReviewMode(validateGraph(f.graph).nodes[0], { mode: 'auto' }), 'manual');
   f.graph.nodes[0].reviewMode = 'unknown';
   assert.throws(() => validateGraph(f.graph), { code: 'INVALID_REVIEW_POLICY' });
+});
+
+test('manual review policy waits for the owner without scheduling an AI review', (t) => {
+  const f = fixture(t); const s = services(f);
+  const run = f.store.start({ roadmapId: f.plan().roadmapId, ownerId: f.boss.id, expectedVersion: 1,
+    idempotencyKey: randomUUID(), policy: { mode: 'manual', finalMode: 'manual' } });
+  const preparation = f.store.claimJob(); s.shares.prepareWorkflow(preparation); f.store.finishJob(preparation.id, preparation.leaseToken);
+  s.graphs.reconcile(run.id);
+  let task = f.store.tasks(run.id)[0];
+  task = s.graphs.updateChecklist(task.id, task.assigneeUserId, { taskVersion: 1, revision: task.checklistRevision,
+    items: task.checklist.map(item => ({ id: item.id, done: true })) });
+  const submission = s.graphs.submit(task.id, task.assigneeUserId, { kind: 'manual', taskVersion: 1,
+    checklistRevision: task.checklistRevision, resultSummary: 'owner review', idempotencyKey: randomUUID() });
+  assert.equal(f.store.sql.prepare("SELECT COUNT(*) AS n FROM workflow_jobs WHERE type='submission.review' AND submission_id=?").get(submission.id).n, 0);
+  const review = s.reviews.proposal({ submissionId: submission.id, ownerId: f.boss.id, verdict: 'passed' });
+  assert.equal(s.reviews.apply(review.id, { ownerId: f.boss.id }).verdict, 'passed');
 });
 
 function services(f) {

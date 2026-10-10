@@ -34,6 +34,15 @@ Task + TaskVersion
   0..1 -> immutable Submission per version
              -> project_access + snapshot commit/tree
              -> passed delivery commit in owner history
+
+ChannelBinding
+  1 -> 1 external channel + scope
+  1 -> 1 owner standard Project + owner Chat
+  1 -> N ChannelEvent (unique external event id)
+
+微信 `ChannelBinding` 只能由 Portal 按运营配置解析到老板的 standard `weichat-project`；桥接提交的 scope、sender 和 event id 不是权限凭据。binding 只为对应老板 chat 派生跨项目只读能力，目标集合为该 user 当前本人拥有且 access_kind=`owner` 的 standard 项目；能力不写入客户端、不扩展 chat 的 project/access，也不包含 shared、local_private 或本机目录。`ChannelEvent` 先登记为 `processing`，完成后写入脱敏的回复文本和 `completed|failed` 终态；重复 event id 只能重放已有终态，不能再次启动 turn。
+
+微信渠道命令由 Portal 在事件登记前解析。`/new` 只能在当前 chat 空闲时创建同一固定项目下的新 chat，并原子地把 active binding 指向新 chat；旧 chat、thread 和事件历史保留。`/models` 返回 Portal 白名单目录，`/model <id>` 只能写入当前 chat 的 `preferred_model`，并复用同一模型白名单；这些命令不启动 Codex turn。
 ```
 
 `thread id`、`tree path`、`access id` 都是资源标识，不是 bearer capability。请求仍必须从已认证用户出发，重新解析 chat 与 active project access。

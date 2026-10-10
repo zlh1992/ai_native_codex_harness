@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/_common.sh"
+validate_codex_upstream
 ensure_runtime_dirs
 
 if [[ "$HOST" != "127.0.0.1" && "$HOST" != "localhost" && "$HOST" != "::1" ]]; then
@@ -33,11 +34,19 @@ touch "$SERVER_LOG"
 chmod 600 "$SERVER_LOG"
 START_LOG_LINE="$(( $(wc -l < "$SERVER_LOG") + 1 ))"
 printf '\n[%s] starting local server\n' "$(date -u +%FT%TZ)" >> "$SERVER_LOG"
-NODE_BIN="$(command -v node)"
-launchctl submit -l "$SERVER_LABEL" -o "$SERVER_LOG" -e "$SERVER_LOG" -- "$NODE_BIN" "$SERVER_MARKER"
+NODE_BIN="${NODE_BIN:-$(command -v node 2>/dev/null || true)}"
+if [[ -z "$NODE_BIN" && -x "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node" ]]; then
+  NODE_BIN="/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node"
+fi
+[[ -n "$NODE_BIN" ]] || { echo "Node.js not found; set NODE_BIN or install Node.js." >&2; exit 1; }
+if [[ "$HARNESS_PROCESS_MODE" == "detached" ]]; then
+  start_managed_job "$SERVER_LABEL" "$SERVER_LOG" "$NODE_BIN" "$SERVER_MARKER"
+else
+  start_managed_job "$SERVER_LABEL" "$SERVER_LOG" /bin/sh -c "cd '$ROOT_DIR' && exec '$NODE_BIN' '$SERVER_MARKER'"
+fi
 
 WEB_READY=0
-for SECOND in {1..60}; do
+for SECOND in {1..180}; do
   if ! launch_job_exists "$SERVER_LABEL"; then
     sed -n "${START_LOG_LINE},\$p" "$SERVER_LOG" | tail -n 40 >&2
     exit 1
@@ -66,7 +75,7 @@ for SECOND in {1..60}; do
   sleep 1
 done
 
-echo "本地服务未在 60 秒内就绪。" >&2
+echo "本地服务未在 180 秒内就绪。" >&2
 remove_launch_job "$SERVER_LABEL" || true
 rm -f "$SERVER_PID_FILE"
 sed -n "${START_LOG_LINE},\$p" "$SERVER_LOG" | tail -n 40 >&2

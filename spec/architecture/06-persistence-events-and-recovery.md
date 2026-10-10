@@ -1,6 +1,6 @@
 # 06 持久化、事件与恢复
 
-隐私项目增加 DSH JSONL 与 local_session_id（不向浏览器公开），使用独立 user/project/chat 容器；记录正文仅可经 chat ACL 读取，不进入全局 journal/日志。空白会话须先物化，恢复失败保留映射，显式 reset 记录 engine=deepseek 的 lineage；重启不重放遗留 inbox 或审批。详见 [第 10 章](10-local-private-projects.md)，备份不能只复制 SQLite 而遗漏本地 session。
+隐私项目增加 DSH JSONL 与 local_session_id（不向浏览器公开），使用独立 user/project/chat 容器；记录正文仅可经 chat ACL 读取，不进入全局 journal/日志。空白会话须先物化，恢复失败保留映射，显式 reset 记录`engine=qwen` 的 lineage；重启不重放遗留 inbox 或审批。详见 [第 10 章](10-local-private-projects.md)，备份不能只复制 SQLite 而遗漏本地 session。
 
 ## 三类事实源
 
@@ -13,6 +13,8 @@
 | per-user Markdown/Milvus Lite/embedding | `.data/memory-index` 与模型缓存 | 可删除重建的召回加速层 |
 
 Portal 不把 Codex thread 当唯一业务事实，也不复制完整 transcript 到审计表。`messages` 和 `turn_events` 是在原生历史暂时不可用时维持基本可见性和运行恢复的受限投影。
+
+微信 relay 的外部事件先写入 SQLite `channel_events` 唯一键 `(channel, external_event_id)`，再启动 Portal turn。重试命中 `completed` 或 `failed` 只返回已保存的短回复，不重复执行；并发命中 `processing` 返回明确冲突，桥接保留游标，在单次 20 分钟总期限内间隔重试 processing，不将它计入普通网络失败次数。relay 使用仅 loopback 的 HTTP 请求和显式总超时，等待完整 turn 不依赖 fetch 默认响应头超时。事件只记录 scope、状态、错误码和回复结果，不记录 token、完整 prompt 或原始微信载荷。
 
 Portal 也不读取或写入 Codex 原生长期记忆；该能力对 Portal app-server 强制关闭。用户记忆从 SQLite 投影为每用户独立文档和数据库，memsearch 超时或崩溃时退回 SQLite 关键词召回。无论使用哪种召回器，最终候选都重新查询 SQLite 并验证来源 access。
 

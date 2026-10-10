@@ -15,6 +15,7 @@ test('delivery drawer exposes multi-upload, confined paths, immutable thumbnails
   assert.ok(workGraph.includes('crypto.subtle.digest'));
   assert.ok(workGraph.includes('工作区文件路径（每行一个）'));
   assert.ok(workGraph.includes('name="nodeReviewMode"'));
+  assert.ok(workGraph.includes('value="manual">老板人工审核'));
   assert.ok(workGraph.includes('AI 自动审核 · 推进 / 打回'));
   assert.ok(workGraph.includes('老板审核 · AI 提供意见'));
   assert.ok(workGraph.includes('&preview=1'));
@@ -131,15 +132,15 @@ test('private chat UI labels the local engine and keeps approvals and project me
   assert.ok(html.includes('id="memory-scope"'));
   assert.ok(html.includes('id="local-control"'));
   assert.ok(app.includes('data-search-query'));
-  assert.ok(app.includes('DEEPSEEK · LOCAL'));
+  assert.ok(app.includes('QWEN · LOCAL'));
   const apply = frontendFunction('applyJournalEvent');
-  const entry = { engineLabel: '本地 DeepSeek', mode: 'edit', events: [] };
+  const entry = { engineLabel: '本地 Qwen', mode: 'edit', events: [] };
   apply(entry, { eventType: 'turn_status', payload: { status: 'running' } });
-  assert.equal(entry.statusText, '本地 DeepSeek 正在执行 · EDIT');
+  assert.equal(entry.statusText, '本地 Qwen 正在执行 · EDIT');
   apply(entry, { eventType: 'approval_resolved' });
-  assert.equal(entry.statusText, '本地 DeepSeek 继续执行…');
+  assert.equal(entry.statusText, '本地 Qwen 继续执行…');
   apply(entry, { eventType: 'turn_completed' });
-  assert.equal(entry.statusText, '本地 DeepSeek 已完成');
+  assert.equal(entry.statusText, '本地 Qwen 已完成');
 });
 
 test('work graph keeps long task titles readable and distinguishes its three projections', () => {

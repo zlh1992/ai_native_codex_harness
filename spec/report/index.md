@@ -1,5 +1,31 @@
 # 实施报告索引
 
+- [2026-10-10 本地修改归档与远端分支同步](2026-10-10-local-changes-sync.md)：实施中；将当前 `graph` 工作树修改归档并同步到 `origin/graph`。
+
+- [2026-10-07 启用 Portal 本地 Qwen](2026-10-07-enable-local-qwen.md)：完成；双引擎 ready、真实本地审批/文件/命令/续聊/用量验证通过，200+19 发布门禁通过。
+
+- [2026-10-04 微信渠道命令路由修复](2026-10-04-wechat-command-routing.md)：完成；修复 `/new` 新 Portal 对话和 `/models` 模型目录路由，`npm run gate` 已通过。
+
+- [2026-10-04 oMLX 本地 Qwen 接口兼容性](2026-10-04-omlx-qwen-compatibility.md)：实施中；已验证 oMLX 模型探测、SSE、thinking、工具往返、续聊和 usage，正在切换运行配置。
+
+- [2026-10-03 TensorFold 本地 Qwen 适配](2026-10-03-tensorfold-qwen-adaptation.md)：实施中；已验证 OpenAI-compatible 普通回复与流式 tool calls，正在对齐模型配置与容量。
+
+- [2026-10-02 AI-native 办公竞品分析与产品机会](2026-10-02-competitor-analysis.md)：完成；面向小团队/OPC 对比 Dots、Muse、豆包工作、QwenWork、WorkBuddy、飞书 Aily，并评估微信二次开发、飞书接入和可补产品机会；生成 3 页竞品分析 PDF，并将 OPC 定位、带远端截图的 Demo、具体协作架构和正向竞品结论纳入 12 页新版产品说明书。
+
+- [2026-09-30 产品说明书对照与 Graph 补齐](2026-09-30-product-brief-alignment.md)：完成；核对 `graph` 分支远端提交、工作区修改与 2026-09-29 产品说明书，补齐确认的实现/文档差距，并生成 `output/pdf/Codex_Harness_Graph_产品说明书_2026-09-30.pdf`。
+
+- [Graph 产品说明书实现对照补充](../../docs/PRODUCT_BRIEF_CURRENT.md)：随 2026-09-30 对照修订；补充三种审核策略、证据边界和当前扩展能力。
+
+- [2026-09-27 老板隐私项目切换本机 Qwen](2026-09-27-local-qwen-private-engine.md)：完成（发布 gate 仍受既有环境失败限制）；活动本地 API 命名已全面替换为 Qwen，已验证本机 Qwen OpenAI-compatible API、DSH worker 和隔离 Portal 真实问答。
+
+- [2026-09-27 恢复官方模型认证](2026-09-27-official-model-auth.md)：完成；恢复官方地址并验证真实模型请求成功，完整 gate 仍受既有环境失败限制。
+
+- [2026-09-27 统一服务启停与备忘录命令](2026-09-27-unified-service-controls.md)：启停脚本与备忘录已对齐、微信重新绑定成功、四入口登录已验收（公网老板由用户确认）；完整 gate 仍有依赖/环境失败。
+
+- [2026-09-25 员工工作台工具明细折叠优化](2026-09-25-collapsible-tool-details.md)：完成（本地服务已重启；完整 gate 受环境依赖限制）。
+
+- [2026-09-24 微信渠道接入老板固定项目](2026-09-24-wechat-harness-channel.md)：实施中（只读入口已验证；扫码与发布门控待验收）；正在增加老板 standard 项目只读入口并重新生成二维码。
+
 - [2026-09-15 员工工作图筛选与 graph 发布](2026-09-15-employee-work-graph-filter.md)：完成；已推送、重启并验证四个入口认证，公网 Chrome 自动化限制已记录。
 
 本目录记录仓库每次修改的意图、计划、实际结果和验证证据。报告是带日期的实现快照，不替代长期有效的 [架构规格](../architecture/index.md)。
@@ -23,6 +49,8 @@
 - **撤销**：决定不实施，必须说明原因和是否存在残留。
 
 ## 当前报告
+
+- [2026-09-24 本机新 Named Tunnel 公网准备](2026-09-24-new-local-named-tunnel.md)：实施中；本机准备与 Cloudflare 交接清单。
 
 - [手机聊天阅读与输入空间](2026-09-13-mobile-chat.md)：2026-09-14已联合部署；老板/员工共用移动端布局，双公网新资源验证通过。
 

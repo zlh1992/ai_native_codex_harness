@@ -14,7 +14,7 @@ import { localModelUrl } from '../src/private-projects.mjs';
 
 export function fixture(t, env = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-local-test-'));
-  const config = loadConfig({ DATA_DIR: root, LOCAL_DEEPSEEK_ENABLED: 'true', LOCAL_DEEPSEEK_TIMEOUT_MS: '15000', ...env });
+  const config = loadConfig({ DATA_DIR: root, LOCAL_QWEN_ENABLED: 'true', LOCAL_QWEN_TIMEOUT_MS: '15000', ...env });
   const db = new HarnessDatabase(config), workspace = new WorkspaceService(config);
   const memory = new UserMemoryService({ config, db });
   memory.index.search = async () => ({ results: [] }); memory.index.index = async () => ({});
@@ -32,18 +32,18 @@ export function fixture(t, env = {}) {
 async function model(t, reply) {
   const requests = [];
   const server = http.createServer(async (req, res) => {
-    if (req.url === '/v1/models') { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ data: [{ id: 'test-deepseek' }] })); return; }
+    if (req.url === '/v1/models') { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ data: [{ id: 'test-qwen' }] })); return; }
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString()); requests.push(body);
     const choice = await reply(body, requests.length);
     res.writeHead(200, { 'content-type': 'text/event-stream' });
-    const packet = (delta, finish_reason = null) => res.write(`data: ${JSON.stringify({ id: 'synthetic', object: 'chat.completion.chunk', created: 1, model: 'test-deepseek', choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
+    const packet = (delta, finish_reason = null) => res.write(`data: ${JSON.stringify({ id: 'synthetic', object: 'chat.completion.chunk', created: 1, model: 'test-qwen', choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
     packet({ role: 'assistant', ...choice.delta }); packet({}, choice.finish || 'stop');
     res.write(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120, prompt_tokens_details: { cached_tokens: 25 } } })}\n\n`); res.end('data: [DONE]\n\n');
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
-  return { requests, env: { LOCAL_DEEPSEEK_BASE_URL: `http://127.0.0.1:${server.address().port}/v1`, LOCAL_DEEPSEEK_MODEL: 'test-deepseek' } };
+  return { requests, env: { LOCAL_QWEN_BASE_URL: `http://127.0.0.1:${server.address().port}/v1`, LOCAL_QWEN_MODEL: 'test-qwen' } };
 }
 
 async function until(check) { for (let n = 0; n < 500; n++) { if (check()) return; await delay(20); } throw new Error('local test condition timed out'); }
@@ -59,7 +59,7 @@ test('private migration, ownership and immutable engine boundaries', (t) => {
   assert.throws(() => db.grantProjectAccess({ projectId: project.id, userId: employee.id }), /隐私项目/);
   assert.equal(db.getProjectForUser(project.id, employee.id), null);
   const reopened = new HarnessDatabase(config); reopened.close();
-  assert.throws(() => localModelUrl('https://api.deepseek.com/v1'), /回环/);
+  assert.throws(() => localModelUrl('https://api.qwen.com/v1'), /回环/);
   assert.throws(() => localModelUrl('http://localhost:8000/v1'), /回环/);
 });
 
@@ -105,7 +105,7 @@ test('real sandboxed DSH core streams, calls Portal tools, persists and resumes 
   await service.runTurn({ chat: saved, project, user, prompt: 'Continue the same local conversation', mode: 'edit' });
   assert.equal(db.getChat(chat.id).localSessionId, saved.localSessionId);
   assert.match(JSON.stringify(mock.requests.at(-1).messages), /Create a synthetic test file/);
-  const usage = db.tokenUsage.dashboard().totals.deepseek;
+  const usage = db.tokenUsage.dashboard().totals.qwen;
   assert.equal(usage.calls, mock.requests.length);
   assert.equal(usage.totalTokens, mock.requests.length * 120);
   assert.equal(usage.cachedInputTokens, mock.requests.length * 25);
@@ -209,7 +209,7 @@ test('failed local session resume retains mapping; explicit reset persists engin
   await assert.rejects(service.recoverChatThread({ chat: db.getChat(chat.id), project, user, action: 'reset' }), /明确确认/);
   const reset = await service.recoverChatThread({ chat: db.getChat(chat.id), project, user, action: 'reset', acknowledgeHistoryBreak: true });
   assert.notEqual(reset.localSessionId, old.localSessionId);
-  assert.equal(db.listChatThreadRecoveries(chat.id)[0].engine, 'deepseek');
+  assert.equal(db.listChatThreadRecoveries(chat.id)[0].engine, 'qwen');
   await service.runTurn({ chat: reset, project, user, prompt: 'fresh session', mode: 'edit' });
   assert.doesNotMatch(JSON.stringify(mock.requests.at(-1).messages), /must not silently reset/);
 });

@@ -14,6 +14,7 @@
 - **PRD-008**：若 owner chat 曾引用可用的跨项目记忆，`files_and_history` 分享必须显式确认并绑定接收者、chat/引用快照；快照变化、重复使用或超时必须拒绝。若引用已因删除或来源撤权而失效，必须先显式重置 chat，不能继续分享其历史。
 
 - **PRD-009**：project_type 创建后不可变。local_private 只由活动老板本人创建、访问；禁止员工授权、分享、工作图/task/规划审核及 Codex thread 绑定。不得转换旧项目或隐式回退 Codex。完整契约见 [本地隐私项目](10-local-private-projects.md)。
+- **PRD-010**：老板微信 `weichat-project` 是固定消息归属和只读项目入口。只有该项目内存在 active 微信 binding 的老板 chat 可列出、读取和搜索当前老板本人拥有的 standard 项目；员工自有项目、仅 shared access、local_private、本机未纳管目录以及跨项目写入/命令必须拒绝。
 
 ## 运行平台约束
 
@@ -21,7 +22,7 @@
 - **RUN-002**：Portal 必须只监听 `127.0.0.1`、`localhost` 或 `::1`；公网访问必须经过 HTTPS 隧道。
 - **RUN-003**：Codex app-server 必须通过后端 stdio JSON-RPC 使用，不得把原始 RPC 或非回环 app-server WebSocket 暴露给浏览器。
 - **RUN-004**：默认启动成功要求 HTTP、Codex initialize 和 Portal skill 同时 ready。显式启用本地引擎时，HTTP + 本地 ready 可提供隐私项目的部分能力，不等于普通 Codex ready；health 必须分开报告两个引擎。模型目录健康不是推理验收。
-- **RUN-005**：正式服务与隧道由独立 launchd job 管理，PID 文件只能引用经过命令标记校验的本项目进程。
+- **RUN-005**：服务与隧道默认由独立 launchd job 管理；Documents 后台权限受限时可显式设置 HARNESS_PROCESS_MODE=detached，统一脚本记录并复验 PID、启动时间与完整命令后管理后台进程。detached 不承诺开机自启或崩溃自动拉起。PID 文件只能引用经过身份校验的本项目进程。
 - **RUN-006**：Portal 启动的 Codex app-server 必须关闭 `memories` feature，并固定 `memories.generate_memories=false` 与 `memories.use_memories=false`；相同配置必须覆盖 start/resume/fork 与子代理，且 `config/read` 生效值验证通过后才可 ready。浏览器、项目配置和运营开关不得重新开启原生记忆。
 
 ## 协议约束

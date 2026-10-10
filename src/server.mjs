@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { ROOT_MODELS, validateModel, validateEffort, defaultEffort, rootEffort } from './models.mjs';
+import { ROOT_MODELS, validateModel, validateEffort, defaultEffort, rootEffort, rootModel } from './models.mjs';
+import { formatWechatModelCatalog, parseWechatCommand, resolveWechatModel } from './wechat-channel-commands.mjs';
 import { DEFAULT_SESSION_COOKIE, validSessionSelector, selectedCookieName, requestSessionCookieName } from './session-selection.mjs';
 import { requestIngress, validateRequestOrigin } from './public-ingress.mjs';
 import { pageRoute } from './page-routes.mjs';
@@ -8,7 +9,7 @@ import { createStaticAssets } from './static-assets.mjs';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { digestToken, hashPassword, newCsrfToken, newSessionToken, parseCookies, safeEqual, verifyPassword } from './auth.mjs';
 import { loadConfig } from './config.mjs';
@@ -103,6 +104,7 @@ const workflowScheduler = new WorkflowScheduler({ store: graphStore, handlers: {
 const workGraphRoutes = createWorkGraphRoutes({ db, store: graphStore, graphs, reviews, runtime: graphRuntime,
   scheduler: workflowScheduler, shares, codex, config, requireMutation, refreshSession, projectFor, requireAdmin, audit });
 const loginAttempts = new Map();
+const WECHAT_CHANNEL = 'wechat';
 
 function log(level, message, detail) {
   const record = { time: new Date().toISOString(), level, message, ...(detail ? { detail } : {}) };
@@ -295,7 +297,130 @@ async function route(req, res) {
     const codexStatus = codex.status();
     const codexState = codexStatus.ready ? 'ready' : codexStatus.lastError ? 'failed' : 'starting';
     sendJson(res, 200, { ok: true, codex: codexStatus.ready, codexState, initialized: db.countAdmins() > 0,
-      memory: memory.status(), localDeepSeek: codex.local.status() }, config);
+      memory: memory.status(), localQwen: codex.local.status() }, config);
+    return;
+  }
+  if (req.method === 'POST' && pathname === '/api/internal/channels/wechat/events') {
+    invariant(config.wechatChannelEnabled, 404, 'CHANNEL_NOT_FOUND', '微信渠道未启用。');
+    const remote = req.socket.remoteAddress || '';
+    invariant(['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remote), 403, 'CHANNEL_LOOPBACK_REQUIRED', '微信渠道只允许本机回环调用。');
+    const timestamp = String(req.headers['x-wechat-timestamp'] || '');
+    const nonce = String(req.headers['x-wechat-nonce'] || '');
+    const signature = String(req.headers['x-wechat-signature'] || '');
+    invariant(/^\d{10,13}$/.test(timestamp) && nonce.length >= 16 && nonce.length <= 128 && /^[a-f0-9]{64}$/i.test(signature),
+      401, 'CHANNEL_AUTH_INVALID', '微信渠道认证信息无效。');
+    const timestampMs = Number(timestamp.length === 10 ? `${timestamp}000` : timestamp);
+    invariant(Math.abs(Date.now() - timestampMs) <= 60_000, 401, 'CHANNEL_AUTH_EXPIRED', '微信渠道请求已过期。');
+    let secret;
+    try { secret = fs.readFileSync(config.wechatChannelSecretFile); } catch { throw new HttpError(503, 'CHANNEL_SECRET_UNAVAILABLE', '微信渠道密钥不可用。'); }
+    invariant(secret.length >= 32, 503, 'CHANNEL_SECRET_UNAVAILABLE', '微信渠道密钥配置无效。');
+    const raw = await readBody(req, 256 * 1024);
+    const expected = createHmac('sha256', secret).update(`${timestamp}.${nonce}.`).update(raw).digest('hex');
+    invariant(safeEqual(expected, signature.toLowerCase()), 401, 'CHANNEL_AUTH_INVALID', '微信渠道签名无效。');
+    let body;
+    try { body = raw.length ? JSON.parse(raw.toString('utf8')) : {}; } catch { throw new HttpError(400, 'INVALID_JSON', '请求 JSON 无效。'); }
+    const eventId = String(body.eventId || '').trim();
+    const externalScopeId = String(body.scopeId || '').trim();
+    const senderId = String(body.senderId || '').trim();
+    const text = String(body.text || '').trim();
+    invariant(/^[\w.:-]{1,180}$/u.test(eventId), 400, 'CHANNEL_EVENT_INVALID', '微信事件 ID 无效。');
+    invariant(externalScopeId.length >= 1 && externalScopeId.length <= 240, 400, 'CHANNEL_EVENT_INVALID', '微信会话标识无效。');
+    invariant(!body.chatType || body.chatType === 'dm', 403, 'CHANNEL_GROUP_DISABLED', '微信渠道不接受群聊。');
+    invariant(!config.wechatChannelSenderId || senderId === config.wechatChannelSenderId,
+      403, 'CHANNEL_SENDER_FORBIDDEN', '微信发送者未绑定。');
+    invariant(text.length >= 1 && text.length <= 100_000, 400, 'CHANNEL_EVENT_INVALID', '微信消息内容无效。');
+    const existing = db.getChannelEvent(WECHAT_CHANNEL, eventId);
+    if (existing) {
+      if (existing.status === 'completed' || existing.status === 'failed') {
+        sendJson(res, 200, { ok: existing.status === 'completed', duplicate: true, status: existing.status, text: existing.responseText || '该消息已处理。' }, config);
+        return;
+      }
+      throw new HttpError(409, 'CHANNEL_EVENT_PROCESSING', '该微信消息正在处理。');
+    }
+    const adminRow = db.db.prepare("SELECT id FROM users WHERE role='admin' AND status='active' ORDER BY created_at LIMIT 1").get();
+    invariant(adminRow?.id, 503, 'CHANNEL_OWNER_UNAVAILABLE', '老板账号不可用。');
+    const owner = db.getUserById(adminRow.id);
+    const project = db.getProjectForUser(config.wechatChannelProjectId, owner.id);
+    invariant(project && project.accessKind === 'owner' && project.userId === owner.id, 503, 'CHANNEL_PROJECT_UNAVAILABLE', '微信固定项目不存在或不属于老板。');
+    assertStandardProject(project);
+    const command = parseWechatCommand(text);
+    let binding = db.getChannelBinding(WECHAT_CHANNEL, externalScopeId);
+    invariant(!binding || binding.status === 'active', 409, 'CHANNEL_BINDING_REVOKED', '微信会话绑定已撤销，请重新扫码绑定。');
+    if (binding && (binding.userId !== owner.id || binding.projectId !== project.id)) {
+      throw new HttpError(409, 'CHANNEL_BINDING_CHANGED', '微信会话绑定已变化。');
+    }
+    let bindingCreated = false;
+    if (!binding) {
+      const chat = db.createChat({
+        projectId: project.id, userId: owner.id, projectAccessId: project.accessId, treePath: project.treePath,
+        title: `微信对话 ${createHmac('sha256', secret).update(externalScopeId).digest('hex').slice(0, 10)}`,
+        preferredMode: 'execute',
+      });
+      binding = db.createChannelBinding({ channel: WECHAT_CHANNEL, externalScopeId, userId: owner.id, projectId: project.id, chatId: chat.id });
+      if (binding.chatId !== chat.id) db.deleteChat(chat.id);
+      bindingCreated = true;
+    }
+    if (command?.type === 'new' && !bindingCreated) {
+      const currentChat = db.getChat(binding.chatId);
+      invariant(currentChat, 503, 'CHANNEL_CHAT_UNAVAILABLE', '微信固定对话不存在。');
+      invariant(!codex.chatBusy(currentChat.id) && !db.listChatInputs(currentChat.id).length,
+        409, 'CHAT_RUNNING', '当前微信对话仍在运行，请稍后再发送 /new。');
+      db.db.exec('BEGIN IMMEDIATE');
+      try {
+        const lockedBinding = db.getChannelBinding(WECHAT_CHANNEL, externalScopeId);
+        invariant(lockedBinding?.chatId === binding.chatId && lockedBinding.status === 'active',
+          409, 'CHANNEL_BINDING_CHANGED', '微信会话绑定已变化。');
+        const freshChat = db.createChat({
+          projectId: project.id, userId: owner.id, projectAccessId: project.accessId, treePath: project.treePath,
+          title: `微信对话 ${createHmac('sha256', secret).update(`${externalScopeId}:${Date.now()}`).digest('hex').slice(0, 10)}`,
+          preferredMode: 'execute',
+        });
+        binding = db.rebindChannelBindingChat({ channel: WECHAT_CHANNEL, externalScopeId,
+          expectedChatId: binding.chatId, chatId: freshChat.id });
+        db.db.exec('COMMIT');
+      } catch (error) {
+        try { db.db.exec('ROLLBACK'); } catch {}
+        throw error;
+      }
+    }
+    const event = db.createChannelEvent({ channel: WECHAT_CHANNEL, externalEventId: eventId, externalScopeId, chatId: binding.chatId });
+    if (!event.created) {
+      if (event.status === 'processing') throw new HttpError(409, 'CHANNEL_EVENT_PROCESSING', '该微信消息正在处理。');
+      sendJson(res, 200, { ok: event.status === 'completed', duplicate: true, status: event.status,
+        text: event.responseText || '该消息已处理。' }, config);
+      return;
+    }
+    const chat = db.getChat(binding.chatId);
+    invariant(chat, 503, 'CHANNEL_CHAT_UNAVAILABLE', '微信固定对话不存在。');
+    let responseText = '';
+    try {
+      if (command?.type === 'new') {
+        responseText = '已开启新对话。后续消息将进入新的 Portal 对话，旧对话历史已保留。';
+      } else if (command?.type === 'models') {
+        responseText = formatWechatModelCatalog({ config, chat, user: owner });
+      } else if (command?.type === 'model') {
+        invariant(!codex.chatBusy(chat.id) && !db.listChatInputs(chat.id).length,
+          409, 'CHAT_RUNNING', '当前微信对话仍在运行，请稍后再切换模型。');
+        const preferredModel = resolveWechatModel(command.value);
+        db.updateChat(chat.id, { preferredModel });
+        const updatedChat = db.getChat(chat.id);
+        responseText = preferredModel
+          ? `已将当前微信对话切换到 ${preferredModel}。`
+          : `已恢复当前微信对话的默认模型（${rootModel(config, updatedChat, owner)}）。`;
+      } else {
+        const result = await codex.runTurn({ chat, project, user: owner, prompt: text, effort: chat.preferredEffort || undefined, mode: 'execute', emit: () => {} });
+        responseText = String(result?.text || '').trim() || '任务已完成，但没有可发送的文字结果。';
+      }
+      db.completeChannelEvent(WECHAT_CHANNEL, event.externalEventId, { responseText });
+      db.audit({ actorUserId: owner.id, action: command ? 'channel.wechat.command' : 'channel.wechat.turn', targetType: 'chat', targetId: chat.id,
+        detail: { projectId: project.id, eventId, ...(command ? { command: command.type } : {}), externalScopeIdHash: createHmac('sha256', secret).update(externalScopeId).digest('hex').slice(0, 16) } });
+      sendJson(res, 200, { ok: true, status: 'completed', text: responseText }, config);
+    } catch (error) {
+      const code = error.code || 'CHANNEL_TURN_FAILED';
+      responseText = '任务未完成，请稍后重试或打开老板工作台查看详情。';
+      db.completeChannelEvent(WECHAT_CHANNEL, event.externalEventId, { status: 'failed', responseText, errorCode: code });
+      sendJson(res, 200, { ok: false, status: 'failed', code, text: responseText }, config);
+    }
     return;
   }
   if (req.method === 'POST' && ['/api/login', '/api/boss/login', '/api/employee/login'].includes(pathname)) {
@@ -1109,7 +1234,7 @@ async function route(req, res) {
     return;
   }
   if (req.method === 'GET' && pathname === '/api/admin/token-usage') {
-    sendJson(res, 200, { ...db.tokenUsage.dashboard(Object.fromEntries(url.searchParams)), localDeepSeek: codex.local.status() }, config);
+    sendJson(res, 200, { ...db.tokenUsage.dashboard(Object.fromEntries(url.searchParams)), localQwen: codex.local.status() }, config);
     return;
   }
   if (req.method === 'GET' && pathname === '/api/admin/dashboard') {

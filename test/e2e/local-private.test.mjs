@@ -33,8 +33,8 @@ test('private project HTTP ACL, scoped memory, manual approval and queue work wi
     MEMORY_INDEX_ROOT: path.join(root, 'index'), MEMORY_PYTHON: path.join(root, 'missing-python'),
     PUBLIC_ORIGIN: '', PUBLIC_ORIGINS: '', BOSS_PUBLIC_ORIGIN: '', EMPLOYEE_PUBLIC_ORIGIN: '', TRUST_PROXY: 'false', COOKIE_SECURE: 'false', TRUST_PROXY_PROVIDER: 'generic',
     ADMIN_USERNAME: 'privateboss', ADMIN_PASSWORD: 'SyntheticBossPassword123!', CODEX_BIN: '/usr/bin/false',
-    LOCAL_DEEPSEEK_ENABLED: 'true', LOCAL_DEEPSEEK_BASE_URL: `http://127.0.0.1:${model.address().port}/v1`, LOCAL_DEEPSEEK_MODEL: 'synthetic-local',
-    LOCAL_DEEPSEEK_TIMEOUT_MS: '20000', WORK_GRAPH_ENABLED: 'true', WORK_GRAPH_DISPATCH_ENABLED: 'false',
+    LOCAL_QWEN_ENABLED: 'true', LOCAL_QWEN_BASE_URL: `http://127.0.0.1:${model.address().port}/v1`, LOCAL_QWEN_MODEL: 'synthetic-local',
+    LOCAL_QWEN_TIMEOUT_MS: '20000', WORK_GRAPH_ENABLED: 'true', WORK_GRAPH_DISPATCH_ENABLED: 'false',
   }, stdio: ['ignore', 'pipe', 'pipe'] });
   let logs = ''; child.stdout.on('data', b => logs += b); child.stderr.on('data', b => logs += b);
   t.after(async () => {
@@ -47,8 +47,8 @@ test('private project HTTP ACL, scoped memory, manual approval and queue work wi
   };
   const json = async (...args) => (await request(...args)).json();
   const until = async check => { for (let n = 0; n < 500; n++) { if (await check()) return; await delay(20); } throw new Error(`Private HTTP timeout ${logs}`); };
-  await until(async () => { try { const h = await (await fetch(origin + '/api/health')).json(); return h.localDeepSeek?.state === 'ready'; } catch { return false; } });
-  const health = await json(null, '/api/health'); assert.equal(health.codex, false); assert.equal(health.localDeepSeek.state, 'ready');
+  await until(async () => { try { const h = await (await fetch(origin + '/api/health')).json(); return h.localQwen?.state === 'ready'; } catch { return false; } });
+  const health = await json(null, '/api/health'); assert.equal(health.codex, false); assert.equal(health.localQwen.state, 'ready');
   const login = async (username, password, role) => {
     const response = await request(null, `/api/${role}/login`, { username, password });
     const session = { cookie: response.headers.get('set-cookie').split(';')[0], csrf: '' };

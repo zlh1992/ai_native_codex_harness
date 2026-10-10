@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import { EventEmitter } from 'node:events';
+import os from 'node:os';
 import path from 'node:path';
 import { buildSeatbeltProfile } from './sandbox.mjs';
 
@@ -80,6 +81,8 @@ export class CodexAppServerClient extends EventEmitter {
     ]) {
       if (process.env[key] !== undefined) childEnv[key] = process.env[key];
     }
+    childEnv.HOME ||= os.homedir();
+    childEnv.CODEX_HOME ||= path.join(childEnv.HOME, '.codex');
     let binary = this.config.codexBin;
     let spawnArgs = args;
     if (this.config.searchOnly) {
@@ -91,10 +94,16 @@ export class CodexAppServerClient extends EventEmitter {
       const metadata = [];
       for (let dir = path.dirname(this.config.codexBin); ; dir = path.dirname(dir)) { metadata.push(dir); if (dir === path.dirname(dir)) break; }
       for (let dir = this.config.rootDir; ; dir = path.dirname(dir)) { metadata.push(dir); if (dir === path.dirname(dir)) break; }
+      const nodeRuntimeDir = path.dirname(process.execPath);
+      const scriptFixture = /\.(?:c|m)?js$/u.test(this.config.codexBin);
+      if (scriptFixture) {
+        for (let dir = nodeRuntimeDir; ; dir = path.dirname(dir)) { metadata.push(dir); if (dir === path.dirname(dir)) break; }
+      }
       const profile = buildSeatbeltProfile({ writableRoots: [this.config.rootDir],
-        readableRoots: [path.dirname(this.config.codexBin)], readableMetadataPaths: metadata, networkAccess: true });
+        readableRoots: [path.dirname(this.config.codexBin), ...(scriptFixture ? [nodeRuntimeDir] : [])],
+        readableMetadataPaths: metadata, networkAccess: true });
       binary = '/usr/bin/sandbox-exec';
-      spawnArgs = ['-p', profile, this.config.codexBin, ...args];
+      spawnArgs = ['-p', profile, ...(scriptFixture ? [process.execPath, this.config.codexBin] : [this.config.codexBin]), ...args];
     }
     this.process = spawn(binary, spawnArgs, {
       cwd: this.config.rootDir,

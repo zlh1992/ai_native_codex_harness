@@ -3,6 +3,41 @@ import mammoth from 'mammoth';
 import JSZip from 'jszip';
 
 console.log = console.warn = console.error = () => {};
+
+// pdfjs-dist imports its canvas backend even when the worker only extracts the
+// text layer. The optional native canvas package is not available in every
+// supported Node installation, so provide the small matrix/path surface that
+// keeps the text-only code path loadable. Rendering is never requested here.
+if (!globalThis.DOMMatrix) {
+  globalThis.DOMMatrix = class DOMMatrix {
+    constructor(value) {
+      const source = Array.isArray(value) || ArrayBuffer.isView(value) ? [...value]
+        : value && typeof value === 'object' ? [value.a, value.b, value.c, value.d, value.e, value.f] : [];
+      [this.a, this.b, this.c, this.d, this.e, this.f] = source.length >= 6 ? source : [1, 0, 0, 1, 0, 0];
+    }
+    multiplySelf(other) {
+      const [a, b, c, d, e, f] = [this.a, this.b, this.c, this.d, this.e, this.f];
+      this.a = a * other.a + c * other.b; this.b = b * other.a + d * other.b;
+      this.c = a * other.c + c * other.d; this.d = b * other.c + d * other.d;
+      this.e = a * other.e + c * other.f + e; this.f = b * other.e + d * other.f + f;
+      return this;
+    }
+    preMultiplySelf(other) { return new DOMMatrix(other).multiplySelf(this).copyTo(this); }
+    copyTo(target) { Object.assign(target, this); return target; }
+    invertSelf() {
+      const det = this.a * this.d - this.b * this.c;
+      if (!det) { this.a = this.d = NaN; this.b = this.c = this.e = this.f = NaN; return this; }
+      const { a, b, c, d, e, f } = this;
+      this.a = d / det; this.b = -b / det; this.c = -c / det; this.d = a / det;
+      this.e = (c * f - d * e) / det; this.f = (b * e - a * f) / det;
+      return this;
+    }
+    translate(x = 0, y = 0) { return this.multiplySelf(new DOMMatrix([1, 0, 0, 1, x, y])); }
+    scale(x = 1, y = x) { return this.multiplySelf(new DOMMatrix([x, 0, 0, y, 0, 0])); }
+  };
+}
+globalThis.ImageData ||= class ImageData {};
+globalThis.Path2D ||= class Path2D { addPath() {} };
 const chunks = [];
 let size = 0;
 for await (const chunk of process.stdin) {

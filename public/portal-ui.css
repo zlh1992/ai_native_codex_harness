@@ -22,8 +22,8 @@ body[data-auth="checking"] #app-view,body[data-auth="error"] #app-view,body[data
 .turn-controls select{font-size:12px;max-width:100%}
 .project-list,.chat-list{align-content:start}
 .project-item,.chat-item{align-content:start}
-.task-flow-notice{grid-column:1/-1;flex-basis:100%;padding:10px 12px;border:1px solid var(--board-line);border-radius:10px;background:var(--board-panel);font-size:13px;line-height:1.5}
-.task-flow-notice[hidden]{display:none}.task-flow-notice p{margin:0 0 8px}.task-flow-notice>div{display:flex;flex-wrap:wrap;gap:8px}.task-flow-notice button{padding:6px 10px;font-size:12px}
+.task-flow-notice{grid-column:1/-1;flex-basis:100%;padding:0 12px;border:1px solid var(--board-line);border-radius:10px;background:var(--board-panel);font-size:13px;line-height:1.5}
+.task-flow-notice[hidden]{display:none}.task-flow-disclosure{min-height:38px}.task-flow-disclosure>summary{cursor:pointer;display:flex;align-items:center;gap:10px;min-height:38px;list-style:none;color:var(--board-text);font-size:12px;font-weight:700}.task-flow-disclosure>summary::-webkit-details-marker{display:none}.task-flow-disclosure>summary::before{content:'›';color:#d9ff54;font-size:18px;line-height:1;transform:rotate(0);transition:transform .15s ease}.task-flow-disclosure[open]>summary::before{transform:rotate(90deg)}.task-flow-disclosure>summary small{margin-left:auto;color:#d9ff54;font-size:10px;font-weight:400}.task-flow-disclosure[open]>summary small{font-size:0}.task-flow-disclosure[open]>summary small::after{content:'点击收起';font-size:10px}.task-flow-content{padding:4px 0 10px}.task-flow-content p{margin:0 0 8px}.task-flow-content>div{display:flex;flex-wrap:wrap;gap:8px}.task-flow-content button{padding:6px 10px;font-size:12px}
 @media(max-width:820px){.employee-home{padding:18px 14px}.employee-hero{display:block}.employee-hero h1{font-size:25px}.capacity-card{display:none}.employee-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.kanban-column{flex-basis:min(290px,82vw);max-height:68vh}.topbar{flex-wrap:wrap;height:auto;padding:10px;gap:6px}.topbar nav{order:3;flex-basis:100%;overflow-x:auto;min-height:42px}.topbar .nav-button{padding:0 13px}.topbar .brand-button{font-size:10px}.topbar .topbar-right{margin-left:auto}.app-shell{grid-template-rows:auto 1fr}.cockpit-bar{flex-wrap:wrap;gap:12px;padding:12px}.cockpit-bar nav{order:3;width:100%;overflow-x:auto}.cockpit-content .hero h1{font-size:25px}.board-search{flex:1}.board-search input{width:100%;min-width:0}.graph-toolbar{align-items:stretch;flex-direction:column}.graph-view-actions{gap:6px}.graph-project-row>span{display:none}}
 @media(prefers-reduced-motion:reduce){.kanban-card{transition:none}}
 /* Shared boss/employee mobile chat: keep reading space independent of tool activity. */
@@ -55,6 +55,7 @@ body[data-auth="checking"] #app-view,body[data-auth="error"] #app-view,body[data
   .chat-stage .send-button{width:48px;height:48px;font-size:24px;align-self:end;touch-action:manipulation}
   .chat-stage .composer-foot{font-size:11px;line-height:1.5;overflow-wrap:anywhere}
   .chat-stage .composer-foot>span:last-child{display:none}
+  .turn-insights{max-height:180px;overflow:auto}
   .chat-stage .input-queue,.chat-stage .task-flow-notice{max-height:160px;overflow:auto}
 }
 .task-graph-choice{display:flex;flex:1 1 360px;flex-direction:column;gap:6px;min-width:0;max-width:100%;font-size:14px}.task-graph-choice select{width:100%;min-width:0;max-width:100%;min-height:44px;font:inherit;padding:10px}

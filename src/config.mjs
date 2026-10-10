@@ -2,9 +2,11 @@ import path from 'node:path';
 import { publicIngressConfig } from './public-ingress.mjs';
 import { localModelUrl } from './private-projects.mjs';
 import { fileURLToPath } from 'node:url';
+import { invariant } from './errors.mjs';
 
 const SOURCE_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT_DIR = path.resolve(SOURCE_DIR, '..');
+export const OFFICIAL_CODEX_BASE_URL = 'https://chatgpt.com/backend-api/codex';
 
 function bool(value, fallback = false) {
   if (value === undefined || value === '') return fallback;
@@ -25,14 +27,21 @@ export function loadConfig(env = process.env) {
   const dataDir = resolved(env.DATA_DIR, '.data');
   const codexMaxConcurrentTurns = Math.min(40, integer(env.CODEX_MAX_CONCURRENT_TURNS, 40, 1));
   const portalMaxActiveRootTurns = Math.min(11, integer(env.PORTAL_MAX_ACTIVE_ROOT_TURNS, 11, 1));
+  const codexModelProvider = String(env.CODEX_MODEL_PROVIDER || 'openai_http').trim();
+  const chatgptCodexBaseUrl = String(env.CHATGPT_CODEX_BASE_URL || OFFICIAL_CODEX_BASE_URL).replace(/\/+$/u, '');
+  invariant(codexModelProvider === 'openai_http', 500, 'CODEX_PROVIDER_NOT_ALLOWED',
+    '普通项目和微信渠道必须使用本机 ChatGPT 官方 provider（openai_http）。');
+  invariant(chatgptCodexBaseUrl === OFFICIAL_CODEX_BASE_URL, 500, 'CODEX_BASE_URL_NOT_ALLOWED',
+    '普通项目和微信渠道必须使用 ChatGPT 官方 Codex 地址。');
   return Object.freeze({
     rootDir: ROOT_DIR,
-    localDeepSeekEnabled: bool(env.LOCAL_DEEPSEEK_ENABLED, false),
-    localDeepSeekBaseUrl: localModelUrl(env.LOCAL_DEEPSEEK_BASE_URL),
-    localDeepSeekModel: String(env.LOCAL_DEEPSEEK_MODEL || 'deepseek-v4-flash'),
-    localDeepSeekContextWindow: integer(env.LOCAL_DEEPSEEK_CONTEXT_WINDOW, 100000, 4096),
-    localDeepSeekMaxTokens: integer(env.LOCAL_DEEPSEEK_MAX_TOKENS, 8192, 256),
-    localDeepSeekTimeoutMs: integer(env.LOCAL_DEEPSEEK_TIMEOUT_MS, 20 * 60 * 1000, 1000),
+    localQwenEnabled: bool(env.LOCAL_QWEN_ENABLED, false),
+    localQwenBaseUrl: localModelUrl(env.LOCAL_QWEN_BASE_URL),
+    // The adapter accepts the configured local OpenAI-compatible Qwen model.
+    localQwenModel: String(env.LOCAL_QWEN_MODEL || 'Qwen3.8-Flash-Next-oQ5e-mtp'),
+    localQwenContextWindow: integer(env.LOCAL_QWEN_CONTEXT_WINDOW, 262144, 4096),
+    localQwenMaxTokens: integer(env.LOCAL_QWEN_MAX_TOKENS, 8192, 256),
+    localQwenTimeoutMs: integer(env.LOCAL_QWEN_TIMEOUT_MS, 20 * 60 * 1000, 1000),
     localSearchTimeoutMs: integer(env.LOCAL_SEARCH_TIMEOUT_MS, 120000, 1000),
     localSessionsRoot: path.join(dataDir, 'local-sessions'),
     publicDir: path.join(ROOT_DIR, 'public'),
@@ -66,8 +75,8 @@ export function loadConfig(env = process.env) {
     codexBin: env.CODEX_BIN || '/Applications/ChatGPT.app/Contents/Resources/codex',
     codexCliVersion: '0.150.0-alpha.8',
     codexModel: env.CODEX_MODEL || 'gpt-5.6-sol',
-    codexModelProvider: env.CODEX_MODEL_PROVIDER || 'openai_http',
-    chatgptCodexBaseUrl: env.CHATGPT_CODEX_BASE_URL || 'https://chatgpt.com/backend-api/codex',
+    codexModelProvider,
+    chatgptCodexBaseUrl,
     codexReasoningEffort: env.CODEX_REASONING_EFFORT || 'high',
     codexRequestTimeoutMs: integer(env.CODEX_REQUEST_TIMEOUT_MS, 20 * 60 * 1000, 10_000),
     codexMaxConcurrentTurns,
@@ -85,6 +94,10 @@ export function loadConfig(env = process.env) {
     commandMaxOutputBytes: integer(env.COMMAND_MAX_OUTPUT_BYTES, 1024 * 1024, 1024),
     fileMaxBytes: integer(env.FILE_MAX_BYTES, 10 * 1024 * 1024, 1024),
     uploadMaxBytes: integer(env.UPLOAD_MAX_BYTES, 50 * 1024 * 1024, 1024),
+    wechatChannelEnabled: bool(env.WECHAT_CHANNEL_ENABLED, false),
+    wechatChannelProjectId: String(env.WECHAT_CHANNEL_PROJECT_ID || '').trim(),
+    wechatChannelSenderId: String(env.WECHAT_CHANNEL_SENDER_ID || '').trim(),
+    wechatChannelSecretFile: resolved(env.WECHAT_CHANNEL_SECRET_FILE, path.join(dataDir, 'wechat-channel.secret')),
     adminUsername: String(env.ADMIN_USERNAME || ''),
     adminPassword: String(env.ADMIN_PASSWORD || ''),
   });

@@ -9,7 +9,7 @@ export function normalizeUsage(value, engine = 'gpt') {
   if (!value || !valid(value.inputTokens) || !valid(value.outputTokens)) return null;
   const cached = value.cachedInputTokens ?? value.cacheReadTokens ?? 0;
   const written = value.cacheWriteInputTokens ?? value.cacheWriteTokens ?? 0;
-  const input = value.inputTokens + (engine === 'deepseek' ? cached + written : 0);
+  const input = value.inputTokens + (engine === 'qwen' ? cached + written : 0);
   const result = { inputTokens: input, outputTokens: value.outputTokens, cachedInputTokens: cached,
     cacheWriteInputTokens: written, reasoningOutputTokens: value.reasoningOutputTokens ?? 0,
     totalTokens: engine === 'gpt' ? value.totalTokens ?? input + value.outputTokens : input + value.outputTokens };
@@ -35,6 +35,8 @@ export class TokenUsageLedger {
       CREATE TABLE IF NOT EXISTS token_usage_streams(id TEXT PRIMARY KEY,counts_json TEXT);
       CREATE TABLE IF NOT EXISTS token_usage_samples(stream_id TEXT NOT NULL,turn_id TEXT NOT NULL,counts_json TEXT NOT NULL,
         PRIMARY KEY(stream_id,turn_id,counts_json));`);
+    // Rename rows written by pre-Qwen builds without losing historical usage.
+    sql.prepare("UPDATE token_usage_calls SET engine='qwen' WHERE engine='deepseek'").run();
     sql.prepare('INSERT OR IGNORE INTO token_usage_meta VALUES(?,?)').run('started_at', stamp());
   }
   recover() { this.sql.prepare('UPDATE token_usage_calls SET uncertain=1,finished=1 WHERE finished=0').run(); }
@@ -56,7 +58,7 @@ export class TokenUsageLedger {
     this.sql.prepare('UPDATE token_usage_calls SET finished=1,uncertain=MAX(uncertain,?),updated_at=? WHERE id=?').run(Number(uncertain), stamp(), id);
   }
   // The adapter returns a replacement cumulative sample for one model request.
-  sample(id, usage, engine = 'deepseek') {
+  sample(id, usage, engine = 'qwen') {
     const counts = normalizeUsage(usage, engine);
     if (!counts) return;
     this.sql.prepare('UPDATE token_usage_calls SET counts_json=?,reported=1,updated_at=? WHERE id=?').run(JSON.stringify(counts), stamp(), id);
@@ -100,7 +102,7 @@ export class TokenUsageLedger {
     for (const value of [start, end]) invariant(/^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().startsWith(value), 400, 'INVALID_USAGE_RANGE', '日期必须为有效的 YYYY-MM-DD。');
     const from = new Date(start + 'T00:00:00+08:00').toISOString(), until = new Date(Date.parse(end + 'T00:00:00+08:00') + 86400000).toISOString();
     invariant(from < until && Date.parse(until) - Date.parse(from) <= 366 * 86400000, 400, 'INVALID_USAGE_RANGE', '查询范围须为 1–366 天。');
-    invariant(!query.engine || ['gpt', 'deepseek'].includes(query.engine), 400, 'INVALID_USAGE_ENGINE', '引擎筛选无效。');
+    invariant(!query.engine || ['gpt', 'qwen'].includes(query.engine), 400, 'INVALID_USAGE_ENGINE', '引擎筛选无效。');
     const clauses = ['created_at>=?', 'created_at<?'], args = [from, until];
     for (const [key, column] of [['userId','user_id'], ['engine','engine'], ['model','model']]) if (query[key]) {
       invariant(typeof query[key] === 'string' && query[key].length <= 150, 400, 'INVALID_USAGE_FILTER', '筛选值无效。');
@@ -112,9 +114,9 @@ export class TokenUsageLedger {
       const counts = JSON.parse(row.counts_json); for (const key of fields) target[key] += counts[key];
       target.calls++; target.missingCalls += Number(!row.reported); target.incompleteCalls += Number(!row.reported || row.uncertain || !row.finished); target.pendingCalls += Number(!row.finished);
     };
-    const totals = { gpt: bucket(), bossGpt: bucket(), employeeGpt: bucket(), deepseek: bucket() };
+    const totals = { gpt: bucket(), bossGpt: bucket(), employeeGpt: bucket(), qwen: bucket() };
     const days = new Map(), users = new Map(), models = new Map(), kinds = new Map();
-    for (let time = Date.parse(from); time < Date.parse(until); time += 86400000) days.set(beijingDay(time), { date: beijingDay(time), gpt: bucket(), deepseek: bucket() });
+    for (let time = Date.parse(from); time < Date.parse(until); time += 86400000) days.set(beijingDay(time), { date: beijingDay(time), gpt: bucket(), qwen: bucket() });
     for (const row of rows) {
       add(totals[row.engine], row); if (row.engine === 'gpt') add(totals[row.role === 'admin' ? 'bossGpt' : 'employeeGpt'], row);
       add(days.get(beijingDay(row.created_at))[row.engine], row);

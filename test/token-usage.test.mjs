@@ -76,16 +76,16 @@ test('unknown resume/fork baselines exclude inherited history; missing and inter
 
 test('local counters use disjoint cache buckets, replacement samples, no estimated missing zeros and Beijing boundaries', t => {
   const {ledger,sql}=fixture(t);
-  assert.deepEqual(normalizeUsage({ inputTokens:100,outputTokens:20,cacheReadTokens:30,cacheWriteTokens:10 },'deepseek'),
+  assert.deepEqual(normalizeUsage({ inputTokens:100,outputTokens:20,cacheReadTokens:30,cacheWriteTokens:10 },'qwen'),
     {inputTokens:140,outputTokens:20,cachedInputTokens:30,cacheWriteInputTokens:10,reasoningOutputTokens:0,totalTokens:160});
-  const id=ledger.start({ id:'local',user:boss,engine:'deepseek',model:'local-model',kind:'compaction' });
+  const id=ledger.start({ id:'local',user:boss,engine:'qwen',model:'local-model',kind:'compaction' });
   ledger.sample(id,{inputTokens:100,outputTokens:20,cacheReadTokens:30});
   ledger.sample(id,{inputTokens:100,outputTokens:20,cacheReadTokens:30}); ledger.finish(id);
   ledger.sample(id,{inputTokens:-1,outputTokens:20});
   sql.prepare('UPDATE token_usage_calls SET created_at=? WHERE id=?').run('2026-09-21T16:00:00.000Z',id);
   assert.equal(beijingDay('2026-09-21T15:59:59Z'),'2026-09-21');
-  assert.equal(ledger.dashboard({from:'2026-09-21',to:'2026-09-21'}).totals.deepseek.totalTokens,0);
-  assert.equal(ledger.dashboard({from:'2026-09-22',to:'2026-09-22'}).totals.deepseek.totalTokens,150);
+  assert.equal(ledger.dashboard({from:'2026-09-21',to:'2026-09-21'}).totals.qwen.totalTokens,0);
+  assert.equal(ledger.dashboard({from:'2026-09-22',to:'2026-09-22'}).totals.qwen.totalTokens,150);
   assert.throws(()=>ledger.dashboard({from:'2026-02-30'}),/日期/);
   assert.throws(()=>ledger.dashboard({from:'2026-09-22',to:'2026-09-21'}),/范围/);
   assert.throws(()=>ledger.dashboard({engine:'bogus'}),/引擎/);

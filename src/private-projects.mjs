@@ -20,6 +20,9 @@ export function migratePrivateProjects(sql) {
   column('chats', 'control_mode', "TEXT NOT NULL DEFAULT 'manual' CHECK(control_mode IN ('manual','auto'))");
   column('chats', 'local_session_id', 'TEXT');
   column('chat_thread_recoveries', 'engine', "TEXT NOT NULL DEFAULT 'codex'");
+  // Existing local-private lineage rows used the old provider label. Keep the
+  // lineage intact while presenting the current local Qwen engine everywhere.
+  sql.prepare("UPDATE chat_thread_recoveries SET engine='qwen' WHERE engine='deepseek'").run();
   column('user_memories', 'scope_project_id', 'TEXT REFERENCES projects(id) ON DELETE CASCADE');
   sql.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS chats_local_session_idx ON chats(local_session_id) WHERE local_session_id IS NOT NULL;

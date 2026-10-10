@@ -226,6 +226,33 @@ export class HarnessDatabase {
       );
       CREATE INDEX IF NOT EXISTS audit_created_idx ON audit_log(created_at DESC);
       CREATE INDEX IF NOT EXISTS audit_actor_idx ON audit_log(actor_user_id);
+      CREATE TABLE IF NOT EXISTS channel_bindings (
+        id TEXT PRIMARY KEY,
+        channel TEXT NOT NULL,
+        external_scope_id TEXT NOT NULL,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+        status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','revoked')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(channel, external_scope_id)
+      );
+      CREATE INDEX IF NOT EXISTS channel_bindings_chat_idx ON channel_bindings(chat_id, status);
+      CREATE TABLE IF NOT EXISTS channel_events (
+        id TEXT PRIMARY KEY,
+        channel TEXT NOT NULL,
+        external_event_id TEXT NOT NULL,
+        external_scope_id TEXT NOT NULL,
+        chat_id TEXT REFERENCES chats(id) ON DELETE SET NULL,
+        status TEXT NOT NULL DEFAULT 'processing' CHECK(status IN ('processing','completed','failed')),
+        response_text TEXT,
+        error_code TEXT,
+        created_at TEXT NOT NULL,
+        completed_at TEXT,
+        UNIQUE(channel, external_event_id)
+      );
+      CREATE INDEX IF NOT EXISTS channel_events_scope_idx ON channel_events(channel, external_scope_id, created_at DESC);
       CREATE TABLE IF NOT EXISTS schema_migrations (
         name TEXT PRIMARY KEY,
         applied_at TEXT NOT NULL
@@ -324,6 +351,7 @@ export class HarnessDatabase {
     this.#ensureColumn('chats', 'save_memory', 'INTEGER NOT NULL DEFAULT 1');
     this.#ensureColumn('chats', 'memory_context_reset_at', 'TEXT');
     this.#ensureColumn('chats', 'preferred_mode', "TEXT NOT NULL DEFAULT 'execute' CHECK(preferred_mode IN ('edit','execute'))");
+    this.#ensureColumn('chats', 'channel_tools_version', 'INTEGER NOT NULL DEFAULT 0');
     this.#ensureColumn('project_access', 'base_sha', 'TEXT');
     this.#ensureColumn('task_submissions', 'project_access_id', 'TEXT REFERENCES project_access(id) ON DELETE SET NULL');
     this.#ensureColumn('task_submissions', 'snapshot_commit_sha', 'TEXT');
@@ -679,6 +707,74 @@ export class HarnessDatabase {
     return this.getChat(id);
   }
 
+  getChannelBinding(channel, externalScopeId) {
+    const row = this.db.prepare(`SELECT b.*, c.title AS chat_title
+      FROM channel_bindings b JOIN chats c ON c.id=b.chat_id
+      WHERE b.channel=? AND b.external_scope_id=?`).get(channel, externalScopeId);
+    return row ? {
+      id: row.id, channel: row.channel, externalScopeId: row.external_scope_id,
+      userId: row.user_id, projectId: row.project_id, chatId: row.chat_id,
+      status: row.status, title: row.chat_title, createdAt: row.created_at, updatedAt: row.updated_at,
+    } : null;
+  }
+
+  getChannelBindingByChat(channel, chatId) {
+    const row = this.db.prepare(`SELECT b.*, c.title AS chat_title
+      FROM channel_bindings b JOIN chats c ON c.id=b.chat_id
+      WHERE b.channel=? AND b.chat_id=? ORDER BY b.updated_at DESC LIMIT 1`).get(channel, chatId);
+    return row ? {
+      id: row.id, channel: row.channel, externalScopeId: row.external_scope_id,
+      userId: row.user_id, projectId: row.project_id, chatId: row.chat_id,
+      status: row.status, title: row.chat_title, createdAt: row.created_at, updatedAt: row.updated_at,
+    } : null;
+  }
+
+  createChannelBinding({ id = randomUUID(), channel, externalScopeId, userId, projectId, chatId }) {
+    const timestamp = now();
+    this.db.prepare(`INSERT OR IGNORE INTO channel_bindings
+      (id,channel,external_scope_id,user_id,project_id,chat_id,status,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,'active',?,?)`).run(id, channel, externalScopeId, userId, projectId, chatId, timestamp, timestamp);
+    return this.getChannelBinding(channel, externalScopeId);
+  }
+
+  rebindChannelBindingChat({ channel, externalScopeId, expectedChatId, chatId }) {
+    const result = this.db.prepare(`UPDATE channel_bindings
+      SET chat_id=?,updated_at=?
+      WHERE channel=? AND external_scope_id=? AND status='active' AND chat_id=?`)
+      .run(chatId, now(), channel, externalScopeId, expectedChatId);
+    if (Number(result.changes) !== 1) {
+      const error = new Error('微信会话绑定已变化。');
+      error.code = 'CHANNEL_BINDING_CHANGED';
+      throw error;
+    }
+    return this.getChannelBinding(channel, externalScopeId);
+  }
+
+  getChannelEvent(channel, externalEventId) {
+    const row = this.db.prepare('SELECT * FROM channel_events WHERE channel=? AND external_event_id=?')
+      .get(channel, externalEventId);
+    return row ? {
+      id: row.id, channel: row.channel, externalEventId: row.external_event_id,
+      externalScopeId: row.external_scope_id, chatId: row.chat_id, status: row.status,
+      responseText: row.response_text, errorCode: row.error_code,
+      createdAt: row.created_at, completedAt: row.completed_at,
+    } : null;
+  }
+
+  createChannelEvent({ id = randomUUID(), channel, externalEventId, externalScopeId, chatId = null }) {
+    const timestamp = now();
+    const result = this.db.prepare(`INSERT OR IGNORE INTO channel_events
+      (id,channel,external_event_id,external_scope_id,chat_id,status,created_at)
+      VALUES (?,?,?,?,?,'processing',?)`).run(id, channel, externalEventId, externalScopeId, chatId, timestamp);
+    return { ...this.getChannelEvent(channel, externalEventId), created: result.changes === 1 };
+  }
+
+  completeChannelEvent(channel, externalEventId, { status = 'completed', responseText = null, errorCode = null } = {}) {
+    this.db.prepare(`UPDATE channel_events SET status=?,response_text=?,error_code=?,completed_at=?
+      WHERE channel=? AND external_event_id=?`).run(status, responseText, errorCode, now(), channel, externalEventId);
+    return this.getChannelEvent(channel, externalEventId);
+  }
+
   grantProjectAccessWithChats(options, snapshots) {
     this.db.exec('BEGIN IMMEDIATE');
     try {
@@ -715,6 +811,7 @@ export class HarnessDatabase {
       useMemory: row.use_memory === undefined ? true : Boolean(row.use_memory),
       saveMemory: row.save_memory === undefined ? true : Boolean(row.save_memory),
       memoryContextResetAt: row.memory_context_reset_at || null,
+      channelToolsVersion: Number(row.channel_tools_version || 0),
       sourceChatId: row.source_chat_id || null, sharedAt: row.shared_at || null,
       threadState: row.thread_state || 'ready', threadError: row.thread_error || null,
       projectAccessId: row.project_access_id, treePath: row.tree_path,
@@ -750,6 +847,7 @@ export class HarnessDatabase {
       ['threadError', 'thread_error'], ['preferredMode', 'preferred_mode'], ['preferredModel', 'preferred_model'], ['preferredEffort', 'preferred_effort'],
       ['controlMode', 'control_mode'], ['localSessionId', 'local_session_id'],
       ['useMemory', 'use_memory'], ['saveMemory', 'save_memory'],
+      ['channelToolsVersion', 'channel_tools_version'],
     ]) {
       if (key in patch) {
         fields.push(`${column}=?`);
@@ -863,7 +961,7 @@ export class HarnessDatabase {
         .run(newSessionId, timestamp, timestamp, chatId, expectedSessionId || null);
       if (updated.changes !== 1) throw new Error('LOCAL_SESSION_MAPPING_CHANGED');
       this.db.prepare(`INSERT INTO chat_thread_recoveries (chat_id,old_thread_id,new_thread_id,reason,created_at,engine)
-        VALUES (?,?,?,'explicit_local_reset',?,'deepseek')`).run(chatId, expectedSessionId || null, newSessionId, timestamp);
+        VALUES (?,?,?,'explicit_local_reset',?,'qwen')`).run(chatId, expectedSessionId || null, newSessionId, timestamp);
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     return this.getChat(chatId);

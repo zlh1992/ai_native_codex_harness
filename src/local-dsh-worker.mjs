@@ -50,8 +50,13 @@ async function init(input) {
   await ctx.plugin(Checkpoint);
   await ctx.plugin(Pi, { providers: { 'portal-local': {
     api: 'openai-completions', apiKeyEnv: 'PORTAL_LOCAL_MODEL_KEY', baseURL: baseUrl,
-    models: [{ id: input.model, contextWindow: input.contextWindow, maxTokens: input.maxTokens }],
-    compat: { thinkingFormat: 'deepseek' }, timeoutMs: input.timeoutMs, streamIdleTimeoutMs: input.timeoutMs,
+    models: [{ id: input.model, contextWindow: input.contextWindow, maxTokens: input.maxTokens,
+      // Qwen's OpenAI-compatible server enables thinking by default. DSH does
+      // not expose a user reasoning selector for private chats, so declare the
+      // model's capability and let the qwen adapter send enable_thinking=false
+      // for the default local run.
+      reasoningEfforts: { off: null, low: 'low', medium: 'medium', high: 'high' } }],
+    compat: { thinkingFormat: 'qwen' }, timeoutMs: input.timeoutMs, streamIdleTimeoutMs: input.timeoutMs,
   } } });
   await ctx.plugin(TokenMeter);
   await ctx.plugin(Compaction, { thresholdRatio: 0.8, retainRatio: 0.2, maxTokens: 4096, compactionRetries: 1 });

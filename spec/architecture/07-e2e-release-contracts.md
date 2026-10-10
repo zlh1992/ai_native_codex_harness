@@ -18,7 +18,7 @@ HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake ap
 
 `test/e2e/local-private.test.mjs` 使用真实 DSH 核心、macOS Seatbelt、临时 SQLite 与合成 OpenAI-compatible 回环模型，验证 Codex 不可用时的 HTTP 登录/队列/审批/文件/历史、员工不可见、禁止分享/工作图、不可变类型、项目记忆与普通记忆双向隔离。`test/local-private.test.mjs` 覆盖跨 chat 持久化、恢复/显式 reset lineage、本地串行容量、停止取消审批、manual 编辑搜索词、审批期间文件变化与下一 step steer，以及 EDIT/auto 命令策略；即使用户允许联网，隐私命令访问另一回环服务也必须失败。`test/local-search.test.mjs` 验证独立进程只接收 query、固定 Luna-low、无继承配置或环境秘密。前端测试固定本地引擎的执行、审批后继续和完成标识。
 
-这些合成模型测试不等于真实 DeepSeek 的 tool-call 质量、上下文长度或吞吐验收；启用生产前须另做真实本机模型推理与工具测试。原有普通项目发布契约不变。
+这些合成模型测试不等于真实 Qwen 的 tool-call 质量、上下文长度或吞吐验收；启用生产前须另做真实本机模型推理与工具测试。原有普通项目发布契约不变。
 
 以下契约已经由 `test/e2e/portal-gate.test.mjs` 贯通，修改时不得无替代地删除或弱化。
 
@@ -193,3 +193,11 @@ HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake ap
 计量测试覆盖多步累计去重、root/child/辅助归属、resume/fork 未知基线、迟到/乱序样本、取消失败及重启、删除后保留、北京时间边界和筛选。真实 DSH 核心搭配合成回环 SSE 验证多步/续聊采集；独立搜索夹具固定只有 query/摘要输入且 Luna-low 计量正确。DOM 测试验证缺失值、筛选、身份失效清理和旧请求不覆盖新结果。
 
 `test/work-graph-drawer.test.mjs` 固定最新任务读取、视图离开/退出、附件跨任务与同任务乱序、关闭重开、提交失效及登录冷启动保护；真实 Chrome 延迟响应复验独立记录于报告。
+
+## E2E-018 微信固定渠道
+
+微信 relay 只能通过 loopback 的 HMAC 请求进入 Portal；过期时间戳、错误签名、错误发送者和群聊必须拒绝。Portal 按配置固定老板的 standard `weichat-project`，每个私聊 scope 复用独立老板 chat，桥接不能提交 project/cwd/thread。只有 active binding chat 可发现跨项目工具；项目列表和每次读/搜索必须只接受当前老板本人拥有的 standard owner access，并拒绝员工自有/仅共享项目、local_private 与本机未纳管目录；跨项目写入和命令不可注册。相同外部 event id 的重试必须返回已保存结果且不新增 turn；真实 Codex 回复和 Portal SQLite 消息必须可在老板工作台读取。Portal 必须在普通 turn 前处理 `/new`、`/models` 和 `/model <id>`：空闲 `/new` 原子切换到新 chat 并保留旧历史，`/models` 返回完整 Portal 模型白名单（包括 `gpt-6-astra`），`/model <id>` 复用模型白名单并持久化当前 chat 偏好。部署验收至少执行一次真实签名事件、一次重复投递、一次 owner/employee/private 隔离测试、一次命令路由和一次 health/status 检查；敏感凭据不得进入日志或报告。
+
+## 运维进程控制回归
+
+`test/background-process.test.mjs` 验证重复启动复用同一进程、停止后不再运行、PID 指向另一进程时拒绝操作；真实整套 stop/start/restart、双域名与角色登录验证记录在实施报告。此测试不替代既有 HTTP/Seatbelt E2E。

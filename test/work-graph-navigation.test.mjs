@@ -79,6 +79,25 @@ test('uncertain planning retries keep their own project idempotency keys', async
   assert.notEqual(calls[0].key, calls[1].key);
 });
 
+test('planning preserves an explicitly selected final review mode', async t => {
+  const calls = [];
+  const { ui, event } = fixture(t, async (url, options) => {
+    if (options?.body) calls.push(options.body);
+    if (url.includes('/generate')) return { job: { id: 'A-job' } };
+    if (url.includes('/work-graph-jobs/')) return { job: { id: 'A-job', status: 'queued' } };
+    return { graphs: [] };
+  });
+  class SelectedFormData {
+    get(key) { return ({ prompt: 'Synthetic planning request', reviewMode: 'auto', finalMode: 'manual', paths: '' })[key]; }
+    getAll() { return ['employee']; }
+  }
+  const prior = globalThis.FormData;
+  Object.defineProperty(globalThis, 'FormData', { configurable: true, value: SelectedFormData });
+  try { await ui.generate(event); } finally { Object.defineProperty(globalThis, 'FormData', { configurable: true, value: prior }); }
+  assert.equal(calls[0].reviewPolicy.mode, 'auto');
+  assert.equal(calls[0].reviewPolicy.finalMode, 'manual');
+});
+
 test('an obsolete job poll cannot overwrite a newer planning request on the same project', async t => {
   const pending = deferred();
   const { ui, document, saved } = fixture(t, async url => url.includes('/work-graph-jobs/') ? pending.promise : { graphs: [] });

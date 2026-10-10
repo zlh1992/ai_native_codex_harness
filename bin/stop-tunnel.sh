@@ -9,8 +9,8 @@ if [[ "$MODE" == "tailscale" ]]; then
   if [[ -x "$TAILSCALE_BIN" ]]; then TAILSCALE_BE_CLI=1 "$TAILSCALE_BIN" funnel --https=443 off >/dev/null; fi
   echo "公网隧道：已停止"
 else
-  if launch_job_exists "$TUNNEL_LABEL"; then
-    launchctl remove "$TUNNEL_LABEL"
+  if [[ -f "$DATA_DIR_ABS/$TUNNEL_LABEL.process.json" ]] || launch_job_exists "$TUNNEL_LABEL"; then
+    remove_launch_job "$TUNNEL_LABEL"
     wait_launch_job_gone "$TUNNEL_LABEL" || { echo "公网隧道未能及时退出。" >&2; exit 1; }
     rm -f "$TUNNEL_PID_FILE"
     echo "公网隧道：已停止"

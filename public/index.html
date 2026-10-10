@@ -120,13 +120,16 @@
           </div>
         </div>
         <div id="activity-strip" class="activity-strip hidden"></div>
-        <section id="turn-insights" class="turn-insights hidden">
-          <div id="goal-card" class="insight-card hidden"></div>
-          <div id="approval-list" class="approval-list"></div>
-          <details id="plan-panel" class="insight-card hidden"><summary>执行计划</summary><div></div></details>
-          <details id="diff-panel" class="insight-card hidden"><summary>本轮 diff</summary><pre></pre></details>
-          <details id="memory-ref-panel" class="insight-card hidden"><summary>本轮引用</summary><div></div></details>
-        </section>
+        <details id="turn-insights" class="turn-insights hidden">
+          <summary class="turn-insights-summary"><span>本轮辅助信息</span><small>点击展开</small></summary>
+          <div class="turn-insights-body">
+            <div id="goal-card" class="insight-card hidden"></div>
+            <div id="approval-list" class="approval-list"></div>
+            <details id="plan-panel" class="insight-card hidden"><summary>执行计划</summary><div></div></details>
+            <details id="diff-panel" class="insight-card hidden"><summary>本轮 diff</summary><pre></pre></details>
+            <details id="memory-ref-panel" class="insight-card hidden"><summary>本轮引用</summary><div></div></details>
+          </div>
+        </details>
         <form id="composer" class="composer">
           <section id="task-flow-notice" class="task-flow-notice" aria-label="当前任务进度" hidden></section>
           <section id="input-queue" class="input-queue hidden" aria-label="待发送消息"></section>
@@ -172,7 +175,7 @@
     <form method="dialog" id="project-form" class="dialog-form">
       <div class="dialog-title"><span class="mark small">C</span><div><p class="eyebrow">NEW WORKSPACE</p><h2>创建隔离项目</h2></div></div>
       <label>项目名称<input name="name" maxlength="80" required placeholder="例如：客户门户"></label>
-      <label id="project-type-label" class="hidden">项目类型<select name="projectType"><option value="standard">普通项目 · Codex · 可协作</option><option value="local_private">隐私项目 · 本地 DeepSeek + DSH · 永不可分享</option></select><small>创建后不可切换。隐私项目文件/对话/记忆留在本机；仅主动搜索的搜索词发给云端 Luna。公网访问仍经过 Cloudflare。</small></label>
+      <label id="project-type-label" class="hidden">项目类型<select name="projectType"><option value="standard">普通项目 · Codex · 可协作</option><option value="local_private">隐私项目 · 本地 Qwen + DSH · 永不可分享</option></select><small>创建后不可切换。隐私项目文件/对话/记忆留在本机；仅主动搜索的搜索词发给云端 Luna。公网访问仍经过 Cloudflare。</small></label>
       <label>项目说明<textarea name="description" maxlength="1000" rows="3" placeholder="目标、技术栈或上下文"></textarea></label>
       <p class="form-error"></p>
       <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button value="default" class="primary">创建项目</button></div>

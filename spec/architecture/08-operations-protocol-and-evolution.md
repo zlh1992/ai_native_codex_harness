@@ -2,6 +2,10 @@
 
 ## 本地生命周期
 
+项目根目录 start/stop/restart/status/health/reset-wechat-qr.command 统一管理 Portal、公网隧道及同级 wx_codex_self 微信服务（可由 WECHAT_BRIDGE_DIR 指定）。启动依次检查本地引擎、公网健康、微信运行/待扫码；关闭按相反顺序执行。reset-wechat-qr 先确保整套服务就绪，再备份旧微信绑定并打开新二维码。
+
+HARNESS_PROCESS_MODE 默认为 launchd；可显式选 detached 处理 Documents 后台访问受限。两种模式共用 start/stop/status 和健康判断。detached 状态记录放在私有 DATA_DIR，操作用文件锁串行化，并复验 UID、PID 的启动时间与完整命令，PID 被复用时拒绝停止。退出启动终端不结束服务，注销/重启系统后须重新执行 start.command。
+
 ```bash
 ./bin/start-local.sh
 ./bin/start-tunnel.sh
@@ -10,13 +14,15 @@
 ./bin/stop-local.sh
 ```
 
-默认 `start-local.sh` 只有在 HTTP 与 Codex app-server ready 后返回成功，Codex ready 仍须验证原生记忆三项关闭。显式启用本地 DeepSeek 时，HTTP + localDeepSeek.ready 也可启动部分能力，普通 Codex 是否可用仍单独显示；不得把本地 ready 当作普通模型可用。`status.sh` 显示两个引擎状态。本地配置、真实模型验收及安全回滚见 [操作指南](../../docs/LOCAL_PRIVATE_PROJECTS.md)。
+默认 `start-local.sh` 只有在 HTTP 与 Codex app-server ready 后返回成功，Codex ready 仍须验证原生记忆三项关闭。显式启用本机 Qwen 时，HTTP + localQwen.ready 也可启动部分能力，普通 Codex 是否可用仍单独显示；不得把本地 ready 当作普通模型可用。`status.sh` 显示两个引擎状态。本地配置、真实模型验收及安全回滚见 [操作指南](../../docs/LOCAL_PRIVATE_PROJECTS.md)。
 
 首次安装由 `install-mac.sh` 使用 `package-lock.json` 执行 `npm ci --omit=dev --ignore-scripts`，不能依赖被 Git 忽略的既有 `node_modules`。首次启动必须在读取日志行号前创建权限为 `0600` 的服务日志。
 
 看板拖拽使用固定版本的生产依赖 SortableJS，经 `/vendor/sortable.js` 单一路径提供；不依赖外部 CDN，不开放整个 node_modules。组件未安装返回 404，前端保留键盘排序和卡片详情作为降级。测试专用 DOM 库不进入生产安装。规范页面为 `/boss/login`、`/boss/workbench`、`/boss`、`/employee`；末尾斜杠重定向到规范路径，未知无扩展路径不再兜底员工页。
 
 Portal 启动时冻结 public HTML/JS/CSS 与固定 Sortable 模块的内存快照，按全包内容生成 `/assets/<hash>/...` 版本路径。HTML 使用 no-store 并指向同一版本；ESM 相对依赖及 Sortable 动态导入保持版本一致。版本资源可长期 immutable 缓存，未知旧版本或非白名单资源返回 404，不能把新字节伪装为旧版本。发布前端改动也需安全重启 Portal；不能依赖 CDN 保留源站 cache-control、操作员手动清缓存或原文件名重新请求。未版本化的开发/兼容路径保留，不开放其他 node_modules 文件。
+
+普通项目和微信固定渠道的上游固定为本机 ChatGPT 官方 Codex 登录（`openai_http`，`https://chatgpt.com/backend-api/codex`）；运行配置和启动脚本必须拒绝第三方 provider/endpoint。`local_private` 才能在显式开启且服务可用时使用回环 Qwen OpenAI-compatible 服务，普通项目与微信不会 fallback 到它。配置统一使用 `LOCAL_QWEN_*`。
 
 安装脚本同时建立 Python 3.10+ 的 `.tools/memory-venv`，安装固定的 `memsearch[onnx]==0.4.19`，默认预热固定 revision 的 `gpahal/bge-m3-onnx-int8`。可用 `MEMORY_MODEL_WARMUP=0` 跳过预热；索引进程不可用不会打开 Codex 原生记忆，而是显示 degraded 并退回 SQLite 关键词召回。
 
@@ -31,7 +37,9 @@ Portal 启动时冻结 public HTML/JS/CSS 与固定 Sortable 模块的内存快�
 }
 ```
 
-`ok` 只表示 Portal HTTP 可响应；默认发布/隧道前置条件检查 codex=true。显式启用本地引擎时允许 localDeepSeek.enabled && state=ready 作为部分服务条件，但完整业务验收必须测试将使用的实际引擎。
+`ok` 只表示 Portal HTTP 可响应；默认发布/隧道前置条件检查 codex=true。显式启用本地引擎时允许 localQwen.enabled && state=ready 作为部分服务条件，但完整业务验收必须测试将使用的实际引擎。
+
+Codex initialize/ready 不证明上游模型认证可用。使用本机 ChatGPT 登录时，模型请求地址应与该认证方式匹配；恢复默认官方地址后必须执行真实模型请求验证。模型 401 不属于微信扫码故障，不应通过重置微信绑定处理。
 
 `/api/me` 和 health 的 memory 状态用于诊断索引进程启动/降级，不等于每用户向量就绪；`nativeCodexMemory` 必须始终为 `false`。`PORTAL_MEMORY_ENABLED=false` 只停用 Portal 记忆 CRUD，不能解除 Codex 原生记忆关闭不变量。四个 memory 动态工具在 thread start/resume 注册，升级应排空运行后重启 Portal；已取消关键词提取及其配置，不重放历史提取任务。
 
@@ -95,6 +103,10 @@ Portal 启动时冻结 public HTML/JS/CSS 与固定 Sortable 模块的内存快�
 
 本地与公网地址输出分别展示 `/boss/login` 与 `/employee`。固定 `PUBLIC_ORIGIN` 仍是无路径的同一 origin；两个角色共用后端、同源 Cookie 与隧道，但登录 API、登录页面和首页分开。
 
+微信渠道运维：设置 `WECHAT_CHANNEL_ENABLED=true`、老板 standard `weichat-project` 的 `WECHAT_CHANNEL_PROJECT_ID`，并把 32 字节以上的 secret 保存到 `WECHAT_CHANNEL_SECRET_FILE`（权限 `0600`）。微信桥接只运行 transport relay，调用 `POST /api/internal/channels/wechat/events`；该接口仅接受 loopback、HMAC、时间窗和 nonce。macOS launchd 的 relay 密钥应放在 Application Support 的私有运行目录（0600），避免依赖 Documents 访问权限；若 Portal 和 relay 分别保存副本，轮换须同步更新。固定项目删除或撤权时，渠道请求必须 fail closed。每个微信私聊在固定项目内拥有独立 chat，所有消息和运行记录由 Portal SQLite 保存；新建 active binding chat 在 thread/start 时注册老板 standard 项目只读工具，不需要把其他 project id 写入桥接配置。既有原生 thread 的动态工具不能假设经 resume 更新；Portal 以 chat 的 `channel_tools_version` 做一次性迁移，创建新 thread、记录旧/新 lineage 后才继续微信 turn；旧历史保留为事实，不注入新 thread。升级须验证实际工具集合，不能仅以新建测试会话成功作为旧微信会话验收。
+
+微信消息中的 `/new`、`/models` 和 `/model <id>` 由 Portal 事件入口处理，relay 不实现这些业务语义。`/new` 要求当前 chat 无运行、恢复或排队输入，在 SQLite 事务中创建新 chat 并更新 active binding；旧 chat 保留且下一条普通消息才启动新 thread。`/models` 展示 Portal 白名单而不是让上游模型自行猜测；`/model <id>` 仅修改当前 chat 的 nullable 偏好，非法模型或忙碌 chat 拒绝。模型目录显示资格不等于当前上游账号必然可用，实际 turn 仍以 Codex 上游能力为准。
+
 固定双域名部署可以设置 `BOSS_PUBLIC_ORIGIN` 与 `EMPLOYEE_PUBLIC_ORIGIN`，自动纳入 Host 白名单；`PUBLIC_ORIGINS` 可补充其他固定 HTTPS origin，旧 `PUBLIC_ORIGIN` 保留单域名兼容。两个 hostname 映射同一 Portal，根路径按角色跳转，Cookie 不共享到父域名。named PUBLIC_URL 必须属于已配置 origin；运行中模式/主域名不一致则拒绝伪报成功并保留旧隧道。健康检查覆盖主域名及两个角色域名，使用本章引擎 ready 条件，不能只检查 HTTP 200；仅本地 ready 时员工 Codex 任务仍不可用。
 
 若 App 自动更新替换内置二进制，可使用独立安装的官方同版本 CLI 并通过 `CODEX_BIN` 绑定；这不改变协议 pin。重启前应核对实际二进制版本，运行中的旧进程 ready 不能证明磁盘上的新二进制兼容。
@@ -109,6 +121,6 @@ Portal 启动时冻结 public HTML/JS/CSS 与固定 Sortable 模块的内存快�
 
 ## 模型偏好与用量运维
 
-/api/me 返回同一 GPT 模型目录及角色默认强度；PATCH chat 支持 preferredModel/preferredEffort（null 恢复默认）。GET /api/admin/token-usage 使用 from/to（北京时间 YYYY-MM-DD，包含终止日）、userId、engine（gpt/deepseek）、model 筛选，缺省近 7 天；返回 totals/days/employees/models/kinds、startedAt、updatedAt 与本地引擎状态。前端可见时每 30 秒刷新，支持手动刷新；统计为本网站调用上报量，不是共享账号账单或费用。
+/api/me 返回同一 GPT 模型目录及角色默认强度；PATCH chat 支持 preferredModel/preferredEffort（null 恢复默认）。GET /api/admin/token-usage 使用 from/to（北京时间 YYYY-MM-DD，包含终止日）、userId、engine（gpt/qwen）、model 筛选，缺省近 7 天；返回 totals/days/employees/models/kinds、startedAt、updatedAt 与本地引擎状态。前端可见时每 30 秒刷新，支持手动刷新；统计为本网站调用上报量，不是共享账号账单或费用。
 
-发布先排空运行并一致性备份 SQLite；新增账本不删除既有数据。回退本次代码可以保留 nullable 列与计量表，但回退期间不会继续采集，统计完整性须注明该空窗；不能回退到不支持隐私项目的版本。DeepSeek disabled 与未上报用量分别显示，真实本机推理未验收前不因看板上线而启用模型。
+发布先排空运行并一致性备份 SQLite；新增账本不删除既有数据。回退本次代码可以保留 nullable 列与计量表，但回退期间不会继续采集，统计完整性须注明该空窗；不能回退到不支持隐私项目的版本。本地 Qwen disabled 与未上报用量分别显示，真实本机推理未验收前不因看板上线而启用模型。

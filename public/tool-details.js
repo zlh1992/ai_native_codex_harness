@@ -43,10 +43,21 @@ export class ToolDetailsPanel {
       const version = `${this.runId}:${this.cursor}`;
       if (this.rendered === version) return;
       this.rendered = version;
+      const disclosure = this.root.querySelector('.tool-details-disclosure');
+      const expanded = disclosure?.open === true;
+      const disclosureScroll = disclosure?.scrollTop || 0;
       const opened = new Set([...this.root.querySelectorAll('details[open]')].map(el => el.dataset.toolId));
-      const scroll = this.root.scrollTop;
-      this.root.innerHTML = `<p class="eyebrow">本轮工具明细 · 点击展开</p>${[...this.items.values()].sort((a,b) => a.id-b.id).map(item => toolDetailHtml(item, opened.has(String(item.id)))).join('')}`;
-      this.root.hidden = !this.items.size; this.root.scrollTop = scroll;
+      const items = [...this.items.values()].sort((a,b) => a.id-b.id);
+      const running = items.filter(item => item.status === 'running').length;
+      const failed = items.filter(item => item.status === 'failed').length;
+      const state = running ? `运行中 ${running}` : failed ? `失败 ${failed}` : '已完成';
+      this.root.innerHTML = `<details class="tool-details-disclosure" ${expanded ? 'open' : ''}>
+        <summary><span class="eyebrow">本轮工具明细</span><span class="tool-details-count">${items.length} 项 · ${state}</span><span class="tool-details-hint">点击展开</span></summary>
+        <div class="tool-details-body">${items.map(item => toolDetailHtml(item, opened.has(String(item.id)))).join('')}</div>
+      </details>`;
+      this.root.hidden = !this.items.size;
+      const nextDisclosure = this.root.querySelector('.tool-details-disclosure');
+      if (nextDisclosure) nextDisclosure.scrollTop = disclosureScroll;
       this.root.ownerDocument.body.classList.toggle('tool-details-ready', Boolean(this.items.size));
     } catch (error) {
       if (current() && [401,403,404].includes(error.status)) this.reset('');

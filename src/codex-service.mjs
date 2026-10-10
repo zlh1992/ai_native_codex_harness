@@ -11,6 +11,7 @@ import { runSandboxedCommand } from './sandbox.mjs';
 import { MEMORY_TOOLS, callMemoryTool } from './memory-tools.mjs';
 import { assertStandardProject } from './private-projects.mjs';
 import { ToolDetailsService } from './tool-details.mjs';
+import { WechatOwnerProjectTools } from './wechat-owner-project-tools.mjs';
 
 const TURN_MODES = new Set(['edit', 'execute']);
 
@@ -88,6 +89,7 @@ export class CodexService extends EventEmitter {
     this.workspace = workspace;
     this.memory = memory;
     this.toolDetails = new ToolDetailsService({ db, config });
+    this.wechatOwnerProjects = new WechatOwnerProjectTools({ config, db, workspace });
     this.client = new CodexAppServerClient(config);
     this.capacity = new CapacityService({
       db, maxRootTurns: config.portalMaxActiveRootTurns,
@@ -185,7 +187,11 @@ export class CodexService extends EventEmitter {
       `You may use native subagents when useful, but at most ${this.config.maxSubagentsPerRoot} may be active for this root thread and every spawned subagent must use ${this.config.subagentModel}.`,
       'Never request another subagent model. Explicit model overrides are forbidden by Portal policy.',
       'Never attempt to inspect host credentials, Codex state, environment secrets, parent directories, or another user workspace.',
-      'All tool paths must be relative to the authorized project. The host will reject escapes and symlinks.',
+      'All workspace_* tool paths must be relative to the authorized project. The host will reject escapes and symlinks.',
+      ...(this.wechatOwnerProjects.bindingFor(context) ? [
+        'This is the boss WeChat hub chat. You may use owner_projects_list and owner_project_* to list, read, and search standard Portal projects owned by this boss.',
+        'Those owner project tools are read-only. They exclude employee-owned projects, shared-only projects, local-private projects, and unmanaged host directories.',
+      ] : []),
       `Outbound network access for this user is ${context.user.networkAccess ? 'enabled' : 'disabled'}.`,
       'Explain meaningful changes and verify work with the available project tools.',
       'Use memory_search when prior user preferences or facts could help, including during a task. You decide when to search; the host does not automatically recall memories.',
@@ -218,7 +224,8 @@ export class CodexService extends EventEmitter {
       baseInstructions: this.#instructions(context),
       dynamicTools: ['planner', 'reviewer'].includes(context.chat?.purpose)
         ? (this.workGraphRuntime?.toolsFor(context.chat) || [])
-        : [...DYNAMIC_TOOLS, ...(this.memory && this.config.memoryEnabled ? MEMORY_TOOLS : []), ...(this.workGraphRuntime?.toolsFor(context.chat || {}) || [])],
+        : [...DYNAMIC_TOOLS, ...this.wechatOwnerProjects.toolsFor(context),
+          ...(this.memory && this.config.memoryEnabled ? MEMORY_TOOLS : []), ...(this.workGraphRuntime?.toolsFor(context.chat || {}) || [])],
     };
   }
 
@@ -261,6 +268,17 @@ export class CodexService extends EventEmitter {
     await this.#ensurePortalSkills();
     const existing = context.chat.codexThreadId;
     invariant(context.chat.threadState !== 'resume_failed', 409, 'THREAD_RECOVERY_REQUIRED', '该对话的 Codex 线程需要显式恢复；请先重试恢复，或确认后新建空白线程。');
+    const channelTools = this.wechatOwnerProjects.bindingFor(context);
+    if (existing && channelTools && context.chat.channelToolsVersion < 1) {
+      const newThreadId = await this.#startThread(context);
+      const current = this.db.getChat(context.chat.id);
+      invariant(current?.codexThreadId === existing && current.channelToolsVersion < 1,
+        409, 'CHANNEL_THREAD_CHANGED', '微信对话线程已变化，请重试。');
+      this.db.recoverChatThread({ chatId: context.chat.id, expectedThreadId: existing,
+        newThreadId, reason: 'wechat_owner_project_tools_v1' });
+      this.db.updateChat(context.chat.id, { channelToolsVersion: 1 });
+      return newThreadId;
+    }
     if (existing && !this.loadedThreads.has(existing)) {
       try {
         await this.#resumeThread(existing, context);
@@ -1366,6 +1384,7 @@ export class CodexService extends EventEmitter {
     invariant(currentUser.networkAccess === user.networkAccess, 409, 'USER_POLICY_CHANGED', '用户网络策略已变化。');
     const project = this.db.getProjectForUser(active.project.id, user.id);
     invariant(project && project.accessId === active.project.accessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已撤销。');
+    if (this.wechatOwnerProjects.handles(name)) return this.wechatOwnerProjects.call(active, name, args);
     if (name === 'workspace_list') {
       return this.workspace.tree(project, args.path || '', Math.min(12, Math.max(1, Number(args.max_depth) || 5)));
     }
