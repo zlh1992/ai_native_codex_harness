@@ -213,3 +213,7 @@ HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake ap
 `test/command-runtime.test.mjs` 用受控 HTTP/CONNECT 代理、真实 TLS、Git dumb HTTP 和临时 wheel 验证代理链路、独立命令安装后直接发现 CLI、真实 Git HTTP helper、节点/端口切换和断线恢复；禁网命令即使手动指定本地代理也不能连接。`test/outbound-proxy.test.mjs` 固定每次系统读取、端口更新、无代理、无效/PAC/SOCKS 拒绝及 Chrome 原生系统模式。
 
 `test/e2e/network-policy-gate.test.mjs` 验证新账号默认 true、显式 false、重启保留旧限制、同一员工 chat/session 开启后真实代理下载、关闭时排空和后续拒绝。真实 Chrome gate 验证创建表单默认勾选、编辑旧禁网不勾选，以及固定代理入口切换上游节点和短暂断线后会话登录态保留。系统端口通知的实际 macOS 验收独立记录，不能把配置模拟当作已验证系统切换。原发布契约全部保留。
+
+## 工作台浏览器和表单交互
+
+真实 Chrome gate 额外验证空闲对话直接打开网址、首次导航失败保留会话和可手动恢复、跨账号/跨登录控制拒绝、接管三步提示及迟到轮询不能覆盖交还状态。导航错误固定为 BROWSER_NAVIGATION_FAILED，进程启动失败仍为 BROWSER_UNAVAILABLE。目录支持嵌套折叠、父目录再展开保留子级状态及列表刷新保留；创建项目/员工取消不经过必填校验。原接管、隔离、退出及重启断言保留。

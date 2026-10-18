@@ -190,7 +190,8 @@ export class CodexService extends EventEmitter {
       'For authorized public HTTP(S) downloads and Git clones the Portal follows the current system VPN proxy at each command launch. Clone into a permitted project subdirectory, not over the platform-managed repository. Do not hardcode a VPN port or change host proxy/Git configuration. A changed VPN node may break an active connection: inspect side effects and retry manually only when appropriate. Private repositories still require project-authorized authentication.',
       'A skill document is not a CLI installation. Verify the actual executable, dependencies, version and the requested function before reporting installation success.',
       'If a command reports a runtime/resource/network policy error, stop repeating it and explain its errorCode and recoveryHint. Commands are never automatically replayed; inspect possible side effects before retrying.',
-      ...(this.config.browserEnabled ? ['Use only Portal browser_open/browser_snapshot/browser_action/browser_handoff for interactive web access in EXECUTE. They are root-only and require account network permission.',
+      ...(this.config.browserEnabled ? ['Use only Portal browser_open/browser_snapshot/browser_action/browser_handoff for any HTTP(S) browsing in EXECUTE. No Agent-Reach or other CLI installation is needed. They are root-only and require account network permission.',
+        'Read ordinary pages yourself with browser_open/browser_snapshot. Use browser_handoff only when login/verification needs a human or the user wants to operate/inspect the live browser; explain what they should do. Tell them to click 开始接管, operate the page, then 操作完成，交还 Agent. Navigation failure does not mean the browser process is unavailable; inspect or offer human control without automatically replaying actions.',
         'For login or website verification call browser_handoff; the user enters credentials only in the browser drawer. While the user controls the browser, pause browser operations. After return, inspect the real page and report any remaining block honestly.'] : []),
       'Project-local file changes and EXECUTE commands do not require interactive user confirmation, but all project, path, reserved-directory, network, quota, and lifecycle boundaries remain enforced by the host.',
       `You may use native subagents when useful, but at most ${this.config.maxSubagentsPerRoot} may be active for this root thread and every spawned subagent must use ${this.config.subagentModel}.`,
@@ -768,6 +769,7 @@ export class CodexService extends EventEmitter {
   }
 
   async interrupt(chatId) {
+    if (this.browser.sessions.get(chatId)?.active.manual) await this.browser.close(chatId, 'interrupted');
     const paused = this.db.pauseChatInputs(chatId);
     if (this.capacity.cancelChat(chatId)) return true;
     const active = this.activeByChat.get(chatId);

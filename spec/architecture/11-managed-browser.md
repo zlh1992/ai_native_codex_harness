@@ -2,7 +2,7 @@
 
 ## 能力与边界
 
-普通项目 EXECUTE root 可调用 Portal 的 `browser_open`、`browser_snapshot`、`browser_action` 和 `browser_handoff`。每次操作复验活动用户、联网策略、私有 chat、当前 access 和运行身份。EDIT、local_private、planner/reviewer、子代理和跨 chat 调用均拒绝。Codex 内置浏览器、电脑控制和原始 CDP 仍不开放。
+普通项目 EXECUTE root 可调用 Portal 的 `browser_open`、`browser_snapshot`、`browser_action` 和 `browser_handoff`。每次操作复验活动用户、联网策略、私有 chat、当前 access 和运行身份。用户也可从当前普通 EXECUTE 对话直接输入网址启动人工会话；该上下文由后端构造，不接受客户端运行身份。人工会话使用同一容量和隔离规则，不占模型运行席位。下一轮 Agent 调用浏览器时绑定该运行，并保留页面和人类控制权直到明确交还。EDIT、local_private、planner/reviewer、子代理和跨 chat 调用均拒绝。Codex 内置浏览器、电脑控制和原始 CDP 仍不开放。
 
 每个 chat 最多一个浏览器，全局默认且最多两个（可调低）。浏览器由 playwright-core 启动本机 Chrome 的独立临时 profile，不连接日常 Chrome，不复用宿主 Cookie、扩展、密码库或配置。仅接受无 URL 用户名/密码的 HTTP(S) 导航，禁止任意 file 导航、文件上传接口及下载落盘。网络能力沿用账号联网授权，未额外声明公网地址或域名白名单。
 
@@ -16,6 +16,7 @@ macOS 拒绝已有 Seatbelt 进程再次初始化沙箱（`forbidden-sandbox-rei
 
 | 接口 | 行为 |
 | --- | --- |
+| POST /api/chats/:chatId/browser | 打开 HTTP(S) 地址并由当前 Web session 接管；允许空闲普通 EXECUTE chat |
 | GET /api/chats/:chatId/browser | 当前状态和标签页；已结束返回 closed |
 | GET /api/chats/:chatId/browser/frame | 当前页 JPEG，no-store |
 | POST /api/chats/:chatId/browser/actions | 持有人类控制权的 Web session 输入、鼠标、滚轮、导航或标签切换 |
@@ -26,11 +27,13 @@ macOS 拒绝已有 Seatbelt 进程再次初始化沙箱（`forbidden-sandbox-rei
 
 ## 控制权和生命周期
 
-Agent 请求 handoff 后暂停等待。用户接管绑定当前 Web session，其他登录会话不能输入。用户点击继续后重新读取真实页面；仍是验证页时必须如实返回，不能把点击继续当作验证通过。主动接管也暂停后续浏览器工具；归还后先返回新页面，旧元素动作不自动重放。取消、关闭、拒绝和最长十分钟超时明确结束等待。
+Agent 请求 handoff 后暂停等待。用户接管绑定当前 Web session，其他登录会话不能输入。用户点击继续后重新读取真实页面；仍是验证页时必须如实返回，不能把点击继续当作验证通过。控制权切换与网页操作共享串行队列；前端交还前排空已发送输入并丢弃旧轮询响应，避免过期状态再次启用输入。主动接管也暂停后续浏览器工具；归还后先返回新页面，旧元素动作不自动重放。取消、关闭、拒绝和最长十分钟超时明确结束等待。
 
-浏览器在运行终态、停止、撤权、停用、相关 Web session 注销、服务退出时关闭；完成关闭和临时 profile 清理后才释放 root/EXECUTE 容量。两分钟无工具或前端活动视为断线，关闭会话。浏览器进程退出也关闭会话。关闭有定时 TERM/KILL 兜底，只信号 PID 与本会话 profile 参数同时匹配的进程组。
+浏览器在关联运行终态、停止、撤权、停用、chat/project 删除、相关 Web session 注销、服务退出时关闭；空闲人工会话同样受停止/删除/撤权及超时清理。完成关闭和临时 profile 清理后才释放 root/EXECUTE 容量。两分钟无工具或前端活动视为断线，关闭会话。浏览器进程退出也关闭会话。关闭有定时 TERM/KILL 兜底，只信号 PID 与本会话 profile 参数同时匹配的进程组。
 
-只用既有 turn_events 保存 browser_state 的 id/state/control/handoff，不新增业务表；不保存画面、URL、原因、Cookie 或输入。页面文本按模型工具请求返回，只属于受 chat ACL 保护的原生上下文；浏览器调用整体跳过 tool_details 和 Luna 摘要。重启不恢复登录态，清理遗留临时 profile，旧接口状态为 closed。
+人工空闲会话仅保留内存状态；绑定运行后只用既有 turn_events 保存 browser_state 的 id/state/control/handoff，不新增业务表；不保存画面、URL、原因、Cookie 或输入。页面文本按模型工具请求返回，只属于受 chat ACL 保护的原生上下文；浏览器调用整体跳过 tool_details 和 Luna 摘要。重启不恢复登录态，清理遗留临时 profile，旧接口状态为 closed。
+
+首次页面导航与 Chrome 进程启动分别处理：启动失败返回 BROWSER_UNAVAILABLE 并清理；导航失败返回 BROWSER_NAVIGATION_FAILED，保留当前会话用于检查、手动刷新或更换网址。快照失败也不冒充启动失败。所有操作不自动重放。
 
 ## 命令运行环境
 

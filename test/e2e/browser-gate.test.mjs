@@ -22,6 +22,7 @@ test('real isolated Chrome: Portal display/input/takeover, roles, ACL, recovery 
   const sessionsRoot = path.join(base, 'browser-sessions');
   let processHandle, ui, logs = '', origin, verified = 0, dragged = 0, scrolled = 0;
   const site = http.createServer((req, res) => {
+    if (req.url === '/broken') { req.socket.destroy(); return; }
     if (req.url === '/verified') { verified++; res.end('ok'); return; }
     if (req.url === '/dragged') { dragged++; res.end('ok'); return; }
     if (req.url === '/scrolled') { scrolled++; res.end('ok'); return; }
@@ -94,9 +95,11 @@ test('real isolated Chrome: Portal display/input/takeover, roles, ACL, recovery 
   await page.goto(`${origin}/boss/workbench?view=workbench&project=${b.project.id}&chat=${b.chat.id}`);
   const drawer = page.locator('.browser-drawer');
   await drawer.waitFor({ state: 'visible' });
+  assert.match(await drawer.locator('[data-guide]').innerText(), /开始接管/);
   await drawer.locator('[data-takeover]').click();
   await until(async () => (await json(boss, endpoint(b.chat))).control === 'human');
   await until(() => drawer.locator('[data-keyboard]').isEnabled());
+  assert.match(await drawer.locator('[data-guide]').innerText(), /你已接管/);
   const canvas = drawer.locator('canvas');
   const clickAt = async (x, y) => { const box = await canvas.boundingBox(); await page.mouse.click(box.x + x * box.width / 1100, box.y + y * box.height / 760); };
   await clickAt(180, 95);
@@ -121,9 +124,24 @@ test('real isolated Chrome: Portal display/input/takeover, roles, ACL, recovery 
   // Refresh keeps the same browser and handoff state.
   const before = (await json(boss, endpoint(b.chat))).id; await page.reload(); await drawer.waitFor({ state: 'visible' });
   assert.equal((await json(boss, endpoint(b.chat))).id, before);
+  // A late poll from before returning control must not put the UI back into human mode.
+  let releaseStale, finishStale, staleHeld = false;
+  const staleFinished = new Promise(resolve => { finishStale = resolve; });
+  const staleRoute = `**/api/chats/${b.chat.id}/browser`;
+  await page.route(staleRoute, async route => {
+    if (route.request().method() !== 'GET' || staleHeld) return route.continue();
+    staleHeld = true; const response = await route.fetch(); const body = await response.body();
+    await new Promise(resolve => { releaseStale = resolve; });
+    await route.fulfill({ response, body }); finishStale();
+  });
+  await until(() => Boolean(releaseStale));
   await drawer.locator('[data-continue]').click();
   const result = await (await bossTurn).text(); assert.match(result, /Verified article body/); assert.doesNotMatch(result, /human-private-marker/);
   assert.equal((await json(boss, endpoint(b.chat))).state, 'closed');
+  releaseStale(); await staleFinished; await page.unroute(staleRoute);
+  await until(async () => (await drawer.locator('[data-status]').innerText()) === '会话已结束');
+  assert.equal(await drawer.locator('[data-keyboard]').isEnabled(), false);
+  assert.equal(await drawer.locator('[data-error]').innerText(), '');
   // Employee profile never received the boss login cookie/storage.
   await json(employee, endpoint(e.chat) + '/control', 'POST', { decision: 'takeover' });
   await json(employee, endpoint(e.chat) + '/actions', 'POST', { action: 'reload' });
@@ -139,10 +157,45 @@ test('real isolated Chrome: Portal display/input/takeover, roles, ACL, recovery 
   const management = await ui.newPage(); await management.goto(origin + '/boss');
   await management.locator('#new-user').click();
   assert.equal(await management.locator('[name=networkAccess]').isChecked(), true);
-  await management.keyboard.press('Escape');
+  await management.locator('#user-dialog .secondary[value=cancel]').click();
+  assert.equal(await management.locator('#user-dialog').isVisible(), false);
   await management.locator(`[data-card="${restricted.id}"] [data-open-card]`).click();
   assert.equal(await management.locator('[name=networkAccess]').isChecked(), false);
+  await management.keyboard.press('Escape');
+  await management.locator('#new-project').click();
+  await management.locator('#project-dialog .secondary[value=cancel]').click();
+  assert.equal(await management.locator('#project-dialog').isVisible(), false);
   await management.close();
+  await json(boss, `/api/projects/${b.project.id}/directory`, 'POST', { path: 'folder/nested' }, 201);
+  const fileWrite = await fetch(origin + `/api/projects/${b.project.id}/file?path=folder/nested/readme.txt`, { method: 'PUT', headers: { cookie: boss.cookie, 'x-csrf-token': boss.csrf }, body: 'Directory folding fixture' });
+  assert.equal(fileWrite.status, 200);
+  // An idle chat may open a generic webpage directly, without an Agent-Reach task.
+  await page.goto(`${origin}/boss/workbench?view=workbench&project=${b.project.id}&chat=${b.chat.id}`);
+  const folder = page.locator('[data-path="folder"]'), nested = page.locator('[data-path="folder/nested"]'), leaf = page.locator('[data-path="folder/nested/readme.txt"]');
+  await leaf.waitFor(); await nested.click(); assert.equal(await leaf.count(), 0);
+  await folder.click(); assert.equal(await nested.count(), 0);
+  await page.locator('#refresh-files').click(); await until(async () => await folder.getAttribute('aria-expanded') === 'false');
+  await folder.click(); assert.equal(await leaf.count(), 0); await nested.click(); await leaf.waitFor();
+  await page.locator('#new-project').click();
+  await page.locator('#project-dialog .secondary[value=cancel]').click();
+  assert.equal(await page.locator('#project-dialog').isVisible(), false);
+  const failed = await json(boss, endpoint(b.chat), 'POST', { url: siteOrigin + '/broken' }, 502);
+  assert.equal(failed.error.code, 'BROWSER_NAVIGATION_FAILED');
+  const retained = await json(boss, endpoint(b.chat));
+  assert.equal(retained.state, 'ready'); assert.equal(retained.canControl, true);
+  await page.locator('#browser-button').click();
+  await drawer.locator('[data-address]').fill(siteOrigin);
+  await drawer.locator('[data-open]').click();
+  await until(async () => !(await drawer.locator('[data-open]').isDisabled()));
+  assert.equal((await json(boss, endpoint(b.chat))).id, retained.id);
+  assert.equal(await drawer.locator('[data-keyboard]').isEnabled(), true);
+  assert.equal(await drawer.locator('[data-error]').innerText(), '');
+  await req(anotherBoss, endpoint(b.chat), 'POST', { url: siteOrigin }, 409);
+  await req(employee, endpoint(b.chat), 'POST', { url: siteOrigin }, 403);
+  await drawer.locator('[data-end]').click();
+  await until(async () => (await json(boss, endpoint(b.chat))).state === 'closed');
+  await drawer.locator('[data-hide]').click();
+
   // Stop and restart close real Chrome and discard state.
   const finalTurn = run(employee, e.chat);
   await until(async () => (await json(employee, endpoint(e.chat))).handoff);
@@ -185,7 +238,7 @@ test('real browser retains login across upstream node changes and temporary prox
   assert.match((await open('next')).text, /NODE_B_LOGIN_RETAINED/);
   offline = true;
   const errorPage = page.waitForEvent('framenavigated', { predicate: frame => frame === page.mainFrame() });
-  await assert.rejects(browser.open(active, url + 'offline'), { code: 'BROWSER_OPERATION_FAILED' });
+  await assert.rejects(browser.open(active, url + 'offline'), { code: 'BROWSER_NAVIGATION_FAILED' });
   await errorPage; await page.waitForLoadState('domcontentloaded');
   assert.equal(browser.state(chat.id).id, id);
   offline = false;

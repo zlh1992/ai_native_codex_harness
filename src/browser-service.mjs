@@ -64,18 +64,18 @@ export class BrowserService {
     invariant(user?.status === 'active' && chat?.userId === user.id && project?.accessId === active.project.accessId && chat.projectAccessId === project.accessId,
       403, 'BROWSER_FORBIDDEN', '对话或项目授权已失效。');
     invariant(user.networkAccess && active.user.networkAccess, 403, 'NETWORK_DISABLED', '此账号未授权联网。');
-    invariant(project.projectType === 'standard' && active.mode === 'execute' && !['planner', 'reviewer'].includes(chat.purpose), 403, 'BROWSER_EXECUTE_REQUIRED', '浏览器仅限普通项目的 EXECUTE 运行。');
+    invariant(project.projectType === 'standard' && (active.manual ? chat.preferredMode : active.mode) === 'execute' && !['planner', 'reviewer'].includes(chat.purpose), 403, 'BROWSER_EXECUTE_REQUIRED', '浏览器仅限普通项目的 EXECUTE 运行。');
   }
   state(chatId) {
     const s = this.sessions.get(chatId);
-    return s ? { id: s.id, runId: s.active.turnRunId, state: s.state, control: s.control, handoff: Boolean(s.waiter), reason: s.waiter ? s.reason : '',
+    return s ? { id: s.id, runId: s.active.turnRunId, manual: Boolean(s.active.manual), state: s.state, control: s.control, handoff: Boolean(s.waiter), reason: s.waiter ? s.reason : '',
       tabs: [...(s.pages || new Map())].map(([id, p]) => ({ id, url: p.url() })), tabId: s.tabId, width: 1100, height: 760 }
       : { state: 'closed', control: null, tabs: [] };
   }
   notify(s, state = s.state) {
     s.state = state;
     // No URL, page body, screenshot, reason, credentials or human input in journal.
-    this.emit(s.active, { id: s.id, state, control: s.control, handoff: Boolean(s.waiter) });
+    if (!s.active.manual) this.emit(s.active, { id: s.id, state, control: s.control, handoff: Boolean(s.waiter) });
   }
   get(active) {
     this.authorize(active);
@@ -91,11 +91,11 @@ export class BrowserService {
     if (!command.includes('--user-data-dir=' + path.join(s.root, 'profile')) || !command.includes(this.config.browserBin)) return;
     try { process.kill(-pid, signal); } catch { try { process.kill(pid, signal); } catch { /* already gone */ } }
   }
-  async open(active, url) {
+  async open(active, url, { humanToken = null } = {}) {
     this.authorize(active); url = publicUrl(url);
     invariant(!this.stopped, 503, 'BROWSER_STOPPING', '浏览器正在关闭。');
     let s = this.sessions.get(active.chat.id);
-    if (s) { await this.operate(active, 'agent', null, async s => { await s.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 }); }); return this.snapshot(active); }
+    if (s) return this.navigate(active, url, humanToken);
     invariant(this.sessions.size + this.closing.size < (this.config.browserMaxSessions || 2), 429, 'BROWSER_CAPACITY', '浏览器名额已满，请稍后再试。');
     invariant(fs.existsSync(this.config.browserBin), 503, 'BROWSER_UNAVAILABLE', '未找到浏览器，请管理员检查安装。');
     fs.mkdirSync(this.config.browserSessionsRoot, { recursive: true, mode: 0o700 });
@@ -129,13 +129,22 @@ export class BrowserService {
       s.context.on('page', addPage);
       for (const page of s.context.pages()) addPage(page);
       if (!s.page) await s.context.newPage();
-      await s.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
       this.authorize(active); invariant(this.sessions.get(active.chat.id) === s, 409, 'BROWSER_CLOSED', '浏览器已关闭。');
-      this.notify(s, 'ready'); return this.snapshot(active);
-    } catch {
+      this.notify(s, 'ready');
+    } catch (error) {
       await this.close(active.chat.id, 'startup_failed');
-      throw new HttpError(503, 'BROWSER_UNAVAILABLE', '浏览器无法启动或打开页面；请检查浏览器环境或目标网站。');
+      if (error instanceof HttpError) throw error;
+      throw new HttpError(503, 'BROWSER_UNAVAILABLE', '浏览器进程无法启动；请管理员检查浏览器环境。');
     }
+    return this.navigate(active, url, humanToken);
+  }
+  async navigate(active, url, humanToken = null) {
+    if (humanToken) await this.control(active, 'takeover', humanToken);
+    await this.operate(active, humanToken ? 'human' : 'agent', humanToken, async s => {
+      try { await s.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 }); }
+      catch { throw new HttpError(502, 'BROWSER_NAVIGATION_FAILED', '网页加载失败或超时，浏览器仍可操作。请检查地址或网络，接管后可刷新或打开其他网页。'); }
+    });
+    return humanToken ? this.state(active.chat.id) : this.snapshot(active);
   }
   async operate(active, who, token, fn) {
     const s = this.get(active);
@@ -198,7 +207,8 @@ export class BrowserService {
   }
   async control(active, decision, token) {
     const s = this.get(active);
-    await s.serial.catch(() => {}); this.get(active);
+    const run = s.serial.catch(() => {}).then(async () => {
+    this.get(active);
     if (decision === 'cancel' && s.waiter && s.control === 'agent') {
       await this.close(active.chat.id, 'handoff_declined'); return this.state(active.chat.id);
     }
@@ -218,6 +228,8 @@ export class BrowserService {
       if (decision === 'cancel') { await this.close(active.chat.id, 'user_cancelled'); return this.state(active.chat.id); }
     }
     this.notify(s); return this.state(active.chat.id);
+    });
+    s.serial = run.catch(() => {}); return run;
   }
   async handoff(active, reason) {
     const s = this.get(active);
@@ -247,6 +259,7 @@ export class BrowserService {
   }
   async call(active, name, args) {
     const s = this.sessions.get(active.chat.id);
+    if (s?.active.manual) { this.authorize(active); s.active = active; this.notify(s); }
     if (s?.control === 'human') {
       await s.humanPause; this.get(active);
       // A human may have changed the entire page. Do not replay a stale action.

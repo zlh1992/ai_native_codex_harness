@@ -179,7 +179,7 @@
       <label id="project-type-label" class="hidden">项目类型<select name="projectType"><option value="standard">普通项目 · Codex · 可协作</option><option value="local_private">隐私项目 · 本地 Qwen + DSH · 永不可分享</option></select><small>创建后不可切换。隐私项目文件/对话/记忆留在本机；仅主动搜索的搜索词发给云端 Luna。公网访问仍经过 Cloudflare。</small></label>
       <label>项目说明<textarea name="description" maxlength="1000" rows="3" placeholder="目标、技术栈或上下文"></textarea></label>
       <p class="form-error"></p>
-      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button value="default" class="primary">创建项目</button></div>
+      <div class="dialog-actions"><button formnovalidate value="cancel" class="secondary">取消</button><button value="default" class="primary">创建项目</button></div>
     </form>
   </dialog>
 
@@ -188,7 +188,7 @@
       <div class="dialog-title"><span class="mark small">C</span><div><p id="text-dialog-eyebrow" class="eyebrow">NEW ITEM</p><h2 id="text-dialog-title">新建</h2></div></div>
       <label><span id="text-dialog-label">名称</span><input id="text-dialog-input" name="value" maxlength="4000" required autocomplete="off"><textarea id="text-dialog-textarea" maxlength="4000" rows="8" hidden></textarea></label>
       <p class="form-error" role="alert"></p>
-      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button id="text-dialog-submit" value="default" class="primary">确认</button></div>
+      <div class="dialog-actions"><button formnovalidate value="cancel" class="secondary">取消</button><button id="text-dialog-submit" value="default" class="primary">确认</button></div>
     </form>
   </dialog>
 
@@ -197,7 +197,7 @@
       <div class="dialog-title"><span class="mark small">!</span><div><p id="confirm-dialog-eyebrow" class="eyebrow">CONFIRM ACTION</p><h2 id="confirm-dialog-title">确认操作</h2></div></div>
       <p id="confirm-dialog-message" class="dialog-copy"></p>
       <p class="form-error" role="alert"></p>
-      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button id="confirm-dialog-submit" value="default" class="danger-button">确认</button></div>
+      <div class="dialog-actions"><button formnovalidate value="cancel" class="secondary">取消</button><button id="confirm-dialog-submit" value="default" class="danger-button">确认</button></div>
     </form>
   </dialog>
 
@@ -209,7 +209,7 @@
       <small id="upload-file-meta"></small>
       <label class="upload-overwrite"><input name="overwrite" type="checkbox"> 若项目中已有同名文件，允许覆盖</label>
       <p class="form-error" role="alert"></p>
-      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button value="default" class="primary">确认上传</button></div>
+      <div class="dialog-actions"><button formnovalidate value="cancel" class="secondary">取消</button><button value="default" class="primary">确认上传</button></div>
     </form>
   </dialog>
 
@@ -219,7 +219,7 @@
       <p id="submit-summary" class="dialog-copy"></p>
       <label>补充说明（可选）<textarea name="note" maxlength="4000" rows="4" placeholder="说明验证方式、已知限制或请老板重点检查的内容"></textarea></label>
       <p class="form-error"></p>
-      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button value="default" class="primary">提交不可变快照</button></div>
+      <div class="dialog-actions"><button formnovalidate value="cancel" class="secondary">取消</button><button value="default" class="primary">提交不可变快照</button></div>
     </form>
   </dialog>
 

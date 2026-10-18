@@ -15,7 +15,7 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
 const initialState = () => ({
   me: null, csrf: '', modelSaving: false, defaultEffort: null, projects: [], chats: [], selectedProject: null, selectedChat: null,
-  selectedFile: null, selectedFileInfo: null, fileEntries: [], fileContent: null, viewerMode: 'preview',
+  selectedFile: null, selectedFileInfo: null, fileEntries: [], collapsedDirectories: new Set(), fileContent: null, viewerMode: 'preview',
   runningTurns: new Map(), maxConcurrentTurns: 11, tasks: [], selectedTask: null, taskGraphId: '',
   codexCapacity: null, pendingSubmission: null, pendingUpload: null,
   pendingTextAction: null, pendingConfirmAction: null,
@@ -414,7 +414,7 @@ async function selectProject(project, clearChat = true, { confirmed = false, fro
   state.selectedProject = project;
   if (clearChat) { state.selectedChat = null; state.selectedTask = null; state.pendingInput = null; $('#prompt-input').value = ''; clearChatDisplay(); setComposer(false); }
   if (changing || clearChat) closeViewer();
-  if (changing) { state.chats = []; state.fileEntries = []; renderChats(); $('#file-tree').replaceChildren(); }
+  if (changing) { state.collapsedDirectories.clear(); state.chats = []; state.fileEntries = []; renderChats(); $('#file-tree').replaceChildren(); }
   renderProjects();
   $('#project-kicker').textContent = project.username ? `${project.username.toUpperCase()} / ${project.slug}` : project.slug;
   $('#chat-title').textContent = state.selectedChat?.title || project.name;
@@ -603,7 +603,7 @@ function renderActivity(entry) {
     strip.classList.add('hidden'); strip.innerHTML = ''; return;
   }
   strip.classList.remove('hidden');
-  strip.innerHTML = `<div class="activity-line"><i>●</i><span>${escapeHtml(entry.statusText || `${entry.engineLabel || 'Codex'} 正在思考…`)}</span></div>${entry.events.map((event) => `<div class="activity-line"><i>${event.failed ? '✕' : event.done ? '✓' : '↳'}</i><span>${escapeHtml(event.name)}</span></div>`).join('')}`;
+  strip.innerHTML = `<div class="activity-line"><i>●</i><span>${escapeHtml(entry.statusText || `${entry.engineLabel || 'Codex'} 正在思考…`)}</span></div>${entry.events.map((event) => `<div class="activity-line"><i>${event.failed ? '✕' : event.done ? '✓' : '↳'}</i><span>${escapeHtml(({ browser_open: '打开网页', browser_snapshot: '读取网页', browser_handoff: event.done ? '网页接管已结束' : '等待你接管网页', browser_action: '操作网页' })[event.name] || event.name)}</span></div>`).join('')}`;
 }
 
 function updateInsightsVisibility() {
@@ -911,13 +911,17 @@ async function loadFiles() {
   const data = await api(`/api/projects/${projectId}/tree`);
   if (!projectClock.current(selection) || state.selectedProject?.id !== projectId) return;
   state.fileEntries = data.entries;
+  renderFiles();
+}
+
+function renderFiles() {
   const root = $('#file-tree');
   root.className = 'file-tree';
-  root.innerHTML = data.entries.map((entry) => {
+  root.innerHTML = state.fileEntries.filter(entry => !entry.path.split('/').slice(0, -1).some((_, index, parts) => state.collapsedDirectories.has(parts.slice(0, index + 1).join('/')))).map((entry) => {
     const depth = entry.path.split('/').length - 1;
-    return `<button class="file-entry depth-${Math.min(12, depth)} ${state.selectedFile === entry.path ? 'active' : ''}" data-path="${escapeHtml(entry.path)}" data-type="${entry.type}"><span class="file-icon">${entry.type === 'directory' ? '▾' : entry.type === 'symlink' ? '↗' : '·'}</span><span>${escapeHtml(entry.name)}</span>${entry.type === 'file' ? `<span class="file-meta">${formatBytes(entry.size)}</span>` : ''}</button>`;
+    return `<button class="file-entry depth-${Math.min(12, depth)} ${state.selectedFile === entry.path ? 'active' : ''}" data-path="${escapeHtml(entry.path)}" data-type="${entry.type}" ${entry.type === 'directory' ? `aria-expanded="${!state.collapsedDirectories.has(entry.path)}"` : ''}><span class="file-icon">${entry.type === 'directory' ? state.collapsedDirectories.has(entry.path) ? '▸' : '▾' : entry.type === 'symlink' ? '↗' : '·'}</span><span>${escapeHtml(entry.name)}</span>${entry.type === 'file' ? `<span class="file-meta">${formatBytes(entry.size)}</span>` : ''}</button>`;
   }).join('') || '<div class="empty-state">项目为空</div>';
-  $$('.file-entry', root).forEach((button) => button.addEventListener('click', () => button.dataset.type === 'file' && openFile(button.dataset.path)));
+  $$('.file-entry', root).forEach((button) => button.addEventListener('click', () => { if (button.dataset.type === 'directory') { const value = button.dataset.path; if (state.collapsedDirectories.has(value)) state.collapsedDirectories.delete(value); else state.collapsedDirectories.add(value); renderFiles(); } else if (button.dataset.type === 'file') void openFile(button.dataset.path); }));
 }
 
 function fileExtension(filePath) {

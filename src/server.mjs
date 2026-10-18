@@ -623,7 +623,8 @@ async function route(req, res) {
     invariant(!graphStore.runs({ projectId: project.id }).length, 409, 'PROJECT_WORKFLOW_HISTORY', '项目保留工作图交付历史，不能删除。');
     const sourceMemories = memory.memoryIdsForSourceProject(project.id, session.user.id);
     const affectedMemoryChats = [...new Set(sourceMemories.flatMap((id) => memory.dependentChatIds(id, session.user.id)))];
-    await Promise.all(affectedMemoryChats.map((chatId) => codex.interruptAndWait(chatId)));
+    await Promise.all([...affectedMemoryChats.map((chatId) => codex.interruptAndWait(chatId)),
+      ...[...codex.browser.sessions.values()].filter(s => s.active.project.id === project.id).map(s => codex.browser.close(s.active.chat.id, 'project_deleted'))]);
     session = refreshSession(session); project = ownerProject(projectFor(session, project.id));
     invariant(!db.runtimeForProject(project.id).busy && !codex.workspaceBusy(project.accessId),
       409, 'PROJECT_BUSY', '项目仍有排队、运行或恢复中的任务，不能删除。');
@@ -862,6 +863,10 @@ async function route(req, res) {
     const chat = chatFor(session, match[1]);
     invariant(!codex.chatBusy(chat.id), 409, 'CHAT_RUNNING', '请先停止正在运行、排队或恢复中的任务。');
     invariant(!chat.workflowJobId, 409, 'CHAT_HAS_WORKFLOW', '后台工作图对话用于恢复与审核，不可删除。');
+    invariant(!db.chatHasSubmission(chat.id), 409, 'CHAT_HAS_SUBMISSION', '该对话包含不可变的任务提交证据，不能删除。');
+    await codex.browser.close(chat.id, 'chat_deleted');
+    chatFor(refreshSession(session), chat.id);
+    invariant(!codex.chatBusy(chat.id), 409, 'CHAT_RUNNING', '请先停止正在运行的任务。');
     invariant(!db.chatHasSubmission(chat.id), 409, 'CHAT_HAS_SUBMISSION', '该对话包含不可变的任务提交证据，不能删除。');
     try { db.deleteChat(chat.id); } catch (error) { throw new HttpError(409, 'CHAT_DELETE_REJECTED', error.message); }
     audit(req, session, 'chat.delete', 'chat', chat.id);
@@ -1400,7 +1405,7 @@ async function route(req, res) {
   throw new HttpError(404, 'NOT_FOUND', '接口不存在。');
 }
 
-const handleBrowser = browserRoutes({ codex, config, chatFor, requireMutation, refreshSession, checkOrigin });
+const handleBrowser = browserRoutes({ codex, config, chatFor, requireMutation, refreshSession, checkOrigin, projectFor });
 await bootstrapAdmin();
 db.cleanSessions();
 

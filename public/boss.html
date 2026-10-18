@@ -73,7 +73,7 @@
 
   <dialog id="user-dialog">
     <form method="dialog" id="user-form">
-      <div class="dialog-title"><div><p class="eyebrow">EMPLOYEE ACCOUNT</p><h2 id="user-dialog-title">创建员工</h2></div><button value="cancel" class="close-button" aria-label="关闭">×</button></div>
+      <div class="dialog-title"><div><p class="eyebrow">EMPLOYEE ACCOUNT</p><h2 id="user-dialog-title">创建员工</h2></div><button formnovalidate value="cancel" class="close-button" aria-label="关闭">×</button></div>
       <input name="id" type="hidden">
       <div class="field-grid"><label>用户名<input name="username" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{2,31}"></label><label>显示名称<input name="displayName" required maxlength="64"></label></div>
       <label>密码<input name="password" type="password" minlength="12" autocomplete="new-password"><small>新员工必填，至少 12 位；编辑时留空表示不修改。</small></label>
@@ -88,17 +88,17 @@
         <small>用于生成分工计划，不改变账号权限。</small>
       </fieldset>
       <p class="form-error" role="alert"></p>
-      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button value="default" class="primary">保存</button></div>
+      <div class="dialog-actions"><button formnovalidate value="cancel" class="secondary">取消</button><button value="default" class="primary">保存</button></div>
     </form>
   </dialog>
 
   <dialog id="project-dialog">
     <form method="dialog" id="project-form">
-      <div class="dialog-title"><div><p class="eyebrow">OWNER PROJECT</p><h2>创建老板项目</h2></div><button value="cancel" class="close-button" aria-label="关闭">×</button></div>
+      <div class="dialog-title"><div><p class="eyebrow">OWNER PROJECT</p><h2>创建老板项目</h2></div><button formnovalidate value="cancel" class="close-button" aria-label="关闭">×</button></div>
       <label>项目名称<input name="name" maxlength="80" required></label>
       <label>项目说明<textarea name="description" maxlength="1000" rows="4"></textarea></label>
       <p class="form-error" role="alert"></p>
-      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button value="default" class="primary">创建并初始化 Git</button></div>
+      <div class="dialog-actions"><button formnovalidate value="cancel" class="secondary">取消</button><button value="default" class="primary">创建并初始化 Git</button></div>
     </form>
   </dialog>
 
@@ -107,7 +107,7 @@
       <div class="dialog-title"><div><p class="eyebrow">REVOKE ACCESS</p><h2>撤销项目访问</h2></div></div>
       <p id="confirm-message">员工将立即失去访问权；未提交的脏工作树会保留。</p>
       <p class="form-error" role="alert"></p>
-      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button id="confirm-dialog-submit" value="default" class="primary danger">确认撤权</button></div>
+      <div class="dialog-actions"><button formnovalidate value="cancel" class="secondary">取消</button><button id="confirm-dialog-submit" value="default" class="primary danger">确认撤权</button></div>
     </form>
   </dialog>
 

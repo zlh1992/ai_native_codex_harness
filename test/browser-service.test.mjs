@@ -76,3 +76,31 @@ test('disconnected sessions expire and clear their temporary login directory', a
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(browser.sessions.size, 0); assert.equal(fs.existsSync(session.root), false);
 });
+
+
+test('manual browsing checks live mode and Agent adoption retains human control', async t => {
+  const { browser, active, session, chat } = fixture(t);
+  const manual = { ...active, manual: true }; session.active = manual;
+  chat.preferredMode = 'edit';
+  assert.throws(() => browser.authorize(manual), { code: 'BROWSER_EXECUTE_REQUIRED' });
+  chat.preferredMode = 'execute'; browser.authorize(manual);
+  browser.config.browserHandoffTimeoutMs = 1000;
+  await browser.control(manual, 'takeover', 'owner');
+  browser.snapshot = async () => ({ text: 'human page retained' });
+  const pending = browser.call(active, 'browser_snapshot', {});
+  assert.equal(session.active, active); assert.equal(session.control, 'human');
+  await browser.control(active, 'continue', 'owner');
+  assert.equal((await pending).text, 'human page retained');
+});
+
+test('control changes queue after human input and reject stale concurrent ownership', async t => {
+  const { browser, active, session } = fixture(t);
+  browser.config.browserHandoffTimeoutMs = 1000;
+  await browser.control(active, 'takeover', 'owner');
+  let release; const input = browser.operate(active, 'human', 'owner', () => new Promise(resolve => { release = resolve; }));
+  await new Promise(resolve => setImmediate(resolve));
+  const returning = browser.control(active, 'continue', 'owner');
+  assert.equal(session.control, 'human'); release(); await input; await returning;
+  assert.equal(session.control, 'agent');
+  await assert.rejects(browser.control(active, 'continue', 'owner'), { code: 'BROWSER_CONTROL_CHANGED' });
+});

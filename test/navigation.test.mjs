@@ -68,14 +68,15 @@ test('workbench bootstrap renders connection errors rather than login on transie
 test('project A→B→A discards old chat and tree responses, not just unequal project IDs', async () => {
   for (const name of ['loadChats', 'loadFiles']) {
     const clock = new SelectionClock(); const requests = [];
-    const state = { selectedProject: { id: 'A' }, chats: [], fileEntries: [] };
+    const state = { selectedProject: { id: 'A' }, chats: [], fileEntries: [], collapsedDirectories: new Set() };
     const { document } = parseHTML('<div id="file-tree"></div>');
-    const load = Function('state', 'projectClock', 'api', 'renderChats', '$', '$$', 'escapeHtml', 'formatBytes', `${source(name)}; return ${name};`)(
+    const load = Function('state', 'projectClock', 'api', 'renderChats', '$', '$$', 'escapeHtml', 'formatBytes', `${name === 'loadFiles' ? source('renderFiles') : ''}; ${source(name)}; return ${name};`)(
       state, clock, () => { const d = deferred(); requests.push(d); return d.promise; }, () => {}, selector => document.querySelector(selector), () => [], value => value, value => value);
     clock.next(); const first = load(); clock.next(); state.selectedProject = { id: 'B' }; clock.next(); state.selectedProject = { id: 'A' }; const current = load();
     requests[1].resolve({ chats: [{ id: 'new' }], entries: [{ name: 'new', path: 'new', type: 'file' }] }); await current;
     requests[0].resolve({ chats: [{ id: 'stale' }], entries: [{ name: 'stale', path: 'stale', type: 'file' }] }); await first;
     assert.equal(name === 'loadChats' ? state.chats[0].id : state.fileEntries[0].name, 'new');
+    if (name === 'loadFiles') { assert.match(document.querySelector('#file-tree').textContent, /new/); assert.doesNotMatch(document.querySelector('#file-tree').textContent, /stale/); }
   }
 });
 

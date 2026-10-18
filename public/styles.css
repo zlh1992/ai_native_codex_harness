@@ -200,7 +200,7 @@ body.resizing-row{cursor:row-resize!important;user-select:none!important}
 .tool-details-ready #activity-strip .activity-line ~ .activity-line { display: none; }
 @media (max-width: 820px) { #tool-details-panel .tool-details-disclosure>summary { padding-inline: 10px; } #tool-details-panel .tool-details-body { padding-inline: 10px; } #tool-details-panel .tool-details-disclosure[open] { max-height: 260px; } .turn-insights-summary { padding-inline: 10px; } .turn-insights-body { padding-inline: 10px; } .turn-insights[open] { max-height: 260px; } .task-flow-notice { max-height: 160px; overflow: auto; } }
 /* The canvas contains pixels only. Remote HTML never enters the Portal DOM. */
-.browser-drawer { width: min(1160px, 96vw); max-height: 96vh; padding: 18px; border: 1px solid #64748b; border-radius: 16px; background: #fff; color: #172033; overflow: auto; }
+.browser-drawer { width: min(1160px, 96vw); max-height: 96vh; padding: 18px; border: 1px solid #64748b; border-radius: 16px; background: var(--panel); color: var(--text); overflow: auto; }
 .browser-drawer::backdrop { background: #10182899; }
 .browser-drawer header, .browser-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .browser-drawer header b { flex: 1; }
@@ -208,4 +208,10 @@ body.resizing-row{cursor:row-resize!important;user-select:none!important}
 .browser-drawer canvas { display: block; width: 100%; aspect-ratio: 1100 / 760; background: #f1f5f9; touch-action: none; border: 1px solid #cbd5e1; }
 .browser-input { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding-top: 10px; }
 .browser-input input { flex: 1; min-width: 160px; }
-.browser-drawer [data-error] { color: #b42318; }
+.browser-drawer [data-error] { color: var(--danger); }
+
+.browser-address{display:flex;gap:8px;margin:10px 0}.browser-address input{flex:1;min-width:0;border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--panel);color:var(--text)}.browser-drawer [data-guide]{padding:12px;border:1px solid var(--line);border-radius:8px;line-height:1.6;background:var(--panel-2)}.browser-drawer button:disabled{opacity:.45;cursor:not-allowed}.browser-drawer [data-reason]:empty,.browser-drawer [data-error]:empty{display:none}
+
+.browser-controls select,.browser-input input{border:1px solid var(--line);border-radius:8px;padding:9px;background:var(--panel-2);color:var(--text)}
+
+.browser-controls{position:sticky;top:0;z-index:1;background:var(--panel);padding:8px 0}
