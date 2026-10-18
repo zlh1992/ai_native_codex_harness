@@ -16,11 +16,14 @@ const sample = (input, output, cached = 0) => ({ inputTokens: input, outputToken
 const event = (threadId, turnId, total, last = total) => ({ threadId, turnId, tokenUsage: { total, last } });
 
 test('role defaults, visible models and explicit/chat/default effort precedence', () => {
-  const config = { codexModel: 'gpt-6-luna', codexReasoningEffort: 'high' };
+  const config = { codexModel: 'gpt-6.1-sol', codexReasoningEffort: 'high' };
   assert.equal(defaultEffort(config,user), 'medium'); assert.equal(defaultEffort(config,boss), 'high');
-  assert.deepEqual(ROOT_MODELS.map((model) => model.id), ['gpt-6-luna', 'gpt-5.6-terra', 'gpt-5.6-luna']);
+  assert.deepEqual(ROOT_MODELS.map((model) => model.id), ['gpt-6.1-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']);
   for (const role of [user,boss]) for (const model of ROOT_MODELS) assert.equal(rootModel(config, { preferredModel: model.id }, role), model.id);
-  assert.equal(rootModel(config, { preferredModel: 'gpt-6-astra' }, user), 'gpt-6-luna');
+  for (const role of [user, boss]) {
+    assert.equal(rootModel(config, { preferredModel: 'gpt-6-astra' }, role), 'gpt-6.1-sol');
+    assert.throws(() => rootModel({ codexModel: 'gpt-6-astra' }, {}, role), { code: 'INVALID_MODEL' });
+  }
   assert.equal(rootEffort(config, {}, user), 'medium');
   assert.equal(rootEffort(config, { preferredEffort: 'max' }, user), 'max');
   assert.equal(rootEffort(config, { preferredEffort: 'max' }, user, 'low'), 'low');

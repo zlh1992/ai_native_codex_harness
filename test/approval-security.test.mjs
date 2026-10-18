@@ -14,7 +14,7 @@ function fixture(mode = 'edit') {
     workspacesRoot: path.join(base, 'workspaces'), treesRoot: path.join(base, 'trees'),
     runtimeRoot: path.join(base, 'runtime'), trashRoot: path.join(base, 'trash'),
     portalSkillsRoot: path.join(base, 'skills'), portalAgentConfig: path.join(base, 'luna.toml'),
-    codexModel: 'test-model', codexModelProvider: 'test-provider', codexReasoningEffort: 'low',
+    codexModel: 'gpt-5.6-sol', codexModelProvider: 'test-provider', codexReasoningEffort: 'low',
     codexMaxConcurrentTurns: 4, portalMaxActiveRootTurns: 2, portalMaxExecuteLeases: 2,
     executionLeaseTtlMs: 30_000, maxSubagentsPerRoot: 3, subagentModel: 'test-subagent',
     codexRequestTimeoutMs: 30_000, commandTimeoutMs: 10_000, commandMaxOutputBytes: 64 * 1024,

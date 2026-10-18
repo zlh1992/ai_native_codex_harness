@@ -131,7 +131,7 @@ Seatbelt 不是容器。完全不可信用户需要独立 OS 用户、VM/容器�
 
 分享历史前若检测到跨项目记忆引用，Portal 只向 owner 返回条数、接收者和短期确认挑战，不返回记忆正文；确认必须单次、限时且绑定快照。失效引用不得通过确认绕过来源 ACL。
 
-老板与员工可经既有 chat PATCH 接口修改自己普通 chat 的 `preferredModel` / `preferredEffort`（当前白名单值或 null）；要求原 chat ACL、CSRF/Origin 且 chat 无运行/恢复/排队输入。`/api/me` 向双方返回同一受控模型目录，目录镜像 Codex 客户端可见模型，不表示上游账号保证可用；隐藏/内部模型不能通过 API 选择。
+老板与员工可经既有 chat PATCH 接口修改自己普通 chat 的 `preferredModel` / `preferredEffort`（当前白名单值或 null）；要求原 chat ACL、CSRF/Origin 且 chat 无运行/恢复/排队输入。`/api/me` 向双方返回同一受控模型目录，目录受部署白名单限制，不表示上游账号保证可用；Astra 和其他目录外模型不能通过 API 或 CODEX_MODEL 默认配置选择。
 
 ## 后台业务工具边界
 

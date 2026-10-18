@@ -148,7 +148,7 @@ queued -> starting -> running -> completed
 
 ## 对话模型与推理强度偏好
 
-`chats.preferred_model` 与 `chats.preferred_effort` 为 nullable、按对话保存的 root 偏好。老板与员工均可在自己的普通项目/任务对话选择 Portal 模型白名单；该目录镜像当前 Codex 客户端中 `visibility=list` 的模型，不包含隐藏的 reserve 或内部审核模型，具体目录属于运行时事实。默认模型来自 `CODEX_MODEL`。员工默认强度 medium，老板默认 `CODEX_REASONING_EFFORT`（默认 high）；强度解析依次为本次显式请求、chat 偏好、角色默认，非法值拒绝。已有模型偏好保留；当偏好模型退出当前白名单时，不改写数据库值，运行按当前 `CODEX_MODEL` 执行，新的 API 选择仍拒绝退役 ID。旧 chat 强度为 null，不回写历史运行。分享的新副本不复制模型/强度偏好，采用接收者默认；恢复既有授权保留原 chat 偏好。隐私项目不能设置这些 GPT 偏好，后台 planner/reviewer 不接受浏览器修改。
+`chats.preferred_model` 与 `chats.preferred_effort` 为 nullable、按对话保存的 root 偏好。老板与员工均可在自己的普通项目/任务对话选择 Portal 模型白名单；该目录由部署策略控制，老板和员工相同；当前仅允许 GPT-6.1 Sol 及 GPT-5.6 Sol/Terra/Luna，不包含 Astra、隐藏 reserve 或内部审核模型。默认模型来自 `CODEX_MODEL`。员工默认强度 medium，老板默认 `CODEX_REASONING_EFFORT`（默认 high）；强度解析依次为本次显式请求、chat 偏好、角色默认，非法值拒绝。已有模型偏好保留；当偏好模型退出当前白名单时，不改写数据库值，运行按当前 `CODEX_MODEL` 执行，新的 API 选择仍拒绝退役 ID。旧 chat 强度为 null，不回写历史运行。分享的新副本不复制模型/强度偏好，采用接收者默认；恢复既有授权保留原 chat 偏好。隐私项目不能设置这些 GPT 偏好，后台 planner/reviewer 不接受浏览器修改。
 
 模型和强度仅在没有运行、恢复或待处理输入时修改；队列保存入队时的强度，run 冻结模型/强度。后续偏好不能改写已经派发或排队的工作；steer 沿用当前 turn 配置。上游不支持模型/强度时显式失败，不静默降级。
 

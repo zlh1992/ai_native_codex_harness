@@ -1,5 +1,7 @@
 # 实施报告索引
 
+- [2026-10-18 远端 graph 本机适配与域名 1/2 部署](2026-10-18-local-domain12-deployment.md)：完成（已部署）；远端 060b52b、四模型双角色真实调用、Astra 禁用、201+19 门控与数据保留验证。
+
 - [2026-10-17 Portal 模型目录对齐与公网角色任务验证](2026-10-17-model-catalog-public-smoke.md)：阻塞；目录对齐、门控、重启和老板 GPT-6 high 推理通过；员工登录、网页浏览、GitHub clone 仍受阻。
 
 - [2026-10-10 本地修改归档与远端分支同步](2026-10-10-local-changes-sync.md)：实施中；将当前 `graph` 工作树修改归档并同步到 `origin/graph`。

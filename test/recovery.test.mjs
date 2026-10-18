@@ -14,7 +14,7 @@ function fixture() {
     workspacesRoot: path.join(base, 'workspaces'), treesRoot: path.join(base, 'trees'),
     runtimeRoot: path.join(base, 'runtime'), trashRoot: path.join(base, 'trash'),
     portalSkillsRoot: path.join(base, 'skills'), portalAgentConfig: path.join(base, 'luna.toml'),
-    codexModel: 'test-model', codexModelProvider: 'test-provider', codexReasoningEffort: 'low',
+    codexModel: 'gpt-5.6-sol', codexModelProvider: 'test-provider', codexReasoningEffort: 'low',
     codexMaxConcurrentTurns: 4, portalMaxActiveRootTurns: 2, portalMaxExecuteLeases: 1,
     executionLeaseTtlMs: 30_000, maxSubagentsPerRoot: 3, subagentModel: 'test-subagent',
     codexRequestTimeoutMs: 30_000, fileMaxBytes: 1024 * 1024, uploadMaxBytes: 1024 * 1024,
@@ -522,12 +522,12 @@ test('boss and employee model preferences reach resumed thread and each turn wit
   };
   try {
     db.db.prepare("UPDATE users SET role='admin' WHERE id=?").run(user.id);
-    for (const model of ['gpt-6-luna', 'gpt-5.6-luna', 'gpt-5.6-terra']) {
+    for (const model of ['gpt-6.1-sol', 'gpt-5.6-luna', 'gpt-5.6-terra']) {
       const current = db.updateChat(chat.id, { preferredModel: model });
       await assert.rejects(service.runTurn({ chat: current, project, user: db.getUserById(user.id), prompt: 'model test', mode: 'edit', emit() {} }), /intentional test stop/);
       assert.equal(calls.filter((call) => call.method === 'turn/start').at(-1).params.model, model);
     }
-    assert.equal(calls.find((call) => call.method === 'thread/resume').params.model, 'gpt-6-luna');
+    assert.equal(calls.find((call) => call.method === 'thread/resume').params.model, 'gpt-6.1-sol');
     db.db.prepare("UPDATE users SET role='user' WHERE id=?").run(user.id);
     await assert.rejects(service.runTurn({ chat: db.getChat(chat.id), project, user, prompt: 'employee model test', mode: 'edit', emit() {} }), /intentional test stop/);
     assert.equal(calls.filter((call) => call.method === 'turn/start').at(-1).params.model, 'gpt-5.6-terra');

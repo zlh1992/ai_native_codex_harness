@@ -5,7 +5,7 @@ import { loadConfig } from '../src/config.mjs';
 test('concurrency defaults to 40 and is hard-capped at 40', () => {
   const config = loadConfig({});
   assert.equal(config.codexModelProvider, 'openai_http');
-  assert.equal(config.codexModel, 'gpt-6-luna');
+  assert.equal(config.codexModel, 'gpt-5.6-sol');
   assert.equal(config.chatgptCodexBaseUrl, 'https://chatgpt.com/backend-api/codex');
   assert.equal(config.codexMaxConcurrentTurns, 40);
   assert.equal(config.portalMaxActiveRootTurns, 11);
@@ -30,4 +30,14 @@ test('concurrency defaults to 40 and is hard-capped at 40', () => {
 test('ordinary Codex upstream is fixed to the local ChatGPT official login', () => {
   assert.throws(() => loadConfig({ CHATGPT_CODEX_BASE_URL: 'https://example.invalid/codex' }), { code: 'CODEX_BASE_URL_NOT_ALLOWED' });
   assert.throws(() => loadConfig({ CODEX_MODEL_PROVIDER: 'third_party' }), { code: 'CODEX_PROVIDER_NOT_ALLOWED' });
+});
+
+test('configured defaults cannot bypass the deployment model allowlist', () => {
+  for (const model of ['gpt-6.1-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+    assert.equal(loadConfig({ CODEX_MODEL: model }).codexModel, model);
+  }
+  for (const model of ['gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol', 'arbitrary-model']) {
+    assert.throws(() => loadConfig({ CODEX_MODEL: model }), { code: 'INVALID_MODEL' });
+  }
+  assert.equal(loadConfig({}).localQwenEnabled, false);
 });

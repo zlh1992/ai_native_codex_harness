@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { validateModel } from './models.mjs';
 import { publicIngressConfig } from './public-ingress.mjs';
 import { localModelUrl } from './private-projects.mjs';
 import { fileURLToPath } from 'node:url';
@@ -74,7 +75,7 @@ export function loadConfig(env = process.env) {
     portalAgentConfig: resolved(env.PORTAL_AGENT_CONFIG, path.join(ROOT_DIR, 'portal-agents', 'luna.toml')),
     codexBin: env.CODEX_BIN || '/Applications/ChatGPT.app/Contents/Resources/codex',
     codexCliVersion: '0.150.0-alpha.8',
-    codexModel: env.CODEX_MODEL || 'gpt-6-luna',
+    codexModel: validateModel(env.CODEX_MODEL || 'gpt-5.6-sol'),
     codexModelProvider,
     chatgptCodexBaseUrl,
     codexReasoningEffort: env.CODEX_REASONING_EFFORT || 'high',

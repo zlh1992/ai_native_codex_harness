@@ -188,7 +188,7 @@ HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake ap
 
 ## E2E-017 模型权限与用量
 
-原员工禁止选择 root 模型的断言由同一发布门控中的新权限契约替换：活动员工可在自己的普通 chat 使用当前 Codex 桌面目录中标记为可见的全部三种 GPT（`gpt-6-luna`、`gpt-5.6-terra`、`gpt-5.6-luna`），保存强度，默认 medium；老板默认 high，分享副本使用接收者默认。隐藏的 `gpt-reserve` 与 `codex-auto-review` 不可选择。目录退役前保存的旧模型偏好不回写数据库，但运行回退到当前默认；新 API 选择仍拒绝退役模型。越权 chat、非法模型/强度、运行/排队时修改和员工读取 admin 用量仍拒绝。
+原员工禁止选择 root 模型的断言由同一发布门控中的新权限契约替换：活动员工可在自己的普通 chat 使用部署允许的四种 GPT（`gpt-6.1-sol`、`gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`），保存强度，默认 medium；老板默认 high，分享副本使用接收者默认。隐藏的 `gpt-reserve` 与 `codex-auto-review` 不可选择。目录退役前保存的旧模型偏好不回写数据库，但运行回退到当前默认；新 API 选择仍拒绝退役模型。越权 chat、非法模型/强度、运行/排队时修改和员工读取 admin 用量仍拒绝。
 
 计量测试覆盖多步累计去重、root/child/辅助归属、resume/fork 未知基线、迟到/乱序样本、取消失败及重启、删除后保留、北京时间边界和筛选。真实 DSH 核心搭配合成回环 SSE 验证多步/续聊采集；独立搜索夹具固定只有 query/摘要输入且 Luna-low 计量正确。DOM 测试验证缺失值、筛选、身份失效清理和旧请求不覆盖新结果。
 
@@ -201,3 +201,7 @@ HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake ap
 ## 运维进程控制回归
 
 `test/background-process.test.mjs` 验证重复启动复用同一进程、停止后不再运行、PID 指向另一进程时拒绝操作；真实整套 stop/start/restart、双域名与角色登录验证记录在实施报告。此测试不替代既有 HTTP/Seatbelt E2E。
+
+## 部署模型限制
+
+老板与员工共享四模型目录（GPT-6.1 Sol、GPT-5.6 Sol/Terra/Luna）；HTTP gate 对双方验证目录、偏好持久化及 Astra 选择拒绝。配置测试拒绝目录外 CODEX_MODEL；旧 Astra 偏好保留但只能解析到受控默认模型。历史用量仍可展示已退役模型。

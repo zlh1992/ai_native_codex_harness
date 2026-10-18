@@ -107,3 +107,7 @@ PUBLIC_TUNNEL_MODE=tailscale
 本项目协议固定为 `0.150.0-alpha.8`。ChatGPT App 自动更新可能替换其内置二进制；运行中的旧进程继续在线不代表下一次重启仍兼容。若 `--version` 或 initialize 版本不同，应安装官方 `@openai/codex` 的同一精确版本，把本机 `.env` 的 `CODEX_BIN` 指向该版本的独立可执行文件，再运行完整 gate 与隔离真实冒烟。不要只修改 pin 字符串绕过检查。
 
 本次部署使用 `.tools/codex-0.150.0-alpha.8/` 下的官方 npm macOS 架构包；`.tools` 与 `.env` 不提交 Git。升级协议仍按 [协议升级流程](../spec/architecture/08-operations-protocol-and-evolution.md) 执行。
+
+## 无本地 Qwen 的部署
+
+设置 `LOCAL_QWEN_ENABLED=false`，保留隐私项目数据和 ACL；隐私执行会明确拒绝，不会回退云端。普通项目默认 `CODEX_MODEL=gpt-5.6-sol`，老板和员工可选择 GPT-5.6 Sol/Terra/Luna 与 GPT-6.1 Sol，Astra 不在允许名单。必须分别通过真实推理验收，目录或健康状态不代表账号可用。复用已有数据库时先做一致性备份和副本迁移验证；使用 Portal 启停脚本切换，避免统一 services 脚本启动尚未配置的微信绑定。

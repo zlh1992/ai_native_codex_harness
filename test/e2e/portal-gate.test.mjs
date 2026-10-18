@@ -42,7 +42,7 @@ async function startServer({ failResume = false } = {}) {
       RUNTIME_ROOT: path.join(base, 'runtime'), TRASH_ROOT: path.join(base, 'trash'),
       ADMIN_USERNAME: 'gateboss', ADMIN_PASSWORD: 'GateBossPassword!123',
       CODEX_BIN: failResume ? FAKE_CODEX_FAIL_RESUME : FAKE_CODEX,
-      CODEX_MODEL: 'gpt-6-luna', CODEX_MODEL_PROVIDER: 'openai_http',
+      CODEX_MODEL: 'gpt-6.1-sol', CODEX_MODEL_PROVIDER: 'openai_http',
       CODEX_REQUEST_TIMEOUT_MS: '30000',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -192,10 +192,11 @@ test('fixed Portal release gate', { timeout: 60_000 }, async (t) => {
       method: 'POST', body: { title: 'Owner design history' }, expect: 201,
     })).chat;
     const ownerModels = (await json(boss, '/api/me')).models.map((model) => model.id);
-    assert.deepEqual(ownerModels, ['gpt-6-luna', 'gpt-5.6-terra', 'gpt-5.6-luna']);
+    assert.deepEqual(ownerModels, ['gpt-6.1-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']);
     await request(boss, `/api/chats/${ownerChat.id}`, { method: 'PATCH', body: { preferredModel: 'arbitrary-model' }, expect: 400 });
     await request(boss, `/api/chats/${ownerChat.id}`, { method: 'PATCH', body: { preferredModel: 'gpt-reserve' }, expect: 400 });
     await request(boss, `/api/chats/${ownerChat.id}`, { method: 'PATCH', body: { preferredModel: 'codex-auto-review' }, expect: 400 });
+    await request(boss, `/api/chats/${ownerChat.id}`, { method: 'PATCH', body: { preferredModel: 'gpt-6-astra' }, expect: 400 });
     for (const preferredModel of ownerModels) {
       const changed = await json(boss, `/api/chats/${ownerChat.id}`, { method: 'PATCH', body: { preferredModel } });
       assert.equal(changed.chat.preferredModel, preferredModel);
@@ -413,8 +414,9 @@ test('fixed Portal release gate', { timeout: 60_000 }, async (t) => {
     assert.equal((await json(first, '/api/me')).defaultEffort, 'medium');
     assert.equal((await json(boss, '/api/me')).defaultEffort, 'high');
     const employeeModelIds = (await json(first, '/api/me')).models.map((model) => model.id);
-    assert.deepEqual(employeeModelIds, ['gpt-6-luna', 'gpt-5.6-terra', 'gpt-5.6-luna']);
+    assert.deepEqual(employeeModelIds, ['gpt-6.1-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']);
     assert.equal(fork.preferredEffort, null);
+    await request(first, `/api/chats/${fork.id}`, { method: 'PATCH', body: { preferredModel: 'gpt-6-astra' }, expect: 400 });
     for (const model of (await json(first, '/api/me')).models) {
       const changed = await json(first, `/api/chats/${fork.id}`, { method: 'PATCH', body: { preferredModel: model.id, preferredEffort: 'max' } });
       assert.equal(changed.chat.preferredModel, model.id); assert.equal(changed.chat.preferredEffort, 'max');
@@ -455,7 +457,7 @@ test('fixed Portal release gate', { timeout: 60_000 }, async (t) => {
     const source = (await json(boss, `/api/projects/${busyProject.id}/chats`, { method: 'POST', body: { title: 'Busy owner' }, expect: 201 })).chat;
     const running = request(boss, `/api/chats/${source.id}/turns`, { method: 'POST', body: { prompt: '[[hold]] owner working', mode: 'edit' } });
     await waitUntil(async () => (await json(boss, `/api/chats/${source.id}`)).latestTurnRun?.status === 'running', 'owner turn not running');
-    await request(boss, `/api/chats/${source.id}`, { method: 'PATCH', body: { preferredModel: 'gpt-6-luna', preferredEffort: 'low' }, expect: 409 });
+    await request(boss, `/api/chats/${source.id}`, { method: 'PATCH', body: { preferredModel: 'gpt-6.1-sol', preferredEffort: 'low' }, expect: 409 });
     const rejected = await json(boss, `/api/admin/projects/${busyProject.id}/shares`, { method: 'POST', body: { userId: firstUser.id }, expect: 409 });
     assert.equal(rejected.error.code, 'WORKSPACE_BUSY');
     await request(boss, `/api/chats/${source.id}/interrupt`, { method: 'POST' });

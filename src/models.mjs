@@ -1,8 +1,9 @@
 import { invariant } from './errors.mjs';
 
-// Portal-approved root models mirror the visible models in the current desktop Codex catalog.
+// Deployment-approved root models, shared by boss, employees and channel commands.
 export const ROOT_MODELS = Object.freeze([
-  { id: 'gpt-6-luna', label: 'GPT-6 Luna' },
+  { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol' },
+  { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
   { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
   { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' },
 ]);
@@ -16,7 +17,7 @@ export function rootModel(config, chat, user) {
   // Retired preferences stay stored for history, but run with the current
   // configured default. New API selections still pass through validateModel.
   return chat?.preferredModel && ROOT_MODELS.some((entry) => entry.id === chat.preferredModel)
-    ? chat.preferredModel : config.codexModel;
+    ? chat.preferredModel : validateModel(config.codexModel);
 }
 
 export const EFFORTS = new Set(['none', 'low', 'medium', 'high', 'xhigh', 'max']);
