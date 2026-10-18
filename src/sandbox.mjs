@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { invariant } from './errors.mjs';
 import { CommandQueue } from './command-queue.mjs';
+import { resolveOutboundProxy, proxyEnvironment } from './outbound-proxy.mjs';
 
 const queues = new WeakMap();
 const runtimes = new WeakMap();
@@ -25,25 +26,38 @@ function commandRuntime(config) {
   });
   invariant(python, 503, 'COMMAND_RUNTIME_UNAVAILABLE', '项目执行需要可直接启动的 Python 3.10+；请管理员设置 COMMAND_PYTHON_BIN。');
   const binary = fs.realpathSync(python);
+  const git = (config.commandGitBin ? [config.commandGitBin] : ['/opt/homebrew/bin/git', '/usr/local/bin/git', '/Library/Developer/CommandLineTools/usr/bin/git', '/Applications/Xcode.app/Contents/Developer/usr/bin/git']).find(file => {
+    if (!fs.existsSync(file)) return false;
+    const probe = spawnSync(file, ['--version'], { encoding: 'utf8', timeout: 5000, env: { PATH: '/usr/bin:/bin' } });
+    return probe.status === 0 && /^git version /.test(probe.stdout || '');
+  });
+  invariant(git, 503, 'COMMAND_RUNTIME_UNAVAILABLE', '项目执行需要可直接启动的 Git；请管理员设置 COMMAND_GIT_BIN。');
+  const gitExecPath = spawnSync(git, ['--exec-path'], { encoding: 'utf8', timeout: 5000, env: { PATH: '/usr/bin:/bin' } }).stdout?.trim();
+  invariant(gitExecPath && path.isAbsolute(gitExecPath) && fs.existsSync(path.join(gitExecPath, 'git-remote-http')), 503,
+    'COMMAND_RUNTIME_UNAVAILABLE', 'Git HTTP helper 不可用；请管理员检查 COMMAND_GIT_BIN。');
+  const gitTemplates = path.resolve(path.dirname(git), '../share/git-core/templates');
   const root = path.join(config.runtimeRoot || path.join(path.dirname(config.workspacesRoot), 'runtime'), '.command-tools');
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
-  for (const name of ['python', 'python3']) {
+  for (const [name, source] of [['python', binary], ['python3', binary], ['git', fs.realpathSync(git)]]) {
     const target = path.join(root, name);
     try { fs.unlinkSync(target); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-    fs.symlinkSync(binary, target);
+    fs.symlinkSync(source, target);
   }
-  const result = { root: fs.realpathSync(root), binary };
+  const result = { root: fs.realpathSync(root), binary, git: fs.realpathSync(git), gitExecPath,
+    gitTemplates: fs.existsSync(gitTemplates) ? gitTemplates : undefined };
   runtimes.set(config, result); return result;
 }
 
-export function commandDiagnostic(result, networkAccess) {
-  if (result.ok) return result;
+export function commandDiagnostic(result, networkAccess, proxied = false) {
+  if (result.ok || result.errorCode) return result;
   let errorCode = 'COMMAND_FAILED', recoveryHint = '检查命令退出信息；确认副作用后再重试。';
   if (result.aborted) errorCode = 'COMMAND_ABORTED';
-  else if (result.timedOut || /(?:ETIMEDOUT|timed? out|curl: \(28\))/i.test(result.output)) { errorCode = 'COMMAND_TIMEOUT'; recoveryHint = '请求超时；核对网络或服务状态后手动重试。'; }
+  else if (!networkAccess && /(?:connect|resolve|network|socket|urlopen).*?(?:denied|permitted|failed|unreachable)|curl: \([567]\)/i.test(result.output)) { errorCode = 'NETWORK_DISABLED'; recoveryHint = '此账号未授权联网，请联系管理员。'; }
+  else if (proxied && /curl: \([57]\)|could not resolve proxy|proxy.*(?:ECONNREFUSED|refused|unreachable)|CONNECT tunnel failed/i.test(result.output)) { errorCode = 'PROXY_UNAVAILABLE'; recoveryHint = 'VPN 代理连接失败；检查节点或系统代理，恢复后确认副作用再手动重试。'; }
+  else if (result.timedOut || /(?:ETIMEDOUT|timed? out|curl: \(28\))/i.test(result.output)) { errorCode = 'COMMAND_TIMEOUT'; recoveryHint = proxied ? '请求超时；检查 VPN 节点与目标服务，恢复后确认副作用再手动重试。' : '请求超时；核对网络或服务状态后手动重试。'; }
   else if (/fork failed|EAGAIN|resource temporarily unavailable/i.test(result.output)) { errorCode = 'COMMAND_RESOURCE_EXHAUSTED'; recoveryHint = '宿主资源暂不可用，请稍后重试；不要反复启动相同任务。'; }
   else if (/openssl\.cnf|xcrun_db|realpath:.*Operation not permitted/i.test(result.output)) { errorCode = 'COMMAND_RUNTIME_UNAVAILABLE'; recoveryHint = '执行运行库受限，请管理员检查项目运行环境。'; }
-  else if (!networkAccess && /(?:connect|resolve|network|socket|urlopen).*?(?:denied|permitted|failed|unreachable)|curl: \([567]\)/i.test(result.output)) { errorCode = 'NETWORK_DISABLED'; recoveryHint = '此账号未授权联网，请联系管理员。'; }
+  else if (/command not found:|: not found(?:\n|$)/i.test(result.output)) { errorCode = 'COMMAND_TOOL_NOT_FOUND'; recoveryHint = '工具尚未安装或入口缺失；在当前项目 .venv 或 .tools/bin 安装后验证版本和实际功能。'; }
   else if (/当前环境异常|完成验证|captcha|verify you are human/i.test(result.output)) { errorCode = 'HUMAN_ACTION_REQUIRED'; recoveryHint = '请使用对话浏览器，并请求用户接管验证。'; }
   return { ...result, errorCode, retryable: false, recoveryHint };
 }
@@ -97,11 +111,11 @@ export async function runSandboxedCommand(options) {
     if (signal?.aborted) return commandDiagnostic({ ok: false, aborted: true, exitCode: null, output: '命令已取消。' }, false);
     await authorize();
     const networkAccess = options.project.projectType !== 'local_private' && options.user.networkAccess;
-    return commandDiagnostic(await launchCommand(options), networkAccess);
+    return launchCommand(options, networkAccess);
   });
 }
 
-async function launchCommand({ config, workspace, project, user, command, cwd = '', signal }) {
+async function launchCommand({ config, workspace, project, user, command, cwd = '', signal, authorize = () => {} }, networkAccess) {
   invariant(process.platform === 'darwin', 501, 'SANDBOX_UNAVAILABLE', '当前安全命令执行器仅支持 macOS Seatbelt。');
   const projectRoot = fs.realpathSync(workspace.projectRoot(project));
   const runtimeRoot = fs.realpathSync(workspace.ensureAccessRuntimeRoot(user.id, project.accessId));
@@ -111,17 +125,27 @@ async function launchCommand({ config, workspace, project, user, command, cwd = 
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });
   fs.mkdirSync(tmp, { recursive: true, mode: 0o700 });
   const runtime = commandRuntime(config);
+  let proxy = {};
+  try { if (networkAccess) proxy = await resolveOutboundProxy(config, { signal }); }
+  catch (error) {
+    if (signal?.aborted) return commandDiagnostic({ ok: false, aborted: true, exitCode: null, output: '命令已取消。' }, networkAccess);
+    return { ok: false, exitCode: null, errorCode: error.code || 'PROXY_UNAVAILABLE', output: '未启动命令：代理配置不可用。', retryable: false, recoveryHint: error.message };
+  }
+  await authorize();
+  if (signal?.aborted) return commandDiagnostic({ ok: false, aborted: true, exitCode: null, output: '命令已取消。' }, networkAccess);
   const profile = buildSeatbeltProfile({
     writableRoots: [projectRoot, runtimeRoot],
     readableRoots: [runtime.root, '/private/etc/ssl', '/private/etc/resolv.conf', '/private/etc/hosts'],
-    readableMetadataPaths: pathAncestors([projectRoot, runtimeRoot, runtime.root, runtime.binary, '/Library/Developer']),
+    readableMetadataPaths: pathAncestors([projectRoot, runtimeRoot, runtime.root, runtime.binary, runtime.git, '/Library/Developer']),
     deniedPaths: project.accessKind === 'shared' ? [path.join(projectRoot, '.git')] : [],
-    networkAccess: project.projectType === 'local_private' ? false : user.networkAccess,
+    networkAccess,
   });
   const cpuSeconds = Math.max(5, Math.ceil(config.commandTimeoutMs / 1000));
   const wrapped = `ulimit -t ${cpuSeconds}; ulimit -n 256; ${String(command)}`;
   const env = {
-    PATH: `${runtime.root}:${home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
+    PATH: ['.venv/bin', '.tools/bin'].flatMap(relative => {
+      try { return [workspace.resolve(project, relative).target]; } catch { return []; }
+    }).concat([runtime.root, `${home}/.local/bin`, '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin']).join(':'),
     HOME: home,
     TMPDIR: `${tmp}${path.sep}`,
     LANG: 'en_US.UTF-8',
@@ -133,7 +157,11 @@ async function launchCommand({ config, workspace, project, user, command, cwd = 
     PIP_REQUIRE_VIRTUALENV: 'true',
     PIP_DISABLE_PIP_VERSION_CHECK: '1',
     npm_config_cache: path.join(home, '.cache', 'npm'),
+    GIT_EXEC_PATH: runtime.gitExecPath,
+    ...(runtime.gitTemplates ? { GIT_TEMPLATE_DIR: runtime.gitTemplates } : {}),
+    GIT_TERMINAL_PROMPT: '0',
     CODEX_HARNESS_PROJECT_ROOT: projectRoot,
+    ...(networkAccess ? proxyEnvironment(proxy) : {}),
   };
 
   return new Promise((resolve) => {
@@ -189,5 +217,5 @@ async function launchCommand({ config, workspace, project, user, command, cwd = 
         truncated,
       });
     });
-  });
+  }).then(result => commandDiagnostic(result, networkAccess, Boolean(proxy.http || proxy.https)));
 }

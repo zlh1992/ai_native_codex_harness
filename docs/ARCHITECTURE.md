@@ -52,7 +52,7 @@ Codex 原生长期记忆在 app-server 进程参数、每个 thread config 和 r
 1. app-server 关闭内置 Shell、unified exec、浏览器、插件、外部 MCP、computer use 和 image generation；保留原生 apply-patch、diff、approval、plan、goal、skills 与 multi-agent。每个 turn 使用 `readOnly` 基线和 `on-request` approval，让 Portal 在单次写入前取得完整目标集合。
 2. 模型可调用 `workspace_list/read/write/replace/mkdir/delete/search/exec` 动态工具和原生 apply-patch。前七个由后端做规范路径、保留目录与符号链接校验；合法项目文件变更由 Portal 自动接受。`workspace_exec` 仅在 EXECUTE turn 自动放行到 macOS Seatbelt，只允许读写当前绑定 tree 与独立 runtime，不能读取同一员工的另一个项目。共享 worktree 的 `.git` 指针也被文件 API 与 Seatbelt 隐藏。
 
-命令环境只包含最小 `PATH/HOME/TMPDIR/LANG/TERM/CI`，不会继承 Harness、Cloudflare 或 Codex 的密码/token 环境变量。网络默认关闭；管理员可按用户开启。
+命令环境仅包含受控运行、缓存、工具及无凭据代理变量，不会继承 Harness、Cloudflare 或 Codex 的密码/token。新账号默认联网，管理员可按用户关闭；旧账号网络位保持。命令逐次读取系统 HTTP/HTTPS 代理，浏览器原生监听系统代理；禁网不能通过本地代理绕过。详见 [执行指南](EXECUTION_BROWSER.md)。
 
 ## 6. 认证和授权
 

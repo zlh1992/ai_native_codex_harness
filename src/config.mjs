@@ -4,6 +4,7 @@ import { publicIngressConfig } from './public-ingress.mjs';
 import { localModelUrl } from './private-projects.mjs';
 import { fileURLToPath } from 'node:url';
 import { invariant } from './errors.mjs';
+import { outboundProxyMode } from './outbound-proxy.mjs';
 
 const SOURCE_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT_DIR = path.resolve(SOURCE_DIR, '..');
@@ -87,12 +88,14 @@ export function loadConfig(env = process.env) {
     executionLeaseTtlMs: integer(env.EXECUTION_LEASE_TTL_MS, 30_000, 5_000),
     subagentModel: 'gpt-5.6-luna',
     maxSubagentsPerRoot: 3,
-    defaultNetworkAccess: bool(env.DEFAULT_NETWORK_ACCESS, false),
+    defaultNetworkAccess: bool(env.DEFAULT_NETWORK_ACCESS, true),
     defaultMaxProjects: Math.min(100, integer(env.DEFAULT_MAX_PROJECTS, 100, 1)),
     defaultMaxStorageBytes: integer(env.DEFAULT_MAX_STORAGE_BYTES, 2 * 1024 * 1024 * 1024, 1024),
     defaultMaxConcurrentTurns: Math.min(codexMaxConcurrentTurns, integer(env.DEFAULT_MAX_CONCURRENT_TURNS, 40, 1)),
     commandTimeoutMs: integer(env.COMMAND_TIMEOUT_MS, 120_000, 1_000),
     commandPythonBin: env.COMMAND_PYTHON_BIN || '',
+    commandGitBin: env.COMMAND_GIT_BIN || '',
+    outboundProxy: outboundProxyMode(env.OUTBOUND_PROXY || 'system'),
     browserEnabled: bool(env.PORTAL_BROWSER_ENABLED, true),
     browserBin: env.PORTAL_BROWSER_BIN || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     browserMaxSessions: Math.min(2, integer(env.PORTAL_BROWSER_MAX_SESSIONS, 2, 1)),

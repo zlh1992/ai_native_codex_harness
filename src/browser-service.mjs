@@ -5,6 +5,7 @@ import { chromium } from 'playwright-core';
 import { spawnSync } from 'node:child_process';
 import { buildSeatbeltProfile, pathAncestors } from './sandbox.mjs';
 import { invariant, HttpError } from './errors.mjs';
+import { browserProxyOptions } from './outbound-proxy.mjs';
 
 const schema = (properties, required = []) => ({ type: 'object', properties, required, additionalProperties: false });
 export const BROWSER_TOOLS = [
@@ -105,12 +106,13 @@ export class BrowserService {
     try {
       // macOS forbids Seatbelt reinitialization. Every helper inherits our outer
       // dedicated profile; never fall back to launching outside that profile.
-      s.launch = chromium.launchPersistentContext(path.join(root, 'profile'), { executablePath: path.join(this.config.rootDir, 'bin/browser-launch.sh'), chromiumSandbox: false, headless: true,
+      const { args: proxyArgs = [], ...proxyOptions } = browserProxyOptions(this.config);
+      s.launch = chromium.launchPersistentContext(path.join(root, 'profile'), { ...proxyOptions, executablePath: path.join(this.config.rootDir, 'bin/browser-launch.sh'), chromiumSandbox: false, headless: true,
         timeout: 25000, downloadsPath: path.join(root, 'downloads'),
         viewport: { width: 1100, height: 760 }, acceptDownloads: false, serviceWorkers: 'block',
         env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: root, CFFIXED_USER_HOME: root, TMPDIR: `${root}/`, MAC_CHROMIUM_TMPDIR: root,
           LANG: 'en_US.UTF-8', PORTAL_BROWSER_BIN: this.config.browserBin, PORTAL_BROWSER_PIDFILE: path.join(root, 'process.pid'), PORTAL_BROWSER_PROFILE: browserProfile(root, this.config.browserBin) },
-        args: ['--disable-gpu', '--password-store=basic', '--use-mock-keychain', '--disable-breakpad', '--disable-crash-reporter', '--disable-external-intent-requests'] });
+        args: ['--disable-gpu', '--password-store=basic', '--use-mock-keychain', '--disable-breakpad', '--disable-crash-reporter', '--disable-external-intent-requests', ...proxyArgs] });
       s.context = await s.launch; s.browser = s.context.browser();
       this.authorize(active); invariant(this.sessions.get(active.chat.id) === s, 409, 'BROWSER_CLOSED', '浏览器已关闭。');
       s.browser.on('disconnected', () => { void this.close(active.chat.id, 'browser_exited'); });

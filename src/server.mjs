@@ -1244,6 +1244,7 @@ async function route(req, res) {
     const users = db.listUsers().map((user) => ({ ...user, usage: userUsage(user.id), profile: graphStore.profile(user.id) }));
     sendJson(res, 200, {
       stats: db.stats(), codex: codex.status(), users,
+      defaults: { networkAccess: config.defaultNetworkAccess },
       projects: db.listAdminProjects().filter((project) => !isPrivateProject(project) || project.userId === session.user.id).map(projectPayload),
     }, config);
     return;

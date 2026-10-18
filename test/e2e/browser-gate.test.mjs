@@ -7,7 +7,7 @@ import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
-import { browserProfile } from '../../src/browser-service.mjs';
+import { BrowserService, browserProfile } from '../../src/browser-service.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const binary = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -38,7 +38,7 @@ test('real isolated Chrome: Portal display/input/takeover, roles, ACL, recovery 
       HOST: '127.0.0.1', PORT: new URL(origin).port, TRUST_PROXY: 'false', TRUST_PROXY_PROVIDER: 'generic', COOKIE_SECURE: 'false',
       PUBLIC_ORIGIN: '', PUBLIC_ORIGINS: '', BOSS_PUBLIC_ORIGIN: '', EMPLOYEE_PUBLIC_ORIGIN: '',
       DATA_DIR: base, DATABASE_PATH: path.join(base, 'harness.sqlite'), WORKSPACES_ROOT: path.join(base, 'workspaces'), TREES_ROOT: path.join(base, 'trees'),
-      RUNTIME_ROOT: path.join(base, 'runtime'), TRASH_ROOT: path.join(base, 'trash'), ADMIN_USERNAME: 'browserboss', ADMIN_PASSWORD: 'BrowserTestPassword!123',
+      RUNTIME_ROOT: path.join(base, 'runtime'), TRASH_ROOT: path.join(base, 'trash'), DEFAULT_NETWORK_ACCESS: 'true', ADMIN_USERNAME: 'browserboss', ADMIN_PASSWORD: 'BrowserTestPassword!123',
       CODEX_BIN: path.join(ROOT, 'test/fixtures/fake-codex.mjs'), CODEX_MODEL_PROVIDER: 'openai_http',
       PORTAL_BROWSER_ENABLED: 'true', PORTAL_BROWSER_HANDOFF_TIMEOUT_MS: '60000', MEMORY_ENABLED: 'false',
     }, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -135,6 +135,14 @@ test('real isolated Chrome: Portal display/input/takeover, roles, ACL, recovery 
   assert.doesNotMatch(JSON.stringify(details), /human-private-marker|Verified article body/);
   assert.equal(fs.readdirSync(sessionsRoot).length, 0);
   assert.equal(spawnSync('/bin/ps', ['-axo', 'command='], { encoding: 'utf8' }).stdout.includes(sessionsRoot), false, 'Chrome helpers must exit');
+  const restricted = (await json(boss, '/api/admin/users', 'POST', { username: 'browserrestricted', password: 'BrowserRestricted!123', networkAccess: false }, 201)).user;
+  const management = await ui.newPage(); await management.goto(origin + '/boss');
+  await management.locator('#new-user').click();
+  assert.equal(await management.locator('[name=networkAccess]').isChecked(), true);
+  await management.keyboard.press('Escape');
+  await management.locator(`[data-card="${restricted.id}"] [data-open-card]`).click();
+  assert.equal(await management.locator('[name=networkAccess]').isChecked(), false);
+  await management.close();
   // Stop and restart close real Chrome and discard state.
   const finalTurn = run(employee, e.chat);
   await until(async () => (await json(employee, endpoint(e.chat))).handoff);
@@ -143,4 +151,44 @@ test('real isolated Chrome: Portal display/input/takeover, roles, ACL, recovery 
   await start(); assert.equal((await json(employee, endpoint(e.chat))).state, 'closed');
   assert.doesNotMatch(logs, /human-private-marker/);
   assert.ok(employeeData.user.id);
+});
+
+test('real browser retains login across upstream node changes and temporary proxy interruption', { timeout: 60000 }, async t => {
+  assert.equal(process.platform, 'darwin');
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'browser-proxy-gate-')));
+  let node = 'A', offline = false;
+  const hits = [];
+  const proxy = http.createServer((req, res) => {
+    hits.push(node);
+    if (offline) { req.socket.destroy(); return; }
+    const loggedIn = req.headers.cookie?.includes('test-login=yes');
+    res.writeHead(200, { 'content-type': 'text/html', ...(loggedIn ? {} : { 'set-cookie': 'test-login=yes; Path=/; HttpOnly' }) });
+    res.end(`<title>Controlled proxy</title><p>NODE_${node}_${loggedIn ? 'LOGIN_RETAINED' : 'LOGIN_STARTED'}</p>`);
+  });
+  const proxyOrigin = await listen(proxy);
+  const user = { id: 'proxy-user', status: 'active', networkAccess: true };
+  const project = { id: 'proxy-project', accessId: 'proxy-access', projectType: 'standard' };
+  const chat = { id: 'proxy-chat', userId: user.id, projectAccessId: project.accessId };
+  const browser = new BrowserService({ config: { rootDir: ROOT, browserEnabled: true, browserBin: binary, browserSessionsRoot: root, outboundProxy: proxyOrigin },
+    db: { getUserById: () => user, getChat: () => chat, getProjectForUser: () => project } });
+  const active = { user, project, chat, mode: 'execute', turnRunId: 'proxy-run' };
+  t.after(async () => { await browser.stop(); proxy.closeAllConnections(); await new Promise(resolve => proxy.close(resolve)); fs.rmSync(root, { recursive: true, force: true }); });
+  const url = 'http://article.proxy.test/';
+  const open = async suffix => {
+    try { return await browser.open(active, url + suffix); }
+    catch (error) { throw new Error(`Browser proxy stage ${suffix || 'initial'} failed; observed nodes ${hits.join(',')}`, { cause: error }); }
+  };
+  assert.match((await open('')).text, /NODE_A_LOGIN_STARTED/);
+  const page = browser.sessions.get(chat.id).page;
+  const id = browser.state(chat.id).id;
+  node = 'B';
+  assert.match((await open('next')).text, /NODE_B_LOGIN_RETAINED/);
+  offline = true;
+  const errorPage = page.waitForEvent('framenavigated', { predicate: frame => frame === page.mainFrame() });
+  await assert.rejects(browser.open(active, url + 'offline'), { code: 'BROWSER_OPERATION_FAILED' });
+  await errorPage; await page.waitForLoadState('domcontentloaded');
+  assert.equal(browser.state(chat.id).id, id);
+  offline = false;
+  assert.match((await open('recovered')).text, /NODE_B_LOGIN_RETAINED/);
+  assert.equal(browser.state(chat.id).id, id); assert.ok(hits.includes('A') && hits.includes('B'));
 });

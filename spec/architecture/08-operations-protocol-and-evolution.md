@@ -65,6 +65,8 @@ Codex initialize/ready 不证明上游模型认证可用。使用本机 ChatGPT 
 
 ## 发布检查表
 
+网络与项目工具配置见 [执行指南](../../docs/EXECUTION_BROWSER.md)。DEFAULT_NETWORK_ACCESS 只影响新账号；发布改为 true 时不得批量回写旧账号网络位。GET /api/admin/dashboard 的 defaults.networkAccess 与后端创建默认值相同；显式 false 始终保留。VPN 节点或系统 HTTP/HTTPS 代理端口变化不要求重启 Portal；OUTBOUND_PROXY/COMMAND_GIT_BIN 等静态配置修改仍需安全重启。
+
 - 当前变更报告的计划、实际改动、验证、结论与遗留项已经填写。
 - 架构或契约变化已同步到 `spec/architecture/`。
 - `git diff --check` 通过，无秘密或绝对凭据进入 diff。

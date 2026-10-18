@@ -159,7 +159,7 @@ async function openUser(user = null) {
   $('[name=maxProjects]', form).value = user?.maxProjects || 100;
   $('[name=maxStorageGb]', form).value = Math.max(1, Math.round((user?.maxStorageBytes || 2 * 1024 ** 3) / 1024 ** 3));
   $('[name=maxConcurrentTurns]', form).value = user?.maxConcurrentTurns || 40;
-  $('[name=networkAccess]', form).checked = Boolean(user?.networkAccess);
+  $('[name=networkAccess]', form).checked = user ? Boolean(user.networkAccess) : Boolean(state.data.defaults.networkAccess);
   $('[name=active]', form).checked = !user || user.status === 'active';
   $('#status-field').classList.toggle('hidden', !user);
   $('#user-dialog-title').textContent = user ? `管理 ${user.username}` : '创建员工';

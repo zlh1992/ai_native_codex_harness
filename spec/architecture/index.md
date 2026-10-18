@@ -36,6 +36,7 @@
 10. Portal 启动的 Codex app-server 原生长期记忆永久关闭并在 ready 前验证；普通项目记忆以 user_id 和当前 access 为边界；隐私项目使用独立 user_id + project_id 作用域，双向禁止跨域召回。
 11. 上述共享、Codex 执行及项目内自动放行默认描述普通项目。不可变 local_private 项目只走本地 DSH 适配的回环 OpenAI-compatible 模型（当前为 Qwen）、永不分享，默认人工确认；唯一云端例外为按策略提交的独立搜索词，详见第 10 章。
 12. 微信渠道只作为 transport relay 接入 Portal；渠道身份和消息固定到老板的标准 `weichat-project` 及其内部 chat。仅该 active binding 的老板 chat 可通过 Portal 只读工具列出、读取和搜索老板本人拥有的其他 standard 项目；二维码不授予员工项目、local_private、本机未纳管目录、任意 cwd 或跨项目写入能力。消息记录由 Portal 持久化。
+13. 新账号默认联网且可单独关闭，既有网络位保持；系统 VPN 自动适配只服务当前获准联网的普通项目，不绕过禁网或隐私边界。详见第 11 章。
 
 ## 变更规则
 

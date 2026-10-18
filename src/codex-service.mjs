@@ -186,7 +186,8 @@ export class CodexService extends EventEmitter {
       'Use the host workspace_* tools for reads, whole-file writes, search, deletion, and project-local commands; use the native apply_patch tool for focused edits.',
       'The built-in shell, browser, app, plugin, MCP, computer-use, and web tools are unavailable.',
       'workspace_exec is authorized automatically only when the current Portal turn mode is EXECUTE; in EDIT mode it will be rejected.',
-      'For Python use python3 (the Portal real interpreter), create a project .venv and install dependencies there. Run its CLI with .venv/bin/<cli> or activate that venv for the command. HOME, temporary files and caches are isolated to this access. Never install globally.',
+      'For Python use python3 (the Portal real interpreter), create a project .venv and install dependencies there. Each command PATH includes this project .venv/bin and .tools/bin; use .tools/bin for standalone binaries such as gh. Installed tools are available on subsequent commands without activation. HOME, temporary files and caches are isolated to this access. Never install globally or read host credentials.',
+      'For authorized public HTTP(S) downloads and Git clones the Portal follows the current system VPN proxy at each command launch. Clone into a permitted project subdirectory, not over the platform-managed repository. Do not hardcode a VPN port or change host proxy/Git configuration. A changed VPN node may break an active connection: inspect side effects and retry manually only when appropriate. Private repositories still require project-authorized authentication.',
       'A skill document is not a CLI installation. Verify the actual executable, dependencies, version and the requested function before reporting installation success.',
       'If a command reports a runtime/resource/network policy error, stop repeating it and explain its errorCode and recoveryHint. Commands are never automatically replayed; inspect possible side effects before retrying.',
       ...(this.config.browserEnabled ? ['Use only Portal browser_open/browser_snapshot/browser_action/browser_handoff for interactive web access in EXECUTE. They are root-only and require account network permission.',
@@ -287,7 +288,8 @@ export class CodexService extends EventEmitter {
       this.db.updateChat(context.chat.id, { channelToolsVersion: 1 });
       return newThreadId;
     }
-    if (existing && !this.loadedThreads.has(existing)) {
+    const policyChanged = existing && this.contextByThread.get(existing)?.user.networkAccess !== context.user.networkAccess;
+    if (existing && (!this.loadedThreads.has(existing) || policyChanged)) {
       try {
         await this.#resumeThread(existing, context);
       } catch (error) {

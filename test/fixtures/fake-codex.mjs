@@ -92,6 +92,16 @@ async function browserTurn(threadId, turnId, prompt) {
   }
 }
 
+async function workspaceTurn(threadId, turnId, prompt) {
+  try {
+    const args = JSON.parse(prompt.split('[[workspace-exec]]')[1]);
+    const result = toolData(await callTool(threadId, turnId, 'workspace_exec', args));
+    completeTurn(threadId, turnId, JSON.stringify(result));
+  } catch {
+    notify('turn/completed', { threadId, turn: { id: turnId, status: 'failed', error: { message: 'Workspace fixture failed' }, items: [] } });
+  }
+}
+
 function completeTurn(threadId, turnId, prompt, steers = []) {
   const finalItemId = `item-${turnId}`;
   const publicPrompt = prompt.replace(/^<!-- portal-mode:(?:EDIT|EXECUTE) -->\n/, '').replace(/^\$task-execution\n/, '')
@@ -170,6 +180,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     if (threadTools.get(params.threadId)?.includes('work_graph_context')) { void workflowTurn(params.threadId, turnId, prompt); return; }
     if (prompt.includes('[[memory-tools]]')) { void memoryTurn(params.threadId, turnId, prompt); return; }
     if (prompt.includes('[[browser]]')) { void browserTurn(params.threadId, turnId, prompt); return; }
+    if (prompt.includes('[[workspace-exec]]')) { void workspaceTurn(params.threadId, turnId, prompt); return; }
     if (prompt.includes('[[hold]]')) heldTurns.set(turnId, { threadId: params.threadId, prompt, steers: [] });
     else setTimeout(() => completeTurn(params.threadId, turnId, prompt), 15).unref();
     return;

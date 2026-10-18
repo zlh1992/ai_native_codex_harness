@@ -98,6 +98,8 @@ completed task turn
 
 生命周期判断同时使用内存中的 pending/recovering map 与 SQLite 的 run/approval/lease。不能只依赖 `chats.status`，因为崩溃或异步窗口可能使单字段暂时落后。
 
+管理员开启或关闭员工联网沿用上述策略失效和排空屏障，不注销有效 Web session、不重建 chat、不自动重放命令。同一 chat 的下一轮运行读取新账号策略和新 Agent 指引。命令真正出队后才读取系统代理，代理读取返回后再次校验授权与取消状态；VPN 变化本身不改变账号权限或重跑旧任务。
+
 ## 子代理策略
 
 - App Server 配置 `agents.enabled=true`，max concurrent threads per session 固定为 3。

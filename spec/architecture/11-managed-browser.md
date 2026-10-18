@@ -36,6 +36,14 @@ Agent 请求 handoff 后暂停等待。用户接管绑定当前 Web session，�
 
 命令使用可取消队列，同一 run 串行，全平台同时启动命令不超过 EXECUTE 容量；出队前再次验证运行和授权。取消排队不会启动命令。固定 `ulimit -u` 删除，因为它限制整个 OS 账号，不能表示每个任务的进程配额。保留墙钟、CPU、FD、输出字节限制及进程组取消，不承诺硬磁盘或进程数隔离。
 
-可信只读工具目录将 python/python3 绑定到可直接启动的 Python 3.10+；用户 HOME、临时目录、pip/npm 缓存按 access 隔离。pip 默认要求虚拟环境，Agent 应建立项目 .venv 并核对真实 CLI、依赖、版本和功能。TLS/证书/解析配置只读开放；宿主凭据、其他项目和 runtime 仍拒绝。结构化错误区别环境资源故障、禁网、超时和人工操作；任何失败均不自动重放。
+可信只读工具目录将 python/python3 绑定到可直接启动的 Python 3.10+，git 绑定到真实 Git 并显式设置该安装的 HTTP helper 和模板路径，避免开发工具启动器及重定位失败。用户 HOME、临时目录、pip/npm 缓存按 access 隔离。每条命令 PATH 优先包含当前项目 .venv/bin、.tools/bin，再包含只读工具及 access HOME/.local/bin；项目入口仍经过路径检查与 Seatbelt。pip 默认要求虚拟环境，Agent 应建立项目 .venv 并核对真实 CLI、依赖、版本和功能。TLS/证书/解析配置只读开放；宿主凭据、其他项目和 runtime 仍拒绝。结构化错误区别环境资源故障、禁网、代理连接失败、工具未安装、超时和人工操作；任何失败均不自动重放。
+
+## 系统 VPN 与账号网络
+
+OUTBOUND_PROXY 默认为 system：每条获准联网的普通命令在实际启动前读取 macOS HTTP/HTTPS 系统代理，注入 curl/Git/pip/npm/gh 使用的有限代理变量，localhost/127.0.0.1/::1 绕过代理。没有代理时使用 OS 路由（含 TUN）；读取失败、配置无效或只有 PAC/SOCKS 时明确失败，不静默猜测端口或回退直连。显式无凭据 HTTP(S) 地址和 direct 为运维覆盖选项；不导入宿主认证、用户环境或全局 Git 配置。
+
+system 浏览器不固定启动代理，沿用 Chrome 对 SystemConfiguration 的监听，系统代理更新影响后续网络连接且不重建登录 profile；显式/direct 则只作用于新启动浏览器。节点切换保持本地代理入口时由外部 VPN 路由新连接。已建立连接可能中断，平台不保证续传，也不自动重放网页动作或安装命令。
+
+账号权限优先于代理。默认值只用于新账号，员工显式 false 和既有禁网保持；管理看板返回 defaults.networkAccess 供创建表单使用，编辑表单始终显示账号实际值。权限切换排空旧运行，现有 Web session 和 chat 的下一轮读取新权限，无需重登或重启。
 
 操作步骤见 [执行与浏览器指南](../../docs/EXECUTION_BROWSER.md)，发布验收见 [发布契约](07-e2e-release-contracts.md)。

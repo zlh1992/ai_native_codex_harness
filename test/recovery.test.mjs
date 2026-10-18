@@ -538,6 +538,30 @@ test('boss and employee model preferences reach resumed thread and each turn wit
   } finally { db.close(); fs.rmSync(base, { recursive: true, force: true }); }
 });
 
+test('network policy changes refresh loaded thread instructions without changing its identity', async () => {
+  const { base, db, workspace, config, user, project, chat } = fixture();
+  const service = new CodexService({ config, db, workspace });
+  const instructions = [];
+  service.client.start = async () => { service.client.started = true; };
+  service.client.request = async (method, params) => {
+    if (method === 'thread/resume') {
+      assert.equal(params.threadId, chat.codexThreadId); instructions.push(params.baseInstructions);
+      return { thread: { id: chat.codexThreadId, modelProvider: config.codexModelProvider } };
+    }
+    if (method === 'turn/start') throw new Error('intentional policy test stop');
+    return {};
+  };
+  try {
+    for (const networkAccess of [false, true, false]) {
+      const current = db.updateUser(user.id, { networkAccess });
+      await assert.rejects(service.runTurn({ chat: db.getChat(chat.id), project, user: current, prompt: 'policy', mode: 'edit', emit() {} }), /intentional policy test stop/);
+      assert.match(instructions.at(-1), new RegExp('network access for this user is ' + (networkAccess ? 'enabled' : 'disabled')));
+      assert.equal(db.getChat(chat.id).codexThreadId, chat.codexThreadId);
+    }
+    assert.equal(instructions.length, 3);
+  } finally { db.close(); fs.rmSync(base, { recursive: true, force: true }); }
+});
+
 test('native usage counts child and root exactly once, attributes late samples and survives chat deletion', async () => {
   const {base,db,workspace,config,user,project,chat}=fixture();
   const service=new CodexService({config,db,workspace});

@@ -207,3 +207,9 @@ HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake ap
 ## 部署模型限制
 
 老板与员工共享四模型目录（GPT-6.1 Sol、GPT-5.6 Sol/Terra/Luna）；HTTP gate 对双方验证目录、偏好持久化及 Astra 选择拒绝。配置测试拒绝目录外 CODEX_MODEL；旧 Astra 偏好保留但只能解析到受控默认模型。历史用量仍可展示已退役模型。
+
+## VPN、工具与账号网络
+
+`test/command-runtime.test.mjs` 用受控 HTTP/CONNECT 代理、真实 TLS、Git dumb HTTP 和临时 wheel 验证代理链路、独立命令安装后直接发现 CLI、真实 Git HTTP helper、节点/端口切换和断线恢复；禁网命令即使手动指定本地代理也不能连接。`test/outbound-proxy.test.mjs` 固定每次系统读取、端口更新、无代理、无效/PAC/SOCKS 拒绝及 Chrome 原生系统模式。
+
+`test/e2e/network-policy-gate.test.mjs` 验证新账号默认 true、显式 false、重启保留旧限制、同一员工 chat/session 开启后真实代理下载、关闭时排空和后续拒绝。真实 Chrome gate 验证创建表单默认勾选、编辑旧禁网不勾选，以及固定代理入口切换上游节点和短暂断线后会话登录态保留。系统端口通知的实际 macOS 验收独立记录，不能把配置模拟当作已验证系统切换。原发布契约全部保留。

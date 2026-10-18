@@ -32,6 +32,15 @@ test('ordinary Codex upstream is fixed to the local ChatGPT official login', () 
   assert.throws(() => loadConfig({ CODEX_MODEL_PROVIDER: 'third_party' }), { code: 'CODEX_PROVIDER_NOT_ALLOWED' });
 });
 
+test('new users default to network access while explicit operator restrictions remain valid', () => {
+  assert.equal(loadConfig({}).defaultNetworkAccess, true);
+  assert.equal(loadConfig({ DEFAULT_NETWORK_ACCESS: 'false' }).defaultNetworkAccess, false);
+  assert.equal(loadConfig({}).outboundProxy, 'system');
+  assert.equal(loadConfig({ OUTBOUND_PROXY: 'direct' }).outboundProxy, 'direct');
+  assert.equal(loadConfig({ COMMAND_GIT_BIN: '/test/git' }).commandGitBin, '/test/git');
+  assert.throws(() => loadConfig({ OUTBOUND_PROXY: 'http://user:private@localhost' }), { code: 'PROXY_CONFIGURATION_INVALID' });
+});
+
 test('configured defaults cannot bypass the deployment model allowlist', () => {
   for (const model of ['gpt-6.1-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
     assert.equal(loadConfig({ CODEX_MODEL: model }).codexModel, model);
