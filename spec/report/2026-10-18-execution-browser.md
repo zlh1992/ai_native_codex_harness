@@ -2,7 +2,7 @@
 
 | 字段 | 内容 |
 | --- | --- |
-| 状态 | 门控通过，待发布 |
+| 状态 | 完成（已部署） |
 | 日期 | 2026-10-18 |
 | 负责人 | Codex |
 | 关联目标 | 修复普通项目运行环境，并提供当前对话的浏览器人工接管 |
@@ -49,6 +49,7 @@
 - 新命令测试初次受 25 秒总预算影响，扩大为 60 秒后进一步确认 GitHub 直连在沙箱内外均超时（curl 28，DNS 已解析、连接未建立）。新增 HTTPS 回归改为临时证书的受控 TLS 服务，并检查系统 TLS/CA 文件可读；公网 HTTPS 另行验收，不让第三方路由决定发布门控。既有测试未删除、跳过或削弱。
 - 原审批安全 fixture 用 100 次 1ms 轮询等待真实命令，在宿主负载下偶发超时；单独重跑通过。改为有界 10 秒 deadline，原有自动接受、EDIT 禁止、文件与审批数量断言全部保留，不改变产品或安全契约。
 - 发布前只读基线：14 个用户、25 个项目、70 个 chat、15 份 submission；非终态运行、待发输入、pending approval 和 lease 均为 0。
+- 发布后 GitHub 路由恢复：宿主及同一 Seatbelt 执行器对 GitHub 的 HTTPS HEAD 均返回 200（退出码 0）；前述间歇网络故障仍保留为门控改用受控 TLS 的证据。
 
 ## 数据、接口与安全影响
 
@@ -67,12 +68,49 @@
 | `git diff --check` | 通过 | 无空白错误 |
 | 相对 Markdown 链接检查 | 通过 | Python 扫描本次修改和新增 Markdown：96 链接、0 错误 |
 | `npm run gate` | 通过 | macOS + Seatbelt + 本机 Chrome；210 单元/集成 + 20 E2E，0 失败、0 跳过 |
-| 公网老板/员工冒烟及清理 | 待执行 | 隔离临时项目和账号，不保存认证内容 |
+| `node .tools/public-browser-smoke.mjs` | 双角色通过 | 域名 1/2 的真实模型调用、venv/子进程、curl HTTPS 200、JPEG、接管及实际正文、跨角色 403、工具明细不含 browser、结束清理 |
+| `python3 .tools/verify-retention.py` | 通过 | 原 14 用户、25 项目、70 chat、15 submission 逐行 SHA-256 均不变；quick_check=ok，运行/输入/审批/租约均为 0 |
+| 公网版本与运行状态 | 通过 | 两域前端版本均为 `f71b9f2ffdfca02ae760`；Codex ready、initialized=true、Qwen disabled |
+| 宿主及隔离执行器公网 TLS | 通过 | `curl --silent --head --output /dev/null --write-out 'GITHUB_HTTPS_%{http_code}' --max-time 15 https://github.com`，HTTP 200、退出 0 |
+
+命令和浏览器针对性测试也由最后完整门控再次覆盖。完整门控日志在忽略的私有文件 `.tools/validated-gate.log`，公网验收脚本及仅含结果元数据的 `.tools/public-browser-results.json` 权限 600，不提交账号、认证、页面画面或输入。
+
+本次相对链接检查的准确命令（发布收尾再次执行）：
+
+```sh
+python3 - <<'PY'
+import re, subprocess
+from pathlib import Path
+names = subprocess.check_output(['git', 'diff', '4eb6e41', '--name-only'], text=True).splitlines()
+checked = 0
+for name in names:
+    p = Path(name)
+    if p.suffix != '.md':
+        continue
+    for target in re.findall(r'\]\(([^)]+)\)', p.read_text()):
+        target = target.split('#', 1)[0]
+        if not target or re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*:', target) or target.startswith('/'):
+            continue
+        checked += 1
+        assert (p.parent / target).exists(), (name, target)
+print(checked, 'relative Markdown links; 0 errors')
+PY
+```
+
+## 发布、清理与回滚
+
+- 代码基线：上一部署 `4eb6e41`；本次已验证实现 `2bd60b7`，分支 `codex/browser-execution`。
+- 排空确认后，在旧部署工作树执行 `./bin/stop-local.sh`。未重启隧道，其 PID 仍为 65056。
+- 私有备份：`/Users/zlh1992_home/Library/Application Support/CodexHarnessRemote/backups/2026-10-18-browser-runtime/`（目录 700）。保留 APFS 克隆 `pre-switch-data`、SQLite backup API 生成并通过 quick_check 的 `pre-switch.sqlite`，以及权限 600 的上一私有配置；不把内容写入报告。
+- 新部署工作树：`/Users/zlh1992_home/.codex/worktrees/portal-browser-runtime/codex-harness-remote`。保留原私有配置和绝对 DATA_DIR，只绑定直接 Python 3.13、本机 Chrome 及两个浏览器会话；执行 `./bin/start-local.sh`，服务 PID 83526，已核实 cwd 为新工作树。
+- 老板域名 1 使用 `gpt-6.1-sol`、员工域名 2 使用 `gpt-5.6-sol`，各自真实完成执行和浏览器验收；两角色目录均为现有四模型，Astra 未开放、Qwen 未开启。受控站点先显示待验证，人工接管点击后才出现正文，未用“继续”按钮代替内容验证。
+- 临时项目按原平台规则移入可恢复回收区；临时员工已停用、测试 session 已撤销。保留用量/审计记录，未修改原对话或执行其任务。浏览器 profile 和对应 Chrome 进程均为 0，foreign_key_check 无违规。无全局 Agent-Reach 安装。
+- 回滚步骤：在新工作树 `./bin/stop-local.sh` 排空并清理浏览器，再在 `/Users/zlh1992_home/.codex/worktrees/portal-local-deploy/codex-harness-remote` 执行 `./bin/start-local.sh`。旧代码与私有配置均保留；共享业务库无需逆迁移。不要用旧备份覆盖发布后产生的新历史；若必须恢复库，先保存现状并核对增量。
 
 ## 结论
 
-实现与完整发布门控已完成；公网发布及双角色真实模型验收尚未完成。完整门控日志位于本工作树忽略的私有文件 `.tools/validated-gate.log`，不包含生产认证信息。
+已按最小范围完成执行环境修复、Portal 交互浏览器、规格、全量门控及域名 1/2 发布。老板和员工真实调用及接管流程通过，原有账号和业务历史保持不变。
 
 ## 遗留事项
 
-- 排空、备份、部署域名 1/2 并完成双角色真实验证和保留性检查。
+- 无阻塞项。第三方登录、验证码、网络路由及网站访问政策仍由目标站点和宿主网络决定，平台只如实返回当前页面与错误，不能保证所有目标站点放行。
