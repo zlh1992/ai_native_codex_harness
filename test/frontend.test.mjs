@@ -189,8 +189,8 @@ test('model selector restores each chat and prevents edits while saving or witho
   const update = Function('state', '$', 'selectedChatRunning', 'updateConcurrencyIndicator', `${source}; return updateModelSelect;`)(state,
     selector => selector === '#model-select' ? select : other, () => false, () => {});
   update(); assert.equal(select.disabled, true); assert.equal(select.value, '');
-  state.selectedChat = { id: 'chat', preferredModel: 'gpt-6-astra', preferredEffort: 'max' };
-  update(); assert.equal(select.disabled, false); assert.equal(select.value, 'gpt-6-astra');
+  state.selectedChat = { id: 'chat', preferredModel: 'gpt-6-luna', preferredEffort: 'max' };
+  update(); assert.equal(select.disabled, false); assert.equal(select.value, 'gpt-6-luna');
   assert.equal(other.value, 'max');
   state.inputQueues.set('chat', [{}]); update(); assert.equal(select.disabled, true); assert.equal(other.disabled, true);
   state.inputQueues.clear();

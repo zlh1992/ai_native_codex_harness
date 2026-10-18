@@ -188,7 +188,7 @@ HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake ap
 
 ## E2E-017 模型权限与用量
 
-原员工禁止选择 root 模型的断言由同一发布门控中的新权限契约替换：活动员工可在自己的普通 chat 使用全部七种 GPT、保存强度，默认 medium；老板默认 high，分享副本使用接收者默认。越权 chat、非法模型/强度、运行/排队时修改和员工读取 admin 用量仍拒绝。
+原员工禁止选择 root 模型的断言由同一发布门控中的新权限契约替换：活动员工可在自己的普通 chat 使用当前 Codex 桌面目录中标记为可见的全部三种 GPT（`gpt-6-luna`、`gpt-5.6-terra`、`gpt-5.6-luna`），保存强度，默认 medium；老板默认 high，分享副本使用接收者默认。隐藏的 `gpt-reserve` 与 `codex-auto-review` 不可选择。目录退役前保存的旧模型偏好不回写数据库，但运行回退到当前默认；新 API 选择仍拒绝退役模型。越权 chat、非法模型/强度、运行/排队时修改和员工读取 admin 用量仍拒绝。
 
 计量测试覆盖多步累计去重、root/child/辅助归属、resume/fork 未知基线、迟到/乱序样本、取消失败及重启、删除后保留、北京时间边界和筛选。真实 DSH 核心搭配合成回环 SSE 验证多步/续聊采集；独立搜索夹具固定只有 query/摘要输入且 Luna-low 计量正确。DOM 测试验证缺失值、筛选、身份失效清理和旧请求不覆盖新结果。
 
@@ -196,7 +196,7 @@ HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake ap
 
 ## E2E-018 微信固定渠道
 
-微信 relay 只能通过 loopback 的 HMAC 请求进入 Portal；过期时间戳、错误签名、错误发送者和群聊必须拒绝。Portal 按配置固定老板的 standard `weichat-project`，每个私聊 scope 复用独立老板 chat，桥接不能提交 project/cwd/thread。只有 active binding chat 可发现跨项目工具；项目列表和每次读/搜索必须只接受当前老板本人拥有的 standard owner access，并拒绝员工自有/仅共享项目、local_private 与本机未纳管目录；跨项目写入和命令不可注册。相同外部 event id 的重试必须返回已保存结果且不新增 turn；真实 Codex 回复和 Portal SQLite 消息必须可在老板工作台读取。Portal 必须在普通 turn 前处理 `/new`、`/models` 和 `/model <id>`：空闲 `/new` 原子切换到新 chat 并保留旧历史，`/models` 返回完整 Portal 模型白名单（包括 `gpt-6-astra`），`/model <id>` 复用模型白名单并持久化当前 chat 偏好。部署验收至少执行一次真实签名事件、一次重复投递、一次 owner/employee/private 隔离测试、一次命令路由和一次 health/status 检查；敏感凭据不得进入日志或报告。
+微信 relay 只能通过 loopback 的 HMAC 请求进入 Portal；过期时间戳、错误签名、错误发送者和群聊必须拒绝。Portal 按配置固定老板的 standard `weichat-project`，每个私聊 scope 复用独立老板 chat，桥接不能提交 project/cwd/thread。只有 active binding chat 可发现跨项目工具；项目列表和每次读/搜索必须只接受当前老板本人拥有的 standard owner access，并拒绝员工自有/仅共享项目、local_private 与本机未纳管目录；跨项目写入和命令不可注册。相同外部 event id 的重试必须返回已保存结果且不新增 turn；真实 Codex 回复和 Portal SQLite 消息必须可在老板工作台读取。Portal 必须在普通 turn 前处理 `/new`、`/models` 和 `/model <id>`：空闲 `/new` 原子切换到新 chat 并保留旧历史，`/models` 返回当前 Portal 模型白名单，`/model <id>` 复用模型白名单并持久化当前 chat 偏好。部署验收至少执行一次真实签名事件、一次重复投递、一次 owner/employee/private 隔离测试、一次命令路由和一次 health/status 检查；敏感凭据不得进入日志或报告。
 
 ## 运维进程控制回归
 

@@ -5,6 +5,7 @@ import { loadConfig } from '../src/config.mjs';
 test('concurrency defaults to 40 and is hard-capped at 40', () => {
   const config = loadConfig({});
   assert.equal(config.codexModelProvider, 'openai_http');
+  assert.equal(config.codexModel, 'gpt-6-luna');
   assert.equal(config.chatgptCodexBaseUrl, 'https://chatgpt.com/backend-api/codex');
   assert.equal(config.codexMaxConcurrentTurns, 40);
   assert.equal(config.portalMaxActiveRootTurns, 11);

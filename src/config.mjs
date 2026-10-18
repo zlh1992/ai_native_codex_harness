@@ -74,7 +74,7 @@ export function loadConfig(env = process.env) {
     portalAgentConfig: resolved(env.PORTAL_AGENT_CONFIG, path.join(ROOT_DIR, 'portal-agents', 'luna.toml')),
     codexBin: env.CODEX_BIN || '/Applications/ChatGPT.app/Contents/Resources/codex',
     codexCliVersion: '0.150.0-alpha.8',
-    codexModel: env.CODEX_MODEL || 'gpt-5.6-sol',
+    codexModel: env.CODEX_MODEL || 'gpt-6-luna',
     codexModelProvider,
     chatgptCodexBaseUrl,
     codexReasoningEffort: env.CODEX_REASONING_EFFORT || 'high',

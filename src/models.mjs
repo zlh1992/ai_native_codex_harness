@@ -1,14 +1,10 @@
 import { invariant } from './errors.mjs';
 
-// Portal-approved root models; upstream account availability is checked by Codex.
+// Portal-approved root models mirror the visible models in the current desktop Codex catalog.
 export const ROOT_MODELS = Object.freeze([
-  { id: 'gpt-6-astra', label: 'GPT-6 Astra' },
-  { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
+  { id: 'gpt-6-luna', label: 'GPT-6 Luna' },
   { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
   { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' },
-  { id: 'gpt-5.5', label: 'GPT-5.5' },
-  { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini' },
-  { id: 'gpt-5.3-codex-spark', label: 'GPT-5.3 Codex Spark' },
 ]);
 
 export function validateModel(model) {
@@ -17,8 +13,10 @@ export function validateModel(model) {
 }
 
 export function rootModel(config, chat, user) {
-  return chat?.preferredModel
-    ? validateModel(chat.preferredModel) : config.codexModel;
+  // Retired preferences stay stored for history, but run with the current
+  // configured default. New API selections still pass through validateModel.
+  return chat?.preferredModel && ROOT_MODELS.some((entry) => entry.id === chat.preferredModel)
+    ? chat.preferredModel : config.codexModel;
 }
 
 export const EFFORTS = new Set(['none', 'low', 'medium', 'high', 'xhigh', 'max']);

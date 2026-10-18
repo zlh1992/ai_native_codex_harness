@@ -522,12 +522,12 @@ test('boss and employee model preferences reach resumed thread and each turn wit
   };
   try {
     db.db.prepare("UPDATE users SET role='admin' WHERE id=?").run(user.id);
-    for (const model of ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra']) {
+    for (const model of ['gpt-6-luna', 'gpt-5.6-luna', 'gpt-5.6-terra']) {
       const current = db.updateChat(chat.id, { preferredModel: model });
       await assert.rejects(service.runTurn({ chat: current, project, user: db.getUserById(user.id), prompt: 'model test', mode: 'edit', emit() {} }), /intentional test stop/);
       assert.equal(calls.filter((call) => call.method === 'turn/start').at(-1).params.model, model);
     }
-    assert.equal(calls.find((call) => call.method === 'thread/resume').params.model, 'gpt-6-astra');
+    assert.equal(calls.find((call) => call.method === 'thread/resume').params.model, 'gpt-6-luna');
     db.db.prepare("UPDATE users SET role='user' WHERE id=?").run(user.id);
     await assert.rejects(service.runTurn({ chat: db.getChat(chat.id), project, user, prompt: 'employee model test', mode: 'edit', emit() {} }), /intentional test stop/);
     assert.equal(calls.filter((call) => call.method === 'turn/start').at(-1).params.model, 'gpt-5.6-terra');

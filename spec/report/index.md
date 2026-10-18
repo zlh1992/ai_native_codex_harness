@@ -1,5 +1,7 @@
 # 实施报告索引
 
+- [2026-10-17 Portal 模型目录对齐与公网角色任务验证](2026-10-17-model-catalog-public-smoke.md)：阻塞；目录对齐、门控、重启和老板 GPT-6 high 推理通过；员工登录、网页浏览、GitHub clone 仍受阻。
+
 - [2026-10-10 本地修改归档与远端分支同步](2026-10-10-local-changes-sync.md)：实施中；将当前 `graph` 工作树修改归档并同步到 `origin/graph`。
 
 - [2026-10-07 启用 Portal 本地 Qwen](2026-10-07-enable-local-qwen.md)：完成；双引擎 ready、真实本地审批/文件/命令/续聊/用量验证通过，200+19 发布门禁通过。

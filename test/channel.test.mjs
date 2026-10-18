@@ -57,14 +57,15 @@ test('channel bindings and events are idempotent under duplicate delivery', () =
 test('WeChat commands use Portal model catalog and explicit chat controls', () => {
   assert.deepEqual(parseWechatCommand('/new'), { type: 'new' });
   assert.deepEqual(parseWechatCommand(' /MODELS '), { type: 'models' });
-  assert.deepEqual(parseWechatCommand('/model gpt-6-astra'), { type: 'model', value: 'gpt-6-astra' });
+  assert.deepEqual(parseWechatCommand('/model gpt-6-luna'), { type: 'model', value: 'gpt-6-luna' });
   assert.deepEqual(parseWechatCommand('/model'), { type: 'model', value: null });
   assert.equal(parseWechatCommand('/new please'), null);
   assert.equal(resolveWechatModel('default'), null);
-  assert.equal(resolveWechatModel('gpt-6-astra'), 'gpt-6-astra');
-  const text = formatWechatModelCatalog({ config: { codexModel: 'gpt-5.6-sol' }, chat: {}, user: { role: 'admin' } });
-  assert.match(text, /gpt-6-astra/u);
-  assert.match(text, /gpt-5\.3-codex-spark/u);
+  assert.equal(resolveWechatModel('gpt-6-luna'), 'gpt-6-luna');
+  const text = formatWechatModelCatalog({ config: { codexModel: 'gpt-6-luna' }, chat: {}, user: { role: 'admin' } });
+  assert.match(text, /gpt-6-luna/u);
+  assert.match(text, /gpt-5\.6-terra/u);
+  assert.doesNotMatch(text, /gpt-reserve|codex-auto-review/u);
 });
 
 
