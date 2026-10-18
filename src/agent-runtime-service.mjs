@@ -43,7 +43,7 @@ export class AgentRuntimeService extends EventEmitter {
   get globalPending() { return this.standard.globalPending + this.local.globalPending; }
   isReady(id) { return this.engine(id).isReady(); }
   async start() { this.inputQueue.start(); this.local.start(); return this.standard.start(); }
-  stop() { this.inputQueue.stop(); this.local.stop(); this.standard.stop(); }
+  stop() { this.inputQueue.stop(); this.local.stop(); return this.standard.stop(); }
   status() { return { ...this.standard.status(), runtimes: { codex: this.standard.status().ready ? 'ready' : 'unavailable', qwen: this.local.status() } }; }
   runTurn(context) {
     invariant(this.globalActive + this.globalPending < this.config.codexMaxConcurrentTurns, 429, 'CODEX_BUSY', '本机运行队列已满。');

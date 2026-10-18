@@ -81,6 +81,17 @@ async function memoryTurn(threadId, turnId, prompt) {
   }
 }
 
+async function browserTurn(threadId, turnId, prompt) {
+  try {
+    const args = JSON.parse(prompt.split('[[browser]]')[1]);
+    toolData(await callTool(threadId, turnId, 'browser_open', { url: args.url }));
+    const page = toolData(await callTool(threadId, turnId, 'browser_handoff', { reason: '请在网页完成受控验证' }));
+    completeTurn(threadId, turnId, page.text || page.errorCode || 'browser ended');
+  } catch {
+    notify('turn/completed', { threadId, turn: { id: turnId, status: 'failed', error: { message: 'Browser fixture failed' }, items: [] } });
+  }
+}
+
 function completeTurn(threadId, turnId, prompt, steers = []) {
   const finalItemId = `item-${turnId}`;
   const publicPrompt = prompt.replace(/^<!-- portal-mode:(?:EDIT|EXECUTE) -->\n/, '').replace(/^\$task-execution\n/, '')
@@ -158,6 +169,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     notify('thread/tokenUsage/updated', { threadId: params.threadId, turnId, tokenUsage: { total: usage(count), last: usage(1) } });
     if (threadTools.get(params.threadId)?.includes('work_graph_context')) { void workflowTurn(params.threadId, turnId, prompt); return; }
     if (prompt.includes('[[memory-tools]]')) { void memoryTurn(params.threadId, turnId, prompt); return; }
+    if (prompt.includes('[[browser]]')) { void browserTurn(params.threadId, turnId, prompt); return; }
     if (prompt.includes('[[hold]]')) heldTurns.set(turnId, { threadId: params.threadId, prompt, steers: [] });
     else setTimeout(() => completeTurn(params.threadId, turnId, prompt), 15).unref();
     return;

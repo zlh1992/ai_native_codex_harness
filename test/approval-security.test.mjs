@@ -48,10 +48,11 @@ function fixture(mode = 'edit') {
 }
 
 async function waitFor(predicate) {
-  for (let count = 0; count < 100; count += 1) {
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
     const value = predicate();
     if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 1));
+    await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error('timed out waiting for approval processing');
 }

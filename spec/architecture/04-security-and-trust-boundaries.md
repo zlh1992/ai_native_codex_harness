@@ -99,7 +99,9 @@ App Server 启动时关闭内置 Shell、unified exec、浏览器、插件、外
 - 子进程环境只保留最小 `PATH/HOME/TMPDIR/LANG/TERM/CI`；不展开继承整个 `process.env`。
 - `HOME` 与 `TMPDIR` 位于 `runtime/<user-id>/<project-access-id>/`；同一用户不同项目/access 不能读写彼此的 shell 启动文件、配置或临时缓存。
 - Seatbelt 只允许当前 tree 与该 access runtime 的必要访问；默认禁网。
-- 命令具有 wall timeout、CPU、进程、文件描述符和输出字节限制。
+- 命令具有 wall timeout、CPU、文件描述符和输出字节限制；命令队列按 run 串行并受 EXECUTE 容量限制，不设置 OS 用户级固定进程数上限。
+
+Portal 管理的交互浏览器与 Codex 内置浏览器分离，专用沙箱、控制权、HTTP 认证及输入省略规则见 [交互浏览器](11-managed-browser.md)。浏览器工具只对普通 EXECUTE root 开放；不开放宿主 Chrome 或原始 CDP。
 
 Seatbelt 不是容器。完全不可信用户需要独立 OS 用户、VM/容器、独立磁盘 quota、独立 Codex 身份和独立 worker。
 

@@ -8,6 +8,7 @@ import { createStaticAssets } from './static-assets.mjs';
 
 import fs from 'node:fs';
 import http from 'node:http';
+import { browserRoutes } from './browser-routes.mjs';
 import path from 'node:path';
 import { createHmac, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -481,6 +482,7 @@ async function route(req, res) {
   if (await workGraphRoutes(req, res, url, session)) return;
   if (req.method === 'POST' && pathname === '/api/logout') {
     requireMutation(req, session);
+    await codex.browser.closeSession(session.tokenHash);
     db.deleteSession(session.tokenHash);
     closeSessionStreams(session.tokenHash);
     audit(req, session, 'auth.logout', 'session');
@@ -498,6 +500,7 @@ async function route(req, res) {
     return;
   }
 
+  if (await handleBrowser(req, res, url, session)) return;
   const scopedMemory = pathname.match(/^\/api\/projects\/([^/]+)\/memories(?:\/([^/]+))?$/);
   let scopeProjectId = null;
   if (scopedMemory) {
@@ -1396,6 +1399,7 @@ async function route(req, res) {
   throw new HttpError(404, 'NOT_FOUND', '接口不存在。');
 }
 
+const handleBrowser = browserRoutes({ codex, config, chatFor, requireMutation, refreshSession, checkOrigin });
 await bootstrapAdmin();
 db.cleanSessions();
 
@@ -1431,10 +1435,11 @@ function shutdown(signal) {
   log('info', `收到 ${signal}，正在关闭`);
   workflowScheduler.stop();
   memory.stop();
-  codex.stop();
+  const stopped = codex.stop();
   server.close(async () => {
     await Promise.allSettled([...workflowScheduler.inFlight.values()].map(entry => entry.promise));
     await codex.local.drain();
+    await stopped;
     db.close(); process.exit(0);
   });
   setTimeout(() => process.exit(1), 5000).unref();

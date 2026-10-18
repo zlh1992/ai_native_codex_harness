@@ -20,6 +20,7 @@
 
 | [09 多人 Work Graph](09-human-work-graph.md) | 真实员工 DAG、自动共享、交付审核与持久调度如何闭环？ |
 | [10 老板隐私项目与本地引擎](10-local-private-projects.md) | 不可分享项目、本地 DSH、项目记忆及审批/搜索例外如何隔离？ |
+| [11 Portal 交互浏览器与命令环境](11-managed-browser.md) | 独立 Chrome、人工接管、会话清理与通用执行如何受控？ |
 
 ## 已接受的核心决策
 

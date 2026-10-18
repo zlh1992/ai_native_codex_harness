@@ -33,6 +33,7 @@
     "jszip": "3.10.1",
     "mammoth": "1.12.2",
     "pdfjs-dist": "5.4.624",
+    "playwright-core": "1.61.1",
     "sortablejs": "1.15.7"
   },
   "overrides": {

@@ -5,6 +5,7 @@ import { createSessionClient, setAuthState, watchSession } from './session-ui.js
 import { taskConversationState } from './task-flow.js';
 import { selectTaskGraph } from './task-graph-filter.js';
 import { ToolDetailsPanel } from './tool-details.js';
+import { BrowserPanel } from './browser-panel.js';
 import { configureEmployeeSession, saveEmployeeSession, clearEmployeeSession, sessionFetch, sessionUrl } from './employee-session.js';
 
 const bossWorkbench = location.pathname === '/boss/workbench' || new URLSearchParams(location.search).get('workbench') === '1';
@@ -137,6 +138,7 @@ async function api(path, options = {}) {
 }
 
 function clearPrivateState() {
+  if (typeof browserPanel !== 'undefined') browserPanel.reset();
   if (typeof toolDetailsPanel !== 'undefined') toolDetailsPanel.reset('');
   sessionClient.reset(); projectClock.next(); chatClock.next(); taskClock.next(); routeClock.next(); fileClock.next();
   for (const entry of state.runningTurns.values()) { entry.controller?.abort(); entry.reader?.cancel().catch(() => {}); }
@@ -477,6 +479,7 @@ async function selectChat(chat) {
   $('#prompt-input').value = state.drafts.get(chat.id) || '';
   state.pendingInput = state.pendingInputs.get(chat.id) || null;
   clearChatDisplay();
+  browserPanel.select(chat.id);
   setComposer(false);
   renderChats();
   $('#chat-title').textContent = chat.title;
@@ -503,6 +506,7 @@ async function selectChat(chat) {
 }
 
 function clearChatDisplay() {
+  if (typeof browserPanel !== 'undefined') browserPanel.reset();
   if (typeof toolDetailsPanel !== 'undefined') toolDetailsPanel.reset('');
   $('#message-list').textContent = '正在载入对话…';
   renderActivity(); renderPlanDiff(); renderApprovals([]);
@@ -664,6 +668,7 @@ async function refreshTurnInsights() {
 
 function applyJournalEvent(entry, event) {
   const data = event.payload || {};
+  if (event.eventType === 'browser_state') browserPanel.onEvent(entry.chatId, data);
   const engine = entry.engineLabel || 'Codex';
   if (event.eventType === 'assistant_delta') entry.text += data.delta || '';
   else if (event.eventType === 'diff_updated' && typeof data.diff === 'string') entry.diff = data.diff;
@@ -1625,6 +1630,7 @@ $('#delete-file').addEventListener('click', () => {
 });
 
 const toolDetailsRoot = document.createElement('section');
+const browserPanel = new BrowserPanel({ button: $('#browser-button'), api, toast });
 toolDetailsRoot.id = 'tool-details-panel'; toolDetailsRoot.hidden = true;
 $('#activity-strip').after(toolDetailsRoot);
 const toolDetailsPanel = new ToolDetailsPanel({ root: toolDetailsRoot, api,

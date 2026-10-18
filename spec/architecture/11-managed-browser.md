@@ -1,0 +1,41 @@
+# 11 Portal 交互浏览器与命令环境
+
+## 能力与边界
+
+普通项目 EXECUTE root 可调用 Portal 的 `browser_open`、`browser_snapshot`、`browser_action` 和 `browser_handoff`。每次操作复验活动用户、联网策略、私有 chat、当前 access 和运行身份。EDIT、local_private、planner/reviewer、子代理和跨 chat 调用均拒绝。Codex 内置浏览器、电脑控制和原始 CDP 仍不开放。
+
+每个 chat 最多一个浏览器，全局默认且最多两个（可调低）。浏览器由 playwright-core 启动本机 Chrome 的独立临时 profile，不连接日常 Chrome，不复用宿主 Cookie、扩展、密码库或配置。仅接受无 URL 用户名/密码的 HTTP(S) 导航，禁止任意 file 导航、文件上传接口及下载落盘。网络能力沿用账号联网授权，未额外声明公网地址或域名白名单。
+
+## macOS 沙箱
+
+Chrome 主进程及所有 helper 继承外层专用 Seatbelt。该 profile 开放浏览器 app、系统运行库、TLS/解析配置和必要系统 Mach 服务，写权限只限本次会话临时目录；不开放项目文件、宿主主目录、Keychain、剪贴板、其他 runtime 或其他浏览器会话。Chrome rendezvous Mach 名精确绑定启动 PID。
+
+macOS 拒绝已有 Seatbelt 进程再次初始化沙箱（`forbidden-sandbox-reinit`）。因此 Chrome 内层沙箱关闭，外层 profile 始终保留，启动失败不能回退到无外层隔离。该实现提供会话文件边界，不宣称 Chrome 原生每 renderer 隔离或敌对租户容器。临时 HOME、CFFIXED_USER_HOME、TMPDIR、MAC_CHROMIUM_TMPDIR 均指向同一会话目录。
+
+## HTTP 和前端
+
+| 接口 | 行为 |
+| --- | --- |
+| GET /api/chats/:chatId/browser | 当前状态和标签页；已结束返回 closed |
+| GET /api/chats/:chatId/browser/frame | 当前页 JPEG，no-store |
+| POST /api/chats/:chatId/browser/actions | 持有人类控制权的 Web session 输入、鼠标、滚轮、导航或标签切换 |
+| POST /api/chats/:chatId/browser/control | takeover / continue / cancel |
+| DELETE /api/chats/:chatId/browser | 结束当前会话 |
+
+所有接口沿用员工 session selector、Origin、chat/access 校验；写接口要求 session-bound CSRF。异步返回前复验，客户端不能传 thread、cwd、profile 或 CDP 地址。JPEG 仅在抽屉打开且页面可见时轮询；远端 HTML 不进入 Portal DOM。人工输入从前端内存即时清空，不进入工具明细、事件或服务日志。
+
+## 控制权和生命周期
+
+Agent 请求 handoff 后暂停等待。用户接管绑定当前 Web session，其他登录会话不能输入。用户点击继续后重新读取真实页面；仍是验证页时必须如实返回，不能把点击继续当作验证通过。主动接管也暂停后续浏览器工具；归还后先返回新页面，旧元素动作不自动重放。取消、关闭、拒绝和最长十分钟超时明确结束等待。
+
+浏览器在运行终态、停止、撤权、停用、相关 Web session 注销、服务退出时关闭；完成关闭和临时 profile 清理后才释放 root/EXECUTE 容量。两分钟无工具或前端活动视为断线，关闭会话。浏览器进程退出也关闭会话。关闭有定时 TERM/KILL 兜底，只信号 PID 与本会话 profile 参数同时匹配的进程组。
+
+只用既有 turn_events 保存 browser_state 的 id/state/control/handoff，不新增业务表；不保存画面、URL、原因、Cookie 或输入。页面文本按模型工具请求返回，只属于受 chat ACL 保护的原生上下文；浏览器调用整体跳过 tool_details 和 Luna 摘要。重启不恢复登录态，清理遗留临时 profile，旧接口状态为 closed。
+
+## 命令运行环境
+
+命令使用可取消队列，同一 run 串行，全平台同时启动命令不超过 EXECUTE 容量；出队前再次验证运行和授权。取消排队不会启动命令。固定 `ulimit -u` 删除，因为它限制整个 OS 账号，不能表示每个任务的进程配额。保留墙钟、CPU、FD、输出字节限制及进程组取消，不承诺硬磁盘或进程数隔离。
+
+可信只读工具目录将 python/python3 绑定到可直接启动的 Python 3.10+；用户 HOME、临时目录、pip/npm 缓存按 access 隔离。pip 默认要求虚拟环境，Agent 应建立项目 .venv 并核对真实 CLI、依赖、版本和功能。TLS/证书/解析配置只读开放；宿主凭据、其他项目和 runtime 仍拒绝。结构化错误区别环境资源故障、禁网、超时和人工操作；任何失败均不自动重放。
+
+操作步骤见 [执行与浏览器指南](../../docs/EXECUTION_BROWSER.md)，发布验收见 [发布契约](07-e2e-release-contracts.md)。

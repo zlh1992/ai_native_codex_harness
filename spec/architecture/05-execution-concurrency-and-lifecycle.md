@@ -1,5 +1,7 @@
 # 05 执行、并发与生命周期
 
+命令队列、浏览器双会话容量、人工控制和关闭屏障见 [交互浏览器与命令环境](11-managed-browser.md)。浏览器清理完成后才能完成关联 root 的终态并释放容量。
+
 ## 两级容量模型
 
 本章自动放行/原生 thread 路径描述 standard 项目。local_private 额外限制本机一个活动 DSH root，并领取同一全局 root/EXECUTE 席位；manual 默认逐项确认文件变更、命令和云搜索，auto 也不能在 EDIT 执行命令。两个引擎的用户/工作区忙碌状态必须聚合，Codex 故障不得暂停本地输入。详见 [本地生命周期](10-local-private-projects.md)。

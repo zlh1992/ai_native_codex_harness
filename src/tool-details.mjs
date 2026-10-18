@@ -56,6 +56,7 @@ export class ToolDetailsService {
   }
   capture(runId, chatId, event, data) {
     if (this.stopped) return;
+    if (String(data.name || data.item?.tool || '').startsWith('browser_')) return;
     const run = this.db.getTurnRun(runId);
     if (!this.authorized(run)) return;
     if (event === 'turn_error' || event === 'turn_completed') {

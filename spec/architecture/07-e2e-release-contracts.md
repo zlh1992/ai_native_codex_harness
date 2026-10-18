@@ -2,6 +2,8 @@
 
 ## 门控入口
 
+`test/e2e/browser-gate.test.mjs` 额外要求本机真实 Chrome，验证 Portal 画面/中文输入/接管继续、双角色隔离、Origin/CSRF/越权拒绝、刷新、停止及重启清理。受控验证页的正负结果都须按实际正文断言，合成 app-server 不代表真实模型的工具使用质量。`test/command-runtime.test.mjs` 固定可取消串行队列、真实 venv、多子进程及 curl HTTPS；`test/browser-service.test.mjs` 固定超时、控制权及授权变更。既有固定 Portal 发布门控不变。
+
 `test/tool-details.test.mjs` 固定明细状态/退出码、输入输出、秘密/记忆省略、异步批量不阻塞、撤权后不发布、隐私不调用云端、重启中断、前端转义/展开与切换竞态；`test/local-search.test.mjs` 额外验证独立无搜索/无工具 Luna-low 摘要协议。隐私 HTTP E2E 验证明细返回、员工及跨 chat run 拒绝。合成上游不代表真实 Luna 可用性。
 
 ```bash

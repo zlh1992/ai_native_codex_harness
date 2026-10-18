@@ -75,7 +75,8 @@ cd /Users/starwin/Documents/ChatGPT/codex-harness-remote
 - Portal 启动的 Codex app-server 永久关闭原生长期记忆，并在 ready 前读取有效配置验证；业务长期记忆由 Portal 按用户隔离，Codex 自主调用 `memory_search/add/update/delete`（非关键词自动保存），复用 memsearch/Milvus，支持当前来源授权、引用、chat 开关、人工管理和分享确认。
 - 关闭 Codex 内置 Shell、浏览器、插件、外部 MCP 和电脑控制；保留原生 apply-patch/diff、approval、plan、goal、skills 与子代理。动态 `workspace_*` 工具仍由后端做 ACL 和路径校验；通过校验的项目内文件变更会自动接受。
 - 项目命令使用无秘密环境，并套用 macOS Seatbelt：默认不能读这台 Mac 的用户主目录或其他用户工作区；网络权限由超级管理员按用户开关。
-- 命令超时、输出上限、进程/文件描述符上限、用户并发、全局并发、项目数和存储配额；员工项目硬上限 100，全局 Codex turn 硬上限 40，Portal 同时运行 11 个 root turn，默认 EXECUTE 可使用全部 11 席。
+- 命令超时、CPU/输出/文件描述符上限、可取消串行队列、用户并发、全局并发、项目数和存储配额；员工项目硬上限 100，全局 Codex turn 硬上限 40，Portal 同时运行 11 个 root turn，默认 EXECUTE 可使用全部 11 席。
+- [对话浏览器与项目执行](docs/EXECUTION_BROWSER.md)：隔离 Chrome、真实画面与中文输入、登录/验证人工接管；运行结束清理登录态，Codex 内置浏览器保持关闭。
 - 浏览器内项目/对话管理、同项目不同对话并发、流式 Codex 输出、可游标重放的语义事件、工具活动、停止 turn、文件树、编辑器、上传、可恢复删除。浏览器写入、任务快照和交付仍等待整个 access 空闲。
 - 可拖拽调整项目栏、对话栏、文件栏以及文件树/预览区；支持 SVG/图片、DOT 配套 SVG、PDF、Excel、CSV/TSV、Markdown、JSON 和源代码预览。
 - 独立老板驾驶舱：全局指标、员工创建/停用/重置密码、网络与配额、项目授权/worktree 生命周期和审计；原工作台保留给员工及老板自己的项目。

@@ -12,6 +12,7 @@ import { MEMORY_TOOLS, callMemoryTool } from './memory-tools.mjs';
 import { assertStandardProject } from './private-projects.mjs';
 import { ToolDetailsService } from './tool-details.mjs';
 import { WechatOwnerProjectTools } from './wechat-owner-project-tools.mjs';
+import { BrowserService, BROWSER_TOOLS } from './browser-service.mjs';
 
 const TURN_MODES = new Set(['edit', 'execute']);
 
@@ -99,6 +100,8 @@ export class CodexService extends EventEmitter {
     this.loadedThreads = new Set();
     this.contextByThread = new Map();
     this.activeByChat = new Map();
+    this.browser = new BrowserService({ config, db, emit: (active, data) => this.#emit(active, 'browser_state', data),
+      validateContext: active => this.workGraphRuntime?.assertContext(active) });
     this.activeByThread = new Map();
     this.parentBySubagent = new Map();
     this.subagentSettings = new Map();
@@ -140,7 +143,7 @@ export class CodexService extends EventEmitter {
       throw error;
     }
   }
-  stop() { this.toolDetails.stop(); this.inputQueue.stop(); this.client.stop(); }
+  stop() { this.toolDetails.stop(); this.inputQueue.stop(); this.client.stop(); return this.browser.stop(); }
 
   workspaceBusy(projectAccessId) {
     const recovering = [...this.recoveringChats].some((chatId) => this.db.getChat(chatId)?.projectAccessId === projectAccessId);
@@ -183,6 +186,11 @@ export class CodexService extends EventEmitter {
       'Use the host workspace_* tools for reads, whole-file writes, search, deletion, and project-local commands; use the native apply_patch tool for focused edits.',
       'The built-in shell, browser, app, plugin, MCP, computer-use, and web tools are unavailable.',
       'workspace_exec is authorized automatically only when the current Portal turn mode is EXECUTE; in EDIT mode it will be rejected.',
+      'For Python use python3 (the Portal real interpreter), create a project .venv and install dependencies there. Run its CLI with .venv/bin/<cli> or activate that venv for the command. HOME, temporary files and caches are isolated to this access. Never install globally.',
+      'A skill document is not a CLI installation. Verify the actual executable, dependencies, version and the requested function before reporting installation success.',
+      'If a command reports a runtime/resource/network policy error, stop repeating it and explain its errorCode and recoveryHint. Commands are never automatically replayed; inspect possible side effects before retrying.',
+      ...(this.config.browserEnabled ? ['Use only Portal browser_open/browser_snapshot/browser_action/browser_handoff for interactive web access in EXECUTE. They are root-only and require account network permission.',
+        'For login or website verification call browser_handoff; the user enters credentials only in the browser drawer. While the user controls the browser, pause browser operations. After return, inspect the real page and report any remaining block honestly.'] : []),
       'Project-local file changes and EXECUTE commands do not require interactive user confirmation, but all project, path, reserved-directory, network, quota, and lifecycle boundaries remain enforced by the host.',
       `You may use native subagents when useful, but at most ${this.config.maxSubagentsPerRoot} may be active for this root thread and every spawned subagent must use ${this.config.subagentModel}.`,
       'Never request another subagent model. Explicit model overrides are forbidden by Portal policy.',
@@ -224,7 +232,7 @@ export class CodexService extends EventEmitter {
       baseInstructions: this.#instructions(context),
       dynamicTools: ['planner', 'reviewer'].includes(context.chat?.purpose)
         ? (this.workGraphRuntime?.toolsFor(context.chat) || [])
-        : [...DYNAMIC_TOOLS, ...this.wechatOwnerProjects.toolsFor(context),
+        : [...DYNAMIC_TOOLS, ...(this.config.browserEnabled ? BROWSER_TOOLS : []), ...this.wechatOwnerProjects.toolsFor(context),
           ...(this.memory && this.config.memoryEnabled ? MEMORY_TOOLS : []), ...(this.workGraphRuntime?.toolsFor(context.chat || {}) || [])],
     };
   }
@@ -452,6 +460,7 @@ export class CodexService extends EventEmitter {
   }
 
   #persistedEventPayload(event, data = {}) {
+    if (event === 'browser_state') return { id: data.id, state: data.state, control: data.control, handoff: data.handoff === true };
     if (event === 'assistant_delta' || event === 'reasoning_delta') {
       return { byteLength: Buffer.byteLength(String(data.delta || '')), omittedFromReplay: true };
     }
@@ -767,6 +776,7 @@ export class CodexService extends EventEmitter {
     }
     active.interruptRequested = true;
     for (const controller of active.commandControllers) controller.abort();
+    await this.browser.close(chatId, 'interrupted');
     this.#cancelApprovalsForActive(active);
     if (active.turnId) await this.client.request('turn/interrupt', { threadId: active.threadId, turnId: active.turnId }, 15_000);
     return true;
@@ -783,6 +793,7 @@ export class CodexService extends EventEmitter {
       for (const controller of active.commandControllers) controller.abort();
       this.#cancelApprovalsForActive(active);
     }
+    await this.browser.closeUser(userId);
     await Promise.allSettled(targets.map((active) => active.turnId
       ? this.client.request('turn/interrupt', { threadId: active.threadId, turnId: active.turnId }, 15_000)
       : Promise.resolve()));
@@ -1339,11 +1350,13 @@ export class CodexService extends EventEmitter {
     const params = message.params || {};
     const args = params.arguments && typeof params.arguments === 'object' ? params.arguments : {};
     const name = params.tool;
-    this.#emit(active, 'tool_started', { callId: params.callId, name, arguments: args });
+    const browserTool = name?.startsWith('browser_');
+    this.#emit(active, 'tool_started', { callId: params.callId, name, ...(browserTool ? {} : { arguments: args }) });
     let result;
     try {
       invariant(this.db.getChat(active.chat.id)?.threadState !== 'resume_failed', 409, 'MEMORY_CONTEXT_INVALIDATED', '对话上下文已失效，请结束本轮并重置后继续。');
-      result = name?.startsWith('memory_')
+      if (browserTool) invariant(params.threadId === active.threadId, 403, 'BROWSER_ROOT_ONLY', '浏览器仅限当前 root 调用。');
+      result = browserTool ? await this.browser.call(active, name, args) : name?.startsWith('memory_')
         ? await callMemoryTool({ memory: this.memory, active, name, args,
           authorize: () => {
             invariant(params.threadId === active.threadId, 403, 'MEMORY_ROOT_ONLY', '记忆工具仅限当前 root 调用。');
@@ -1361,12 +1374,13 @@ export class CodexService extends EventEmitter {
         : name?.startsWith('work_graph_') && this.workGraphRuntime
         ? await this.workGraphRuntime.call(active, name, args, params.threadId)
         : await this.#callTool(active, name, args);
-      this.client.respond(message.id, { contentItems: toolResult(result), success: true });
-      this.#emit(active, 'tool_completed', { callId: params.callId, name, result });
+      const success = !browserTool || result.ok !== false;
+      this.client.respond(message.id, { contentItems: toolResult(result), success });
+      this.#emit(active, 'tool_completed', { callId: params.callId, name, result: browserTool ? { ok: success } : result, success });
     } catch (error) {
-      const value = { error: error instanceof Error ? error.message : String(error) };
+      const value = { error: error instanceof Error ? error.message : String(error), errorCode: error.code || 'TOOL_FAILED', retryable: false };
       this.client.respond(message.id, { contentItems: toolResult(value), success: false });
-      this.#emit(active, 'tool_completed', { callId: params.callId, name, result: value, success: false });
+      this.#emit(active, 'tool_completed', { callId: params.callId, name, result: browserTool ? { error: true } : value, success: false });
     }
   }
 
@@ -1443,7 +1457,14 @@ export class CodexService extends EventEmitter {
       try {
         result = await runSandboxedCommand({
           config: this.config, workspace: this.workspace, project: approvedProject, user: approvedUser,
-          command, cwd, signal: controller.signal,
+          command, cwd, signal: controller.signal, runKey: active.turnRunId,
+          authorize: () => {
+            invariant(!active.completed && !active.finishing && !active.interruptRequested, 409, 'TURN_INTERRUPTED', '本轮已结束或中断。');
+            const nowUser = this.db.getUserById(user.id), nowProject = this.db.getProjectForUser(project.id, user.id);
+            invariant(nowUser?.status === 'active' && nowUser.networkAccess === approvedUser.networkAccess
+              && nowProject?.accessId === approvedProject.accessId, 403, 'COMMAND_AUTHORIZATION_CHANGED', '排队期间账号或项目授权已变化。');
+            this.workGraphRuntime?.assertContext(active);
+          },
         });
       } finally {
         active.commandControllers.delete(controller);
@@ -1464,6 +1485,15 @@ export class CodexService extends EventEmitter {
 
   #finish(active, error = null, turn = null) {
     if (active.completed) return;
+    if (!active.browserDrained) {
+      if (active.finishing) return;
+      active.finishing = true;
+      for (const controller of active.commandControllers) controller.abort();
+      void this.browser.close(active.chat.id, 'run_ended').finally(() => {
+        active.browserDrained = true; active.finishing = false; this.#finish(active, error, turn);
+      });
+      return;
+    }
     active.completed = true;
     if (active.usageId) {
       const missingChild = [...active.subagentThreadIds].some(id => !this.db.db.prepare(

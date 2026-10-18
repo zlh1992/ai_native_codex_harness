@@ -1,5 +1,7 @@
 # 06 持久化、事件与恢复
 
+交互浏览器只把 browser_state 元数据写入既有事件，刷新查询当前会话，重启后显示 closed；不恢复 Cookie/profile，也不写工具明细或云端摘要。见 [浏览器生命周期](11-managed-browser.md)。
+
 隐私项目增加 DSH JSONL 与 local_session_id（不向浏览器公开），使用独立 user/project/chat 容器；记录正文仅可经 chat ACL 读取，不进入全局 journal/日志。空白会话须先物化，恢复失败保留映射，显式 reset 记录`engine=qwen` 的 lineage；重启不重放遗留 inbox 或审批。详见 [第 10 章](10-local-private-projects.md)，备份不能只复制 SQLite 而遗漏本地 session。
 
 ## 三类事实源
