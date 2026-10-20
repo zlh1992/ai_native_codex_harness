@@ -343,6 +343,7 @@ export class HarnessDatabase {
     this.#ensureColumn('chats', 'task_version', 'INTEGER');
     this.#ensureColumn('chats', 'source_chat_id', 'TEXT');
     this.#ensureColumn('chats', 'shared_at', 'TEXT');
+    this.#ensureColumn('chats', 'archived_at', 'TEXT');
     this.#ensureColumn('chats', 'thread_state', "TEXT NOT NULL DEFAULT 'ready'");
     this.#ensureColumn('chats', 'thread_error', 'TEXT');
     this.#ensureColumn('chats', 'preferred_model', 'TEXT');
@@ -802,7 +803,7 @@ export class HarnessDatabase {
   mapChat(row) {
     return row ? {
       id: row.id, projectId: row.project_id, userId: row.user_id, title: row.title,
-      codexThreadId: row.codex_thread_id, status: row.status,
+      codexThreadId: row.codex_thread_id, status: row.status, archivedAt: row.archived_at || null,
       purpose: row.purpose || 'normal', workflowJobId: row.workflow_job_id || null,
       preferredMode: row.preferred_mode || 'execute',
       preferredModel: row.preferred_model || null,
@@ -842,7 +843,7 @@ export class HarnessDatabase {
     const fields = [];
     const values = [];
     for (const [key, column] of [
-      ['title', 'title'], ['codexThreadId', 'codex_thread_id'], ['status', 'status'],
+      ['archivedAt', 'archived_at'], ['title', 'title'], ['codexThreadId', 'codex_thread_id'], ['status', 'status'],
       ['taskId', 'task_id'], ['taskVersion', 'task_version'], ['threadState', 'thread_state'],
       ['threadError', 'thread_error'], ['preferredMode', 'preferred_mode'], ['preferredModel', 'preferred_model'], ['preferredEffort', 'preferred_effort'],
       ['controlMode', 'control_mode'], ['localSessionId', 'local_session_id'],

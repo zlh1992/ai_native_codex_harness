@@ -176,3 +176,7 @@ steering -> paused (delivery uncertain; never automatically resend)
 ## 多人图扩展
 
 `kind=dag` 的计划、人工提交、清单、审核及 handoff 遵循 [多人 Work Graph](09-human-work-graph.md)。manual 原生身份为空；不能套用 linear 的下一步推进逻辑。包含 workflow 历史的项目暂不提供普通删除，须保留提交与恢复证据。
+
+## 项目对话归档
+
+归档仅是 chat 所有者的列表组织状态，`archived_at` 为空表示未归档。老板与员工通过同一 PATCH archived 布尔字段操作自己的 chat；仍须当前 access、Origin 和 CSRF。归档要求无运行/恢复/待发输入，不删除消息、原生 thread、提交或任务关系，不等于停止、撤权或禁止后续任务。已归档列表可读取和恢复，内部 listChats 与分享、生命周期检查仍包含归档对话。

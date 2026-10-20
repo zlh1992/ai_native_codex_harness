@@ -96,3 +96,5 @@
 | 2026-09-05 | [Spec Review 八项问题修复](2026-09-05-spec-review-remediation.md) | 完成 | 文件边界、原生 approval、生命周期、ACL、运行终态、任务推进、trash 配额与启动 ready 加固 |
 | 2026-09-05 | [当前实现基线：P0/P1 加固、协作语义与发布门控](2026-09-05-current-implementation-baseline.md) | 完成 | 对当前工作树实现、审计问题处置、协议升级和验证证据的完整快照 |
 | 2026-09-05 | [Spec 治理初始化](2026-09-05-spec-governance-bootstrap.md) | 完成 | 新建架构/报告体系并固化后续修改规则 |
+
+- [2026-10-20 项目对话归档](2026-10-20-chat-archive.md)

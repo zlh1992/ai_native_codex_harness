@@ -837,6 +837,11 @@ async function route(req, res) {
     chat = chatFor(session, match[1]);
     invariant(!codex.sharingAccesses.has(chat.projectAccessId), 409, 'WORKSPACE_BUSY', '项目正在共享，请稍后重试。');
     const patch = {};
+    if (body.archived !== undefined) {
+      invariant(typeof body.archived === 'boolean', 400, 'INVALID_ARCHIVED', '归档状态必须是布尔值。');
+      invariant(!body.archived || (!codex.chatBusy(chat.id) && !db.listChatInputs(chat.id).length), 409, 'CHAT_RUNNING', '请先停止任务并处理待发消息，再归档对话。');
+      patch.archivedAt = body.archived ? (chat.archivedAt || new Date().toISOString()) : null;
+    }
     if (body.title !== undefined) patch.title = shortText(body.title, '对话标题', 120);
     if (body.preferredMode !== undefined) patch.preferredMode = turnMode(body.preferredMode);
     if (body.preferredModel !== undefined || body.preferredEffort !== undefined) {

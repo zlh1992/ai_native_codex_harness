@@ -137,3 +137,7 @@ submission 的 chat/run 外键使用 `ON DELETE SET NULL`，同时保存不可�
 新增 token_usage_calls、token_usage_streams、数值样本去重表 token_usage_samples 和 token_usage_meta，使用幂等 CREATE TABLE/INDEX；chats.preferred_effort 为 nullable 幂等迁移。账本与内容表无级联外键，保留删除后的历史消费归属。计量更新和累计水位在同一 SQLite savepoint 提交；相同 native thread/turn 绑定唯一，迟到通知仍可定位原调用。Portal 启动将未结束计量标记 incomplete/finished，不推断未知消耗、不重新发送模型请求；普通 CLI 打开数据库不做运行恢复。
 
 看板按 Asia/Shanghai 的调用开始日期分桶，支持最多 366 天范围，当前请求的累计消费归于其开始日。返回采集起点、更新时间、未上报/不完整/进行中数量；没有真实 usage 的调用不能显示已完整计量。历史 journal 不回填；用量数据库本身保留上游数值而非模型正文。
+
+## 项目对话归档
+
+`chats.archived_at` 以 nullable TEXT 幂等迁移，旧对话默认未归档。GET chat 与列表返回 archivedAt；工作台默认过滤已归档，勾选“已归档”可查看并恢复。归档是独立展示元数据，不改变 status/thread 映射或恢复流程；旧代码忽略新增列仍可读取所有历史。

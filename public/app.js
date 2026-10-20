@@ -454,13 +454,31 @@ async function loadChats() {
 function renderChats() {
   updateModelSelect();
   const root = $('#chat-list');
+  const filter = $('#show-archived-chats');
+  if (filter) filter.onchange = renderChats;
+  const visibleChats = state.chats.filter(chat => Boolean(chat.archivedAt) === Boolean(filter?.checked));
   if (!state.selectedProject) { root.className = 'chat-list empty-state'; root.textContent = '请先选择项目'; return; }
-  if (!state.chats.length) { root.className = 'chat-list empty-state'; root.textContent = '点击 ＋ 开始第一段对话'; return; }
+  if (!visibleChats.length) { root.className = 'chat-list empty-state'; root.textContent = filter?.checked ? '暂无已归档对话' : '点击 ＋ 开始第一段对话'; return; }
   root.className = 'chat-list';
-  root.innerHTML = state.chats.map((chat) => {
+  root.innerHTML = visibleChats.map((chat) => {
     const running = state.runningTurns.has(chat.id) || chat.status === 'running';
-    return `<button class="chat-item ${state.selectedChat?.id === chat.id ? 'active' : ''} ${running ? 'running' : ''}" data-id="${chat.id}"><b>${running ? '<i class="run-dot">●</i> ' : ''}${escapeHtml(chat.title)}</b><span>${running ? '正在运行 · ' : ''}${chat.sharedAt ? '共享时的独立副本 · ' : ''}${formatDate(chat.updatedAt, true)}</span></button>`;
+    return `<div class="chat-row"><button class="chat-item ${state.selectedChat?.id === chat.id ? 'active' : ''} ${running ? 'running' : ''}" data-id="${chat.id}"><b>${running ? '<i class="run-dot">●</i> ' : ''}${escapeHtml(chat.title)}</b><span>${running ? '正在运行 · ' : ''}${chat.sharedAt ? '共享时的独立副本 · ' : ''}${formatDate(chat.updatedAt, true)}</span></button><button class="chat-archive-action" data-archive-id="${chat.id}" aria-label="${chat.archivedAt ? '恢复' : '归档'}对话">${chat.archivedAt ? '恢复' : '归档'}</button></div>`;
   }).join('');
+  $$('[data-archive-id]', root).forEach(button => button.addEventListener('click', async () => {
+    const chat = state.chats.find(item => item.id === button.dataset.archiveId);
+    if (!chat) return;
+    button.disabled = true;
+    const selection = projectClock.version;
+    try {
+      const data = await api(`/api/chats/${chat.id}`, { method: 'PATCH', body: { archived: !chat.archivedAt } });
+      if (!projectClock.current(selection)) return;
+      state.chats = state.chats.map(item => item.id === chat.id ? data.chat : item);
+      if (state.selectedChat?.id === chat.id) state.selectedChat = data.chat;
+      renderChats();
+      toast(data.chat.archivedAt ? '已归档，可在“已归档”中查看或恢复；历史记录保留。' : '对话已恢复');
+    } catch (error) { toast(error.message, 'error'); }
+    finally { button.disabled = false; }
+  }));
   $$('.chat-item', root).forEach((button) => button.addEventListener('click', () => { cancelLocationRestore(); taskClock.next(); void selectChat(state.chats.find((item) => item.id === button.dataset.id)).catch(error => toast(error.message, 'error')); }));
 }
 

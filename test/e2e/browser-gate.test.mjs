@@ -75,6 +75,7 @@ test('real isolated Chrome: Portal display/input/takeover, roles, ACL, recovery 
   const bossTurn = run(boss, b.chat), employeeTurn = run(employee, e.chat);
   await until(async () => (await json(boss, endpoint(b.chat))).handoff && (await json(employee, endpoint(e.chat))).handoff);
   assert.equal(fs.readdirSync(sessionsRoot).length, 2);
+  await req(boss, `/api/chats/${b.chat.id}`, 'PATCH', { archived: true }, 409);
   await req(employee, endpoint(b.chat), 'GET', undefined, 403);
   await req(null, endpoint(b.chat) + '/frame', 'GET', undefined, 401);
   await req(boss, endpoint(b.chat) + '/control', 'POST', { decision: 'takeover' }, 403, { 'x-csrf-token': 'wrong' });
@@ -147,6 +148,29 @@ test('real isolated Chrome: Portal display/input/takeover, roles, ACL, recovery 
   await json(employee, endpoint(e.chat) + '/actions', 'POST', { action: 'reload' });
   await json(employee, endpoint(e.chat) + '/control', 'POST', { decision: 'continue' });
   assert.match(await (await employeeTurn).text(), /Verification required/);
+  // Archive is a private list preference; transcript and native identity survive.
+  for (const [session, item] of [[boss, b], [employee, e]]) {
+    const beforeArchive = await json(session, `/api/chats/${item.chat.id}`);
+    await req(session, `/api/chats/${item.chat.id}`, 'PATCH', { archived: 'true' }, 400);
+    const archived = await json(session, `/api/chats/${item.chat.id}`, 'PATCH', { archived: true });
+    assert.ok(archived.chat.archivedAt);
+    const afterArchive = await json(session, `/api/chats/${item.chat.id}`);
+    assert.deepEqual(afterArchive.messages, beforeArchive.messages);
+    assert.equal(afterArchive.chat.codexThreadId, beforeArchive.chat.codexThreadId);
+    assert.ok((await json(session, `/api/projects/${item.project.id}/chats`)).chats.find(c => c.id === item.chat.id).archivedAt);
+    await req(session === boss ? employee : boss, `/api/chats/${item.chat.id}`, 'PATCH', { archived: false }, 403);
+    assert.equal((await json(session, `/api/chats/${item.chat.id}`, 'PATCH', { archived: false })).chat.archivedAt, null);
+  }
+  await page.reload();
+  await page.locator(`[data-archive-id="${b.chat.id}"]`).click();
+  await until(async () => await page.locator(`[data-archive-id="${b.chat.id}"]`).count() === 0);
+  await page.reload();
+  await page.locator('#show-archived-chats').check();
+  const restore = page.locator(`[data-archive-id="${b.chat.id}"]`);
+  await restore.waitFor(); assert.equal(await restore.textContent(), '恢复');
+  await restore.click(); await restore.waitFor({ state: 'detached' });
+  await page.locator('#show-archived-chats').uncheck();
+  await page.locator(`[data-archive-id="${b.chat.id}"]`).waitFor();
   const events = await json(boss, `/api/chats/${b.chat.id}/events`);
   assert.doesNotMatch(JSON.stringify(events.events), /human-private-marker|Verified article body/);
   const details = await json(boss, `/api/chats/${b.chat.id}/tool-calls`);
