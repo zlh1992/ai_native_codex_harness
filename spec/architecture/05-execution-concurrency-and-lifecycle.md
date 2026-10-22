@@ -131,3 +131,7 @@ queued/steering 输入加入 chat/access/project 的持久生命周期与文件�
 Codex 主客户端在 active-root 过滤之前计量 root/子代理和迟到通知，使用 native thread/turn 绑定归属。新线程基线为零，resume/fork 先接收已有累计基线；若首个调用没有已知基线，只计 last 的可证明下限并标记 incomplete。重复累计值不重复加；倒退/乱序累计值不降低水位，不确定调用标记 incomplete。搜索和摘要的独立客户端携带父运行计量归属；固定 Luna-low，隐私搜索仍只把 query 发给模型。
 
 本地 DSH 在 llm/stream 作用域识别 compaction，逐个实际 /chat/completions HTTP 请求生成独立标识，从经过的原始 SSE usage 提取数值（不存正文）；每个请求的样本替换更新，缺失 usage 不采用框架零值或上下文估算。异常/取消也保留已上报计量，Worker 退出关闭未完成记录并标为不确定。
+
+## 微信与任务资料扩展
+
+微信消息按连接串行处理；文件接收不调用模型。派发后台等待来源空闲后复用 Work Graph，明确发布不自动替员工执行。输入补充下一轮生效，旧运行/旧提交版本固定；旧 chat 仅在派发相关请求时按工具版本迁移并保存 lineage。详见 [微信生命周期](12-weixin-task-dispatch.md)。

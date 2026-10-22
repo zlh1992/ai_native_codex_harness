@@ -27,6 +27,11 @@ export class WorkGraphStore {
     return project;
   }
 
+  assertNotWeixinInbox(projectId) {
+    invariant(!this.sql.prepare("SELECT 1 FROM weixin_connections c JOIN users u ON u.id=c.user_id WHERE c.project_id=? AND c.status!='revoked' AND u.role='admin'").get(projectId),
+      409, 'WEIXIN_INBOX_PRIVATE', '老板微信收件项目不能整体共享；请在对话中选定资料派发到独立协作项目。');
+  }
+
   profile(userId) {
     const row = this.sql.prepare('SELECT * FROM employee_profiles WHERE user_id=?').get(userId);
     return { userId, ...validateProfile({}), ...parse(row?.profile_json, {}), revision: row?.revision || 0,
@@ -50,6 +55,8 @@ export class WorkGraphStore {
   savePlan({ projectId, ownerId, graph, context = {}, roadmapId = null, expectedVersion = 0 }) {
     this.owner(projectId, ownerId);
     graph = validateGraph(graph, { candidateIds: context.candidateIds || null, employeeFor: (id) => this.db.getUserById(id) });
+    if (this.materials) this.materials.validatePlan(graph, ownerId);
+    else invariant(graph.nodes.every(n => !n.inputAttachmentIds.length), 400, 'MATERIALS_UNAVAILABLE', '资料服务不可用。');
     return this.transaction(() => {
       const date = timestamp();
       if (roadmapId) {
@@ -87,6 +94,7 @@ export class WorkGraphStore {
     const roadmap = this.db.getRoadmap(roadmapId);
     invariant(roadmap?.kind === 'dag', 404, 'GRAPH_NOT_FOUND', '工作图不存在。');
     const project = this.owner(roadmap.projectId, ownerId);
+    this.assertNotWeixinInbox(project.id);
     invariant(typeof idempotencyKey === 'string' && /^[A-Za-z0-9_-]{16,100}$/.test(idempotencyKey),
       400, 'INVALID_IDEMPOTENCY_KEY', '须提供 16–100 位幂等标识。');
     return this.transaction(() => {
@@ -96,6 +104,7 @@ export class WorkGraphStore {
       const plan = this.latestPlan(roadmapId);
       invariant(plan?.version === expectedVersion, 409, 'PLAN_CHANGED', '计划版本已变化，请刷新。');
       const graph = validateGraph(plan.graph, { candidateIds: plan.context.candidateIds, employeeFor: (id) => this.db.getUserById(id) });
+      this.materials?.validatePlan(graph, ownerId);
       invariant(!this.sql.prepare("SELECT id FROM workflow_runs WHERE project_id=? AND status IN ('preparing','running','paused')").get(project.id),
         409, 'PROJECT_WORKFLOW_ACTIVE', '项目已有未完成的工作图，请先完成或取消。');
       const id = randomUUID();
@@ -114,6 +123,7 @@ export class WorkGraphStore {
       graph.nodes.forEach((node, index) => insert.run(randomUUID(), roadmapId, project.id, node.assigneeUserId, offset + index,
         node.title, node.acceptance, id, node.key, JSON.stringify(node.checklist), node.dueAt, date, date));
       this.sql.prepare("UPDATE roadmaps SET current_workflow_id=?,status='ready',updated_at=? WHERE id=?").run(id, date, roadmapId);
+      this.materials?.freezeRun(this.run(id));
       this.enqueue({ projectId: project.id, ownerId, runId: id, type: 'share.prepare', dedupeKey: `start:${roadmapId}:${idempotencyKey}` });
       this.event({ projectId: project.id, runId: id, type: 'workflow.preparing', payload: { status: 'preparing' } });
       return this.run(id);
@@ -252,8 +262,10 @@ export class WorkGraphStore {
       else if (typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value)) safe[key] = value;
     }
     invariant(/^[a-z_.]{1,80}$/.test(type), 500, 'INVALID_PROJECT_EVENT', '项目事件类型无效。');
-    return Number(this.sql.prepare(`INSERT INTO project_events(project_id,workflow_run_id,task_id,recipient_user_id,event_type,payload_json,created_at)
+    const eventId = Number(this.sql.prepare(`INSERT INTO project_events(project_id,workflow_run_id,task_id,recipient_user_id,event_type,payload_json,created_at)
       VALUES (?,?,?,?,?,?,?)`).run(projectId, runId, taskId, recipientId, type, JSON.stringify(safe), timestamp()).lastInsertRowid);
+    this.onEvent?.({ projectId, runId, taskId, recipientId, type, payload: safe });
+    return eventId;
   }
   events(projectId, userId, after = 0, limit = 500) {
     const project = this.db.getProjectForUser(projectId, userId);

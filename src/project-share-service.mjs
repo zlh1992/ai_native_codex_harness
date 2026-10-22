@@ -13,6 +13,7 @@ export class ProjectShareService {
   }
 
   async grant({ project, userId, authorize, scope = 'files_and_history', memoryConfirmationToken = null }) {
+    this.store.assertNotWeixinInbox(project.id);
     assertStandardProject(this.db.getProject(project.id));
     invariant(['files_only', 'files_and_history'].includes(scope), 400, 'INVALID_SHARE_SCOPE', '分享范围无效。');
     const check = () => {
@@ -77,6 +78,7 @@ export class ProjectShareService {
   }
 
   prepareWorkflow(job) {
+    this.store.assertNotWeixinInbox(job.projectId);
     assertStandardProject(this.db.getProject(job.projectId));
     const run = this.store.assertRun(job.runId, job.generation, ['preparing']);
     this.store.assertJob(job.id, job.leaseToken);

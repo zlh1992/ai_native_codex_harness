@@ -107,3 +107,5 @@ node src/cli.mjs reset-password --username=superadmin
 ## 多人 Work Graph
 
 老板可由项目资料与员工能力生成工作图，自动分享项目、下发清单，按人工/辅助/自动方式验收与返工，完成后继续下发依赖任务。使用方式与运行开关见 [工作图操作指南](docs/WORK_GRAPH.md)，设计约束见 [多人工作图架构](spec/architecture/09-human-work-graph.md)。
+
+微信连接、资料派发、员工接单及分批上线操作见 [微信任务派发指南](docs/WEIXIN_TASK_DISPATCH.md)。

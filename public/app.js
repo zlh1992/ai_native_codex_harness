@@ -1,3 +1,5 @@
+import { DispatchPanel } from './dispatch-panel.js';
+import { WeixinPanel } from './weixin-panel.js';
 import { WorkGraphUI } from './work-graph.js';
 import { KanbanBoard, taskColumns, taskColumn } from './kanban.js';
 import { SelectionClock, readView, viewUrl, safeReturnTo, defaultPage, loginPage } from './navigation.js';
@@ -35,6 +37,7 @@ const sessionChanges = watchSession(bootstrap);
 let checkingSession = false;
 let taskBoard;
 const workGraphUI = new WorkGraphUI({ api, toast, openTask, refreshTasks: loadTasks,
+  onDetail: task => { if (!task && !state.taskTarget) return; state.taskTarget = task?.id || null; saveLocation(!task); if (task && state.taskDispatchEnabled) void markTaskRead(task.id); },
   openFile: async (projectId, relative) => {
     cancelLocationRestore();
     if (!state.projects.some((p) => p.id === projectId)) await loadProjects();
@@ -133,11 +136,18 @@ async function recoverThread(recovery, action) {
   }
 }
 
+async function markTaskRead(taskId) {
+  try { const data = await api('/api/task-notifications');
+    await Promise.all(data.notifications.filter(n => n.taskId === taskId && !n.readAt).map(n => api(`/api/task-notifications/${n.id}/read`, { method: 'POST', body: {} })));
+  } catch { /* A failed read marker does not prevent opening the task. */ }
+}
 async function api(path, options = {}) {
   return sessionClient.request(path, options);
 }
 
 function clearPrivateState() {
+  if (typeof dispatchPanel !== 'undefined') dispatchPanel.reset();
+  if (typeof weixinPanel !== 'undefined') weixinPanel.reset();
   if (typeof browserPanel !== 'undefined') browserPanel.reset();
   if (typeof toolDetailsPanel !== 'undefined') toolDetailsPanel.reset('');
   sessionClient.reset(); projectClock.next(); chatClock.next(); taskClock.next(); routeClock.next(); fileClock.next();
@@ -201,6 +211,10 @@ async function restoreSession() {
   if (state.me) clearPrivateState();
   state.me = data.user;
   state.csrf = data.csrfToken;
+  state.taskDispatchEnabled = data.taskDispatchEnabled;
+  workGraphUI.dispatchEnabled = data.taskDispatchEnabled;
+  dispatchPanel.configure(data.taskDispatchEnabled && data.user.role === 'admin');
+  weixinPanel.configure(data.weixinEnabled);
   if (data.user.role === 'user' && bossWorkbench) { location.replace('/employee'); return; }
   if (data.user.role === 'admin' && !bossWorkbench) {
     location.replace(defaultPage('admin'));
@@ -264,6 +278,9 @@ async function loadTasks() {
     const projects = await api('/api/projects');
     if (request !== state.tasksRequest) return;
     state.projects = projects.projects; renderProjects();
+  }
+  if (state.taskDispatchEnabled) {
+    const notices = await api('/api/task-notifications'); if (request !== state.tasksRequest) return; state.notifications = notices.notifications;
   }
   renderTasks();
   if (workGraphUI.initialized && state.me?.role === 'admin') await workGraphUI.refresh();
@@ -357,13 +374,14 @@ function renderTasks() {
   } });
   taskBoard.render(taskColumns, tasks.map(task => ({ id: task.id, column: taskColumn(task), title: task.title,
     tag: [task.projectName, task.roadmapTitle].filter(Boolean).join(' · ') || '交付任务', description: task.acceptance, person: state.me.displayName,
-    meta: `${taskStatusLabel(task.status)} · V${task.version}`, search: `${task.title} ${task.projectName} ${task.roadmapTitle || ''} ${taskStatusLabel(task.status)}` })), $('#task-search').value);
+    meta: `${state.notifications?.some(n => n.taskId === task.id && !n.readAt) ? '未读提醒 · ' : ''}${taskStatusLabel(task.status)} · V${task.version}`, search: `${task.title} ${task.projectName} ${task.roadmapTitle || ''} ${taskStatusLabel(task.status)}` })), $('#task-search').value);
 }
 
 async function openTask(taskId) {
   cancelLocationRestore();
   if (!await confirmLeaveEditor()) return;
   const selection = taskClock.next();
+  state.navigating = true;
   try {
     const data = await api(`/api/tasks/${taskId}/chat`, { method: 'POST' });
     if (!taskClock.current(selection)) return;
@@ -375,8 +393,10 @@ async function openTask(taskId) {
     if (!taskClock.current(selection)) return;
     await selectChat(data.chat);
     if (!taskClock.current(selection)) return;
-    switchView('workbench');
+    state.taskTarget = null;
+    switchView('workbench', false);
   } catch (error) { toast(error.message, 'error'); await loadTasks(); }
+  finally { if (taskClock.current(selection)) { state.navigating = false; saveLocation(); } }
 }
 
 async function loadProjects() {
@@ -1160,7 +1180,7 @@ async function confirmLeaveEditor() {
 
 function saveLocation(replace = false) {
   if (!state.me || state.navigating) return;
-  const url = viewUrl(location.pathname, { view: state.view, project: state.selectedProject?.id, chat: state.selectedChat?.id });
+  const url = viewUrl(location.pathname, { view: state.view, project: state.selectedProject?.id, chat: state.selectedChat?.id, task: state.taskTarget });
   if (`${location.pathname}${location.search}` !== url) history[replace ? 'replaceState' : 'pushState'](null, '', url);
 }
 
@@ -1192,7 +1212,16 @@ async function restoreLocation() {
       resetProject(); if (requested.project) toast('该项目已不可访问，已返回任务看板。', 'error');
     }
     if (!routeClock.current(selection)) return;
-    switchView(requested.project && !project ? 'tasks' : requested.view, false);
+    if (requested.task || state.taskTarget) workGraphUI.closeDetail();
+    switchView(requested.task ? 'tasks' : requested.project && !project ? 'tasks' : requested.view, false);
+    if (requested.task) {
+      try {
+        const { task } = await api(`/api/tasks/${encodeURIComponent(requested.task)}`);
+        if (!routeClock.current(selection)) return;
+        if (task.workflowRunId) await workGraphUI.inspect(task);
+        else toast('该任务没有工作图详情，请从任务列表进入。', 'error');
+      } catch (error) { if (routeClock.current(selection)) toast(error.message, 'error'); }
+    }
   } finally { if (routeClock.current(selection)) state.navigating = false; }
   if (routeClock.current(selection)) saveLocation(true);
 }
@@ -1652,6 +1681,8 @@ $('#delete-file').addEventListener('click', () => {
 });
 
 const toolDetailsRoot = document.createElement('section');
+const dispatchPanel = new DispatchPanel({ api, toast, getContext: () => ({ project: state.selectedProject, chat: state.selectedChat }), insert: text => { $('#prompt-input').value += text; $('#prompt-input').focus(); } });
+const weixinPanel = new WeixinPanel({ api, toast, getContext: () => ({ user: state.me, projects: state.projects, project: state.selectedProject }) });
 const browserPanel = new BrowserPanel({ button: $('#browser-button'), api, toast });
 toolDetailsRoot.id = 'tool-details-panel'; toolDetailsRoot.hidden = true;
 $('#activity-strip').after(toolDetailsRoot);

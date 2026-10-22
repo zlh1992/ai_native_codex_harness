@@ -14,7 +14,7 @@
 - **PRD-008**：若 owner chat 曾引用可用的跨项目记忆，`files_and_history` 分享必须显式确认并绑定接收者、chat/引用快照；快照变化、重复使用或超时必须拒绝。若引用已因删除或来源撤权而失效，必须先显式重置 chat，不能继续分享其历史。
 
 - **PRD-009**：project_type 创建后不可变。local_private 只由活动老板本人创建、访问；禁止员工授权、分享、工作图/task/规划审核及 Codex thread 绑定。不得转换旧项目或隐式回退 Codex。完整契约见 [本地隐私项目](10-local-private-projects.md)。
-- **PRD-010**：老板微信 `weichat-project` 是固定消息归属和只读项目入口。只有该项目内存在 active 微信 binding 的老板 chat 可列出、读取和搜索当前老板本人拥有的 standard 项目；员工自有项目、仅 shared access、local_private、本机未纳管目录以及跨项目写入/命令必须拒绝。
+- **PRD-010**：微信 relay 必须绑定当前活动用户及获准的 standard project/access/chat，禁网、撤权、停用不可退回老板身份。旧固定老板只读入口保留；老板普通对话的派发 root 工具仅可读取自己拥有的普通项目并在明确指令下复制选定资料到独立协作项目，不得读取员工自有/仅共享项目、local_private 或宿主目录。老板微信收件项目不得整体共享。任务创建、通知和员工执行是分离动作，资料本身不授予派发权限；详见 [微信派发](12-weixin-task-dispatch.md)。
 
 ## 运行平台约束
 

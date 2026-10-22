@@ -126,3 +126,7 @@ Codex initialize/ready 不证明上游模型认证可用。使用本机 ChatGPT 
 /api/me 返回同一 GPT 模型目录及角色默认强度；模型目录由部署白名单控制，当前为 GPT-6.1 Sol 和 GPT-5.6 Sol/Terra/Luna；默认 GPT-5.6 Sol，CODEX_MODEL 必须属于白名单，旧退役偏好保留并按允许默认运行。更新目录须同步修改白名单契约；PATCH chat 支持 preferredModel/preferredEffort（null 恢复默认）。GET /api/admin/token-usage 使用 from/to（北京时间 YYYY-MM-DD，包含终止日）、userId、engine（gpt/qwen）、model 筛选，缺省近 7 天；返回 totals/days/employees/models/kinds、startedAt、updatedAt 与本地引擎状态。前端可见时每 30 秒刷新，支持手动刷新；统计为本网站调用上报量，不是共享账号账单或费用。
 
 发布先排空运行并一致性备份 SQLite；新增账本不删除既有数据。回退本次代码可以保留 nullable 列与计量表，但回退期间不会继续采集，统计完整性须注明该空窗；不能回退到不支持隐私项目的版本。本地 Qwen disabled 与未上报用量分别显示，真实本机推理未验收前不因看板上线而启用模型。
+
+## 微信与任务资料扩展
+
+新增微信 relay 由 Portal 生命周期管理，不接管旧微信服务。构建固定 commit transport 后，按 pilot 用户列表先验证一组老板/员工再开放。开关、构建、备份和不覆盖新业务的回滚见 [微信操作指南](../../docs/WEIXIN_TASK_DISPATCH.md)。CLI pin 与模型白名单不变。

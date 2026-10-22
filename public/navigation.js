@@ -11,7 +11,7 @@ export function safeReturnTo(value, role) {
   const allowed = role === 'admin' ? ['/boss', '/boss/workbench'] : ['/employee'];
   if (url.origin !== 'https://portal.invalid' || !allowed.includes(url.pathname)) return fallback;
   const params = new URLSearchParams();
-  for (const key of ['view', 'project', 'chat']) {
+  for (const key of ['view', 'project', 'chat', 'task']) {
     const item = url.searchParams.get(key);
     if (item && (key !== 'view' || views.has(item))) params.set(key, item.slice(0, 128));
   }
@@ -28,13 +28,14 @@ export function loginPage(pathname, current = '') {
 export function readView(search = '') {
   const params = new URLSearchParams(search);
   return { view: views.has(params.get('view')) ? params.get('view') : params.has('project') ? 'workbench' : 'tasks',
-    project: params.get('project'), chat: params.get('chat') };
+    project: params.get('project'), chat: params.get('chat'), ...(params.has('task') ? { task: params.get('task') } : {}) };
 }
 
-export function viewUrl(pathname, { view, project, chat }) {
+export function viewUrl(pathname, { view, project, chat, task }) {
   const params = new URLSearchParams({ view: views.has(view) ? view : 'tasks' });
   if (project) params.set('project', project);
   if (project && chat) params.set('chat', chat);
+  if (task) params.set('task', task);
   return `${pathname}?${params}`;
 }
 

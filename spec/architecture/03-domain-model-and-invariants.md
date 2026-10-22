@@ -180,3 +180,7 @@ steering -> paused (delivery uncertain; never automatically resend)
 ## 项目对话归档
 
 归档仅是 chat 所有者的列表组织状态，`archived_at` 为空表示未归档。老板与员工通过同一 PATCH archived 布尔字段操作自己的 chat；仍须当前 access、Origin 和 CSRF。归档要求无运行/恢复/待发输入，不删除消息、原生 thread、提交或任务关系，不等于停止、撤权或禁止后续任务。已归档列表可读取和恢复，内部 listChats 与分享、生命周期检查仍包含归档对话。
+
+## 微信与任务资料扩展
+
+任务输入资料独立于上游成果 inputManifest；连接、资料、派发回执、输入 revision、采用版本及通知的领域关系见 [微信派发](12-weixin-task-dispatch.md)。每批一个协作项目，整个项目仍是共享边界。

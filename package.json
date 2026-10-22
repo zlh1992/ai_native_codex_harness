@@ -34,7 +34,9 @@
     "mammoth": "1.12.2",
     "pdfjs-dist": "5.4.624",
     "playwright-core": "1.61.1",
-    "sortablejs": "1.15.7"
+    "qrcode": "1.5.4",
+    "sortablejs": "1.15.7",
+    "undici": "7.16.0"
   },
   "overrides": {
     "@deepseek-ai/dsh-agent": "0.1.0-rc.7",
@@ -69,6 +71,7 @@
     }
   },
   "devDependencies": {
+    "esbuild": "0.25.11",
     "linkedom": "0.18.13"
   }
 }

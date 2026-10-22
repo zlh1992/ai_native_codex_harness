@@ -1,0 +1,6 @@
+{
+  "repository": "https://github.com/Gan-Xing/CodexBridge.git",
+  "commit": "92166e02f4c7c8fcc0d223e894dd33664db754ea",
+  "installScripts": false,
+  "exports": ["getBotQr", "getQrStatus", "getUpdates", "sendMessage"]
+}

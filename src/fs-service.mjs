@@ -375,6 +375,7 @@ export class WorkspaceService {
         throw new HttpError(500, 'USAGE_SCAN_FAILED', '无法统计回收站用量。', error.message);
       }
     }
+    total.bytes += this.extraUsage?.(userId) || 0;
     return total;
   }
 }

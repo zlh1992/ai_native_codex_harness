@@ -27,7 +27,9 @@ export class TaskReviewService {
     invariant(Array.isArray(items) && items.length === task.checklist.length
       && new Set(items.map((i) => i?.id)).size === items.length, 400, 'REVIEW_CHECKLIST_REQUIRED', '审核须覆盖本轮全部清单项。');
     const upstream = task.workflowRunId ? this.graphs.reviewInputs(task) : [];
-    const references = new Set(['result_summary', 'final_reply', ...submission.outputsManifest.map((f) => f.path),
+    const materialRow = this.db.db.prepare('SELECT manifest_json FROM task_submission_inputs WHERE submission_id=?').get(submissionId);
+    const materialInputs = materialRow ? JSON.parse(materialRow.manifest_json) : [];
+    const references = new Set([...materialInputs.map(f => `input:${f.id}`), 'result_summary', 'final_reply', ...submission.outputsManifest.map((f) => f.path),
       ...upstream.flatMap(input => input.outputs.map(output => output.evidenceRef))]);
     const criteria = task.checklist.map((item) => {
       const result = items.find((i) => i?.id === item.id);
@@ -79,6 +81,8 @@ export class TaskReviewService {
       invariant(mode === 'auto', 403, 'AUTO_REVIEW_NOT_AUTHORIZED', '该节点未授权自动审核。');
       invariant(submission.outputsManifest.every(output => review.detail.coverage?.some(f => !f.evidenceRef && f.path === output.path && f.complete)),
         409, 'REVIEW_NEEDS_OWNER', '交付文件未完整读取，请老板核对。');
+      const materialRow = this.db.db.prepare('SELECT manifest_json FROM task_submission_inputs WHERE submission_id=?').get(submission.id);
+      invariant((materialRow ? JSON.parse(materialRow.manifest_json) : []).every(f => review.detail.coverage?.some(c => c.evidenceRef === `input:${f.id}` && c.complete)), 409, 'REVIEW_NEEDS_OWNER', '本次采用的输入资料尚未完整读取，请老板核对。');
       const references = new Set(review.detail.items.flatMap(item => item.evidence));
       invariant(this.graphs.reviewInputs(task).every(input => input.outputs.every(output => !references.has(output.evidenceRef)
         || review.detail.coverage?.some(f => f.evidenceRef === output.evidenceRef && f.complete))),

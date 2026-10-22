@@ -1,4 +1,10 @@
 #!/usr/bin/env node
+import { WeixinService } from './weixin-service.mjs';
+import { createWeixinRoutes } from './weixin-routes.mjs';
+import { TaskMaterials } from './task-materials.mjs';
+import { TaskDispatchService } from './task-dispatch-service.mjs';
+import { DispatchRuntime } from './dispatch-runtime.mjs';
+import { createDispatchRoutes } from './dispatch-routes.mjs';
 import { ROOT_MODELS, validateModel, validateEffort, defaultEffort, rootEffort, rootModel } from './models.mjs';
 import { formatWechatModelCatalog, parseWechatCommand, resolveWechatModel } from './wechat-channel-commands.mjs';
 import { DEFAULT_SESSION_COOKIE, validSessionSelector, selectedCookieName, requestSessionCookieName } from './session-selection.mjs';
@@ -88,9 +94,26 @@ const reviews = new TaskReviewService({ db, store: graphStore, workspace, worktr
 const graphContext = new ProjectContextService({ db, store: graphStore, workspace, worktrees, graphs });
 const graphRuntime = new WorkGraphRuntime({ db, store: graphStore, codex, graphs, reviews, context: graphContext });
 codex.workGraphRuntime = graphRuntime;
+const materials = new TaskMaterials({ config, db, workspace, store: graphStore, codex });
+workspace.extraUsage = userId => db.db.prepare('SELECT COALESCE(SUM(size),0) AS bytes FROM task_materials WHERE owner_id=?').get(userId).bytes;
+graphStore.materials = materials;
+const dispatchService = new TaskDispatchService({ config, db, store: graphStore, materials, workspace, worktrees, codex });
+graphStore.onEvent = event => { if (config.taskDispatchEnabled) dispatchService.graphEvent(event); };
+codex.standard.dispatchRuntime = new DispatchRuntime({ service: dispatchService, materials, db, store: graphStore, workspace, memory });
+codex.standard.taskMaterials = config.taskDispatchEnabled ? materials : null;
+const dispatchRoutes = createDispatchRoutes({ config, db, service: dispatchService, materials, requireMutation, refreshSession });
+const weixin = new WeixinService({ config, db, materials, dispatch: dispatchService, graphs, store: graphStore, codex });
+const weixinRoutes = createWeixinRoutes({ config, service: weixin, requireMutation, refreshSession });
 graphStore.recoverJobs();
 const workflowScheduler = new WorkflowScheduler({ store: graphStore, handlers: {
-  'share.prepare': (job) => shares.prepareWorkflow(job),
+  'dispatch.prepare': job => dispatchService.prepare(job),
+  'share.prepare': (job) => {
+    const run = graphStore.run(job.runId);
+    const plan = graphStore.plan(run.planId);
+    const files = materials.validatePlan(plan.graph, run.ownerId);
+    if (files.length) materials.importFiles(graphStore.owner(run.projectId, run.ownerId), files);
+    return shares.prepareWorkflow(job);
+  },
   'workflow.reconcile': (job) => graphs.reconcile(job.runId, job.generation),
   'plan.generate': (job) => graphRuntime.plan(job),
   'submission.review': (job) => graphRuntime.review(job),
@@ -479,6 +502,8 @@ async function route(req, res) {
   }
 
   let session = requireSession(req);
+  if (await weixinRoutes(req, res, url, session)) return;
+  if (await dispatchRoutes(req, res, url, session)) return;
   if (await workGraphRoutes(req, res, url, session)) return;
   if (req.method === 'POST' && pathname === '/api/logout') {
     requireMutation(req, session);
@@ -492,7 +517,7 @@ async function route(req, res) {
   if (req.method === 'GET' && pathname === '/api/me') {
     const usage = userUsage(session.user.id);
     sendJson(res, 200, {
-      workGraphEnabled: config.workGraphEnabled,
+      workGraphEnabled: config.workGraphEnabled, taskDispatchEnabled: config.taskDispatchEnabled, weixinEnabled: weixin.enabledFor(session.user.id),
       user: session.user, csrfToken: session.csrfToken, usage,
       model: config.codexModel, models: ROOT_MODELS, defaultEffort: defaultEffort(config, session.user),
       efforts: [...EFFORTS], turnModes: [...TURN_MODES], codex: codex.status(), memory: memory.status(),
@@ -1296,6 +1321,7 @@ async function route(req, res) {
     invariant(access && access.projectId === project.id && access.accessKind === 'shared'
       && ['active', 'revoked'].includes(access.status), 404, 'SHARE_NOT_FOUND', '授权不存在。');
     if (access.status === 'active') db.revokeProjectAccess(access.id);
+    const channel = weixin.current(access.userId); if (channel?.access_id === access.id) weixin.invalidate(channel);
     try { await Promise.all([codex.interruptAccessAndWait(access.id), graphRuntime.interruptMember(access.userId, project.id)]); }
     catch (error) {
       if (error.code === 'TURN_DRAIN_TIMEOUT') throw new HttpError(409, 'SHARE_DRAIN_TIMEOUT', '撤权已生效，但运行尚未完全排空；工作树已保留，可稍后重试清理。');
@@ -1379,6 +1405,7 @@ async function route(req, res) {
       invariant(target, 404, 'USER_NOT_FOUND', '用户不存在。');
     }
     const updated = db.updateUser(target.id, patch);
+    const channel = weixin.current(target.id); if (channel && channel.credential_epoch !== graphStore.policyEpoch(target.id)) weixin.invalidate(channel);
     if (patch.status === 'disabled' || patch.passwordHash) db.deleteUserSessions(target.id);
     if (patch.status === 'disabled' || patch.passwordHash || (patch.networkAccess !== undefined && patch.networkAccess !== target.networkAccess)) {
       try {
@@ -1438,6 +1465,7 @@ server.listen(config.port, config.host, () => {
   if (db.countAdmins() === 0) log('error', '尚无超级管理员，请另开终端运行 ./bin/create-super-admin.sh');
   if (config.workGraphDispatchEnabled) workflowScheduler.start();
   else workflowScheduler.stop();
+  weixin.start();
   memory.start();
   codex.start().then(() => log('info', 'Codex app-server 已就绪')).catch((error) => log('error', 'Codex app-server 启动失败；首次对话会重试', { message: error.message }));
 });
@@ -1445,6 +1473,7 @@ server.listen(config.port, config.host, () => {
 function shutdown(signal) {
   log('info', `收到 ${signal}，正在关闭`);
   workflowScheduler.stop();
+  weixin.stop();
   memory.stop();
   const stopped = codex.stop();
   server.close(async () => {

@@ -1,0 +1,37 @@
+# 微信连接与带资料派发
+
+老板和员工在工作台顶部点击“微信连接”，选择普通项目，再用自己的微信扫码。老板收件项目应为尚未共享的自有项目；派发时系统另建协作项目。确认后先发一条消息建立微信通知上下文。连接面板显示身份、当前项目、轮询状态和近期发送状态，可切换、重扫或解绑。
+
+老板可以先发多个文件，然后说“把这些资料交给张三，完成客户方案”。也可在前端普通项目对话点击“派发资料”，上传并选中资料带回对话，或要求 Agent 整理自己项目中的指定文件。资料收到不等于派发；以“派发回执”的真实 published 状态为准。不要把含未选资料的微信收件项目整体共享。
+
+员工从任务看板或微信“查看任务”进入同一个详情，登录后保留目标。输入资料已经关联任务，点击“进入任务对话”后可使用；压缩包不会自动解压。没有微信连接也能正常处理网页任务。微信处理指定任务需明确回复通知中的“处理任务 <任务 ID>”；网页打开不会切换微信当前项目。
+
+追加资料请明确说明“给任务 <ID> 补充这些资料”；尚未提交的任务会增加资料版本。更换负责人、要求或已结束任务应通过修订/取消/新建处理。发布工作图将共享整个项目，节点选择附件不提供文件级隔离。
+
+## 安装与发布
+
+新开关默认关闭。固定 transport 来源为 `tools/weixin/upstream.json`；只打包 HTTP transport exports，不运行上游 Agent 服务或安装其依赖。构建机需要本仓库 dev 依赖：
+
+```bash
+npm ci --include=dev --ignore-scripts
+git clone --no-checkout https://github.com/Gan-Xing/CodexBridge.git /tmp/portal-weixin-upstream
+git -C /tmp/portal-weixin-upstream checkout --detach 92166e02f4c7c8fcc0d223e894dd33664db754ea
+node bin/build-weixin-transport.mjs /tmp/portal-weixin-upstream
+```
+
+构建产物及 manifest 放在 `.tools/weixin-transport.mjs*`，不提交上游生成代码。部署需保留这两个文件；生产可使用 `npm ci --omit=dev --ignore-scripts`。每次创建 relay 验证固定 commit 和产物 SHA-256。Git 下载需使用当前有效的系统 VPN；不要写死代理端口或把含凭据 URL 放入脚本。
+
+部署配置 `TASK_DISPATCH_ENABLED=true`、`WEIXIN_ENABLED=true`，首批 `WEIXIN_PILOT_USER_IDS` 为老板及验收员工的用户 ID（逗号分隔）。员工通知需 `EMPLOYEE_PUBLIC_ORIGIN`，老板原域名与四模型配置保持。真实一组手机扫码、文件哈希、通知和登录直达验收后，再清空 pilot 列表开放其他用户。开关、allowlist 属于静态配置，改动需排空后重启。
+
+部署前运行 `npm run gate`、`git diff --check` 和 Markdown 相对链接检查。备份数据库、资料 blob 与微信连接私有目录。不要复制现有 `wechat-people-graph` 的账号文件或操作它的服务。
+
+## 故障与恢复
+
+- “已受理”表示后台尚未发布；查看派发回执和工作图后台任务。来源变更需要重新选择资料，不能用重试暗中替换输入。
+- 微信断线会从持久游标重新轮询；已确认处理的消息去重。登录失效则重新扫码。
+- 发送 failed 或 uncertain 不影响网页待办。uncertain 不自动重发，避免手机收到重复任务；员工可直接打开网页查看。
+- 账号禁网时微信不能联网；老板开启后，新的消息按当前 VPN 和权限执行，旧取消消息不会重放。
+- 停服/重启中断的模型消息标记 uncertain，需要先核对前端对话后由用户明确重新发起。
+- 解绑清除连接凭据并停止 relay，业务任务和历史保留。Web 注销不删除已经建立的独立微信绑定。
+
+回滚：关闭两项新增入口，停止 relay 并排空，然后恢复上一版本代码与配置。保留现有数据库、任务输入目录和项目，不使用发布前的数据库覆盖发布后业务。

@@ -141,3 +141,7 @@ submission 的 chat/run 外键使用 `ON DELETE SET NULL`，同时保存不可�
 ## 项目对话归档
 
 `chats.archived_at` 以 nullable TEXT 幂等迁移，旧对话默认未归档。GET chat 与列表返回 archivedAt；工作台默认过滤已归档，勾选“已归档”可查看并恢复。归档是独立展示元数据，不改变 status/thread 映射或恢复流程；旧代码忽略新增列仍可读取所有历史。
+
+## 微信与任务资料扩展
+
+新增 task_materials/dispatches、task_input_revisions/usage/submission_inputs、task_notifications 和 weixin_connections/inbox/outbox 为独立业务事实源。正文与凭据不进 journal，dispatch 明细不复制正文、不做云端摘要。微信发送中/处理中重启标记 uncertain，不自动重放；网页未读与微信投递独立。task 深链接保留到登录返回、刷新和前进后退。详见 [派发恢复](12-weixin-task-dispatch.md)。

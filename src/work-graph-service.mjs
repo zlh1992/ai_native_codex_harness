@@ -93,6 +93,12 @@ export class WorkGraphService {
       itemId: kind === 'codex' ? body.itemId : null, resultSummary, note, checklistSnapshot: task.checklist,
       outputsManifest: outputs, idempotencyKey: key, snapshotCommitSha: snapshot.commitSha, snapshotTreeSha: snapshot.treeSha,
       afterSubmit: (submission) => {
+        if (this.store.materials) {
+          const usage = kind === 'codex' ? this.db.db.prepare('SELECT revision FROM task_input_usage WHERE turn_run_id=?').get(body.turnRunId) : null;
+          const inputs = this.store.materials.current(task.id, kind === 'codex' ? usage?.revision ?? 0 : null);
+          if (kind === 'manual' && (inputs.files.length || body.inputRevision != null)) invariant(inputs.revision === body.inputRevision, 409, 'MATERIAL_REVISION_CHANGED', '资料已更新，请核对后再提交。');
+          this.db.db.prepare('INSERT INTO task_submission_inputs(submission_id,revision,manifest_json) VALUES (?,?,?)').run(submission.id, inputs.revision, JSON.stringify(inputs.files));
+        }
         this.db.db.prepare("UPDATE tasks SET blocked_reason='WAITING_REVIEW' WHERE id=?").run(taskId);
         this.scheduleReview(task, run, submission);
         this.store.event({ projectId: task.projectId, runId: run.id, taskId, recipientId: userId,
@@ -254,6 +260,7 @@ export class WorkGraphService {
           reviewMode: run ? nodeReviewMode(node, run.reviewPolicy) : node.reviewMode || null,
           ...(owner || task?.assigneeUserId === userId ? { task: task ? this.publicTask(task) : null,
             requiredOutputs: node.outputs,
+            attachments: (node.inputAttachmentIds || []).map(id => this.store.materials?.row(id)).filter(Boolean).map(row => this.store.materials.public(row)),
             reviewJob: task ? this.db.db.prepare(`SELECT status,error_code AS errorCode FROM workflow_jobs
               WHERE task_id=? AND task_version=? AND type='submission.review' ORDER BY created_at DESC LIMIT 1`).get(task.id, task.version) || null : null,
             submissions: task ? this.db.listSubmissionsForTask(task.id).map((s) => this.publicSubmission(s)) : [],
@@ -264,9 +271,10 @@ export class WorkGraphService {
   }
   publicTask(task) { const { assignedAccessId, ...safe } = task;
     const run = task.workflowRunId ? this.store.run(task.workflowRunId) : null;
-    return { ...safe, ...(run ? { workflowStatus: run.status, reviewMode: nodeReviewMode(this.node(task), run.reviewPolicy) } : {}) }; }
+    return { ...safe, ...(this.store.materials ? { inputs: this.store.materials.current(task.id) } : {}), ...(run ? { workflowStatus: run.status, reviewMode: nodeReviewMode(this.node(task), run.reviewPolicy) } : {}) }; }
   publicSubmission(submission) {
     const { projectAccessId, codexThreadId, codexTurnId, finalItemId, ...safe } = submission;
-    return safe;
+    const inputs = this.db.db.prepare('SELECT revision,manifest_json FROM task_submission_inputs WHERE submission_id=?').get(submission.id);
+    return { ...safe, ...(inputs ? { inputs: { revision: inputs.revision, files: JSON.parse(inputs.manifest_json) } } : {}) };
   }
 }

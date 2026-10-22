@@ -83,7 +83,9 @@ export function validateGraph(input, { candidateIds = null, employeeFor = null }
       invariant(typeof node.dueAt === 'string' && Number.isFinite(Date.parse(node.dueAt)), 400, 'INVALID_DUE_DATE', '截止日期无效。');
       dueAt = new Date(node.dueAt).toISOString();
     }
-    return { key, assigneeUserId, title: graphText(node.title, '任务标题', 160),
+    const inputAttachmentIds = node.inputAttachmentIds || [];
+    invariant(Array.isArray(inputAttachmentIds) && inputAttachmentIds.length <= 30 && new Set(inputAttachmentIds).size === inputAttachmentIds.length && inputAttachmentIds.every(id => typeof id === 'string' && /^[a-f0-9-]{36}$/.test(id)), 400, 'INVALID_MATERIALS', '输入资料引用无效。');
+    return { key, assigneeUserId, inputAttachmentIds, title: graphText(node.title, '任务标题', 160),
       acceptance: graphText(node.acceptance, '验收标准'), dependsOn: [...node.dependsOn], checklist, outputs,
       dueAt, completionGate: node.completionGate === true,
       ...(node.reviewMode ? { reviewMode: node.reviewMode } : {}),

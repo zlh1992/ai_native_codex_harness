@@ -80,14 +80,14 @@ export class ToolDetailsService {
     const old = this.db.db.prepare('SELECT payload FROM tool_details WHERE run_id=? AND call_id=?').get(runId, callId);
     const item = old ? JSON.parse(old.payload) : { callId, name: name || '工具调用', startedAt: Date.now(), status: 'running', input: '', output: '', summary: '', summaryStatus: 'none' };
     if (item.status !== 'running') return; // native duplicate completion cannot overwrite tool result
-    const memory = String(name || item.name).startsWith('memory_');
+    const memory = /^(memory_|dispatch_)/.test(String(name || item.name));
     if (name) item.name = name;
-    if (input !== undefined) item.input = memory ? '[记忆正文不复制到工具明细，请在我的记忆查看]' : textOf(input);
+    if (input !== undefined) item.input = memory ? (String(item.name).startsWith('dispatch_') ? '[派发资料不复制到工具明细，请查看派发回执与任务资料]' : '[记忆正文不复制到工具明细，请在我的记忆查看]') : textOf(input);
     if (done) {
       const failed = !success || result?.error || result?.success === false || (result?.exitCode != null && result.exitCode !== 0) || result?.timedOut || result?.signal;
       item.status = failed ? 'failed' : 'completed'; item.endedAt = Date.now();
       item.exitCode = result?.exitCode ?? null;
-      item.output = memory ? '[记忆结果不复制到工具明细]' : textOf(result);
+      item.output = memory ? (String(item.name).startsWith('dispatch_') ? '[派发结果请查看持久回执]' : '[记忆结果不复制到工具明细]') : textOf(result);
       const privateProject = this.db.getProject(run.projectId)?.projectType === 'local_private';
       item.summaryStatus = privateProject || memory ? 'disabled' : this.queue.length >= 64 ? 'unavailable' : 'pending';
       if (item.summaryStatus === 'pending') this.queue.push({ runId, chatId, callId, accessId: this.db.getChat(chatId).projectAccessId });

@@ -9,6 +9,7 @@ const plannerTool = tool('work_graph_submit_plan', 'Validate and save a structur
   type: 'object', properties: { graph: { type: 'object', properties: {
     schemaVersion: { type: 'integer', const: 1 }, title: { type: 'string' }, assumptions: { type: 'string' },
     nodes: { type: 'array', minItems: 1, maxItems: 32, items: { type: 'object', properties: {
+      inputAttachmentIds: { type: 'array', items: { type: 'string' }, maxItems: 30 },
       key: { type: 'string' }, title: { type: 'string' }, assigneeUserId: { type: 'string' },
       acceptance: { type: 'string' }, dependsOn: { type: 'array', items: { type: 'string' } },
       checklist: { type: 'array', items: { type: 'string' } }, outputs: { type: 'array', items: { type: 'string' } },
@@ -60,6 +61,8 @@ export class WorkGraphRuntime {
     const prior = this.store.sql.prepare('SELECT id FROM workflow_jobs WHERE dedupe_key=?').get(`generate:${projectId}:${key}`);
     if (prior) return this.store.job(prior.id);
     const inputs = this.context.collect(projectId, ownerId, body);
+    inputs.materials = body.attachmentIds?.length ? this.store.materials.select(body.attachmentIds, ownerId) : [];
+    inputs.materialIds = inputs.materials.map(f => f.id);
     return this.store.enqueue({ projectId, ownerId, type: 'plan.generate', dedupeKey: `generate:${projectId}:${key}`,
       payload: { prompt, inputs, ownerEpoch: this.store.policyEpoch(ownerId), autoStart: body.autoStart === true,
         reviewPolicy: reviewPolicy(body.reviewPolicy) } });
@@ -166,7 +169,8 @@ export class WorkGraphRuntime {
     invariant(this.toolsFor(active.chat).some((t) => t.name === name), 403, 'WORKFLOW_TOOL_FORBIDDEN', '当前运行没有该业务工具权限。');
     if (name === 'work_graph_task_context') {
       const { task } = this.graphs.taskFor(active.chat.taskId, active.user.id);
-      return { task: this.graphs.publicTask(task), handoffs: this.graphs.handoffs(task.id, active.user.id),
+      const usage = this.db.db.prepare('SELECT revision FROM task_input_usage WHERE turn_run_id=?').get(active.turnRunId);
+      return { inputs: this.store.materials?.current(task.id, usage?.revision ?? 0), task: { ...this.graphs.publicTask(task), inputs: this.store.materials?.current(task.id, usage?.revision ?? 0) }, handoffs: this.graphs.handoffs(task.id, active.user.id),
         reviews: this.db.db.prepare(`SELECT detail_json FROM task_reviews r JOIN task_submissions s ON s.id=r.submission_id
           WHERE s.task_id=? AND r.status='applied' ORDER BY r.created_at DESC LIMIT 3`).all(task.id).map((r) => JSON.parse(r.detail_json)) };
     }
@@ -174,6 +178,18 @@ export class WorkGraphRuntime {
     if (name === 'work_graph_context') {
       const result = active.chat.purpose === 'planner' ? job.payload.inputs : await this.context.review(job.submissionId, job.ownerId);
       this.assertContext(active);
+      if (active.chat.purpose === 'planner' && result.materials?.length) {
+        let remaining = 48 * 1024;
+        const attachments = [];
+        for (const file of result.materials) {
+          this.store.materials.owned(this.store.materials.row(file.id), active.user.id);
+          const extracted = await this.store.materials.text({ ...file, bytes: this.store.materials.bytes(this.store.materials.row(file.id)) });
+          this.assertContext(active); this.store.materials.owned(this.store.materials.row(file.id), active.user.id);
+          const content = String(extracted.content || '').slice(0, remaining); remaining -= content.length;
+          attachments.push({ ...file, content, complete: extracted.complete && content.length === (extracted.content || '').length, reason: extracted.reason });
+        }
+        return { ...result, materials: attachments };
+      }
       if (active.chat.purpose === 'reviewer' && threadId === active.threadId) {
         const current = this.store.job(job.id);
         this.store.sql.prepare('UPDATE workflow_jobs SET payload_json=? WHERE id=? AND lease_token=?')
@@ -191,6 +207,7 @@ export class WorkGraphRuntime {
         const { files, ...context } = job.payload.inputs;
         // Model output cannot grant itself automatic approval. Only the owner's plan editor can override a node.
         const graph = { ...args.graph, nodes: args.graph?.nodes?.map(({ reviewMode, ...node }) => node) };
+        invariant((graph.nodes || []).every(n => (n.inputAttachmentIds || []).every(id => context.materialIds?.includes(id))), 403, 'MATERIAL_NOT_SELECTED', '规划只能引用老板本次选定的附件。');
         const plan = this.store.savePlan({ projectId: job.projectId, ownerId: job.ownerId, graph, context });
         result = { planId: plan.id, roadmapId: plan.roadmapId, version: plan.version };
       } else {

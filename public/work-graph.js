@@ -67,8 +67,8 @@ export function graphLayout(nodes) {
 }
 
 export class WorkGraphUI {
-  constructor({ api, toast, openTask, openFile, refreshTasks }) {
-    Object.assign(this, { api, toast, openTaskChat: openTask, openFile, refreshTasks });
+  constructor({ api, toast, openTask, openFile, refreshTasks, onDetail }) {
+    Object.assign(this, { api, toast, openTaskChat: openTask, openFile, refreshTasks, onDetail });
     this.zoom = 1; this.graphs = []; this.mode = 'kanban'; this.events = []; this.jobs = []; this.selection = 0;
     this.generationKeys = new Map();
     this.detailEpoch = 0;
@@ -78,8 +78,9 @@ export class WorkGraphUI {
     for (const entry of this.detail?.uploads || []) if (entry.preview) URL.revokeObjectURL(entry.preview);
     this.detail = null;
   }
-  closeDetail() {
+  closeDetail(notify = true) {
     if (this.detail?.submitting) return;
+    if (notify) this.onDetail?.(null);
     this.clearDetail();
     if (this.drawer?.open) this.drawer.close();
   }
@@ -126,10 +127,10 @@ export class WorkGraphUI {
       <details class="graph-generate-details"><summary>＋ 规划新任务 · 设置参与员工与验收方式</summary><form id="graph-generate-form" class="graph-generate"><label class="graph-goal">这次想完成什么？<textarea name="prompt" rows="2" maxlength="8000" required placeholder="例如：请团队完成新版产品方案，设计和实现并行，最后汇总验收"></textarea></label>
       <div class="graph-options"><label>默认审核方式<select name="reviewMode"><option value="manual">老板人工审核</option><option value="assisted">老板审核 · AI 提供意见</option><option value="auto">AI 自动审核 · 推进 / 打回</option></select></label>
       <label>最终交付<select name="finalMode"><option value="same">跟随审核方式</option><option value="manual">老板最终人工验收</option><option value="assisted">老板最终验收 · AI 提供意见</option><option value="auto">AI 最终自动审核</option></select></label>
-      <button class="secondary" type="submit" data-preview="true">生成预览</button><button class="primary" type="submit">EXECUTE · 生成并启动</button></div>
+      <button class="secondary" type="submit" data-preview="true">生成草稿</button><button class="primary" type="submit">生成并派发</button></div>
       <details class="graph-sources"><summary>参与员工与项目资料</summary><div id="graph-candidates" class="graph-candidates"></div>
       <label>使用的项目文件（每行一个；留空自动选取文本资料）<textarea name="paths" rows="2" placeholder="README.md"></textarea></label>
-      <small>启动将向参与员工分享项目文件，并按所选方式持续验收。规划对话不会复制给员工。</small></details></form></details>
+      <div id="graph-materials"></div><small>发布将向参与员工共享整个项目（节点附件不是文件权限隔离），并按所选方式持续验收。规划对话不会复制给员工。</small></details></form></details>
       <div id="graph-generation-status" role="status"></div><div class="graph-toolbar"><div><p class="eyebrow">WORK GRAPH</p><select id="graph-select" aria-label="选择工作图"></select></div>
       <div class="graph-view-actions"><button class="secondary" data-view-mode="kanban">任务看板</button><button class="secondary" data-view-mode="graph">依赖图</button><button class="secondary" data-view-mode="list">状态列表</button><button class="secondary" data-view-mode="events">事件记录</button><button class="secondary" data-zoom="-1" aria-label="缩小依赖图">−</button><button class="secondary" data-zoom="1" aria-label="放大依赖图">＋</button><button class="secondary" data-refresh-graph>刷新</button></div></div>
       <label class="board-search" id="graph-search-label">搜索<input id="graph-search" type="search" placeholder="任务或负责人" aria-label="搜索团队任务"></label>
@@ -176,6 +177,11 @@ export class WorkGraphUI {
     const data = await this.api(`/api/projects/${id}/work-graphs/candidates`);
     if (id !== this.projectId || selection !== this.selection) return;
     this.candidates = data.employees;
+    if (this.dispatchEnabled) {
+      const { materials } = await this.api(`/api/projects/${id}/materials`);
+      if (id !== this.projectId || selection !== this.selection) return;
+      $('#graph-materials').innerHTML = `<p>选择任务输入资料（在项目对话的“派发资料”中上传）</p>${materials.map(f => `<label><input type="checkbox" name="attachment" value="${escape(f.id)}"> ${escape(f.name)} · ${f.size} B</label>`).join('') || '<small>尚无资料附件</small>'}`;
+    }
     $('#graph-candidates').innerHTML = data.employees.map((u) => `<label><input type="checkbox" name="candidate" value="${escape(u.id)}" ${u.profile.availability === 'unavailable' ? 'disabled' : 'checked'}> ${escape(u.displayName)} <small>${escape(u.profile.jobTitle || '未设置岗位')}</small></label>`).join('') || '请先在驾驶舱创建员工。';
     const pending = localStorage.getItem(`work-graph-job:${id}`); if (pending) this.generationJobId = pending;
     else this.generationJobId = null;
@@ -242,7 +248,7 @@ export class WorkGraphUI {
     all('[data-zoom]', this.panel).forEach((button) => { button.disabled = this.mode !== 'graph'; });
     $('#graph-run-bar').innerHTML = graph ? `<span class="status-tag ${escape(run?.status || 'draft')}">${labels[run?.status || 'draft']}</span>
       <span>最近检查 ${date(run?.lastCheckedAt)} · 下次 ${date(run?.nextCheckAt)}</span>
-      ${canEdit ? '<button class="secondary" data-edit-plan>编辑计划</button><button class="primary" data-start-graph>启动此版本</button>'
+      ${canEdit ? '<button class="secondary" data-edit-plan>编辑计划</button><button class="primary" data-start-graph>发布任务</button>'
         : `<button class="secondary" data-control="${run.status === 'paused' ? 'resume' : 'pause'}">${run.status === 'paused' ? '恢复推进' : '暂停'}</button><button class="secondary danger" data-control="cancel">取消运行</button>`}` : '';
     const board = $('#graph-board');
     $('#graph-search-label').hidden = this.mode !== 'kanban';
@@ -267,7 +273,7 @@ export class WorkGraphUI {
       const layout = graphLayout(nodes); board.className = this.mode === 'list' ? 'graph-list' : 'graph-scroll';
       const card = (node) => `<button class="graph-node status-${escape(node.status)} ${related.has(node.key) ? 'graph-related' : ''}" data-node="${escape(node.key)}" title="${escape(node.title)}">
           <span class="graph-node-heading"><span>${escape(node.assigneeName)}</span><span>V${node.version}</span></span><strong class="graph-node-title">${escape(node.title)}</strong>
-          <span class="graph-node-status">${labels[node.status]}${node.completionGate ? ' · 最终交付' : ''}</span><small>${escape(reason(node.blockedReason)) || `截止 ${date(node.dueAt)}`}</small><small>${escape(reviewLabel(node.reviewMode))}${node.submissions?.length ? ` · 附件 ${node.submissions.find(s => s.taskVersion === node.version)?.outputsManifest.length || 0}` : ''}</small></button>`;
+          ${(node.task?.inputs?.files || node.attachments || []).length ? `<small>输入资料 ${(node.task?.inputs?.files || node.attachments).length} 份</small>` : ''}<span class="graph-node-status">${labels[node.status]}${node.completionGate ? ' · 最终交付' : ''}</span><small>${escape(reason(node.blockedReason)) || `截止 ${date(node.dueAt)}`}</small><small>${escape(reviewLabel(node.reviewMode))}${node.submissions?.length ? ` · 附件 ${node.submissions.find(s => s.taskVersion === node.version)?.outputsManifest.length || 0}` : ''}</small></button>`;
       if (this.mode === 'list') board.innerHTML = nodes.map((n) => card(n)).join('');
       else {
         const lines = nodes.flatMap((node) => node.dependsOn.map((parent) => {
@@ -311,7 +317,7 @@ export class WorkGraphUI {
     const buttons = all('button[type=submit]', form); buttons.forEach((b) => { b.disabled = true; });
     try {
       const { job } = await this.api(`/api/projects/${projectId}/work-graphs/generate`, { method: 'POST', body: {
-        prompt: data.get('prompt'), candidateIds: data.getAll('candidate'), ...(paths.length ? { paths } : {}),
+        attachmentIds: data.getAll('attachment'), prompt: data.get('prompt'), candidateIds: data.getAll('candidate'), ...(paths.length ? { paths } : {}),
         autoStart: !event.submitter?.dataset.preview, reviewPolicy: { mode, finalMode: finalMode === 'same' ? mode : finalMode }, idempotencyKey: key } });
       // An accepted request belongs to its initiating project, even after navigation.
       // A disposed session must never restore its private in-memory state.
@@ -358,7 +364,7 @@ export class WorkGraphUI {
   }
   async inspect(task, native = null) {
     if (this.detail?.submitting) return;
-    this.closeDetail();
+    this.closeDetail(false);
     const epoch = this.detailEpoch;
     const data = await this.api(`/api/projects/${task.projectId}/work-graphs`);
     if (!this.initialized || epoch !== this.detailEpoch) return;
@@ -372,24 +378,27 @@ export class WorkGraphUI {
     const preview = existing ? $('#graph-artifact-preview', this.drawer) : null;
     if (existing) Object.assign(existing, { graph, node });
     else { this.clearDetail(); this.detail = { graph, node, native, uploads: [] }; }
-    const task = node.task; const editable = task && ['active', 'rework'].includes(task.status) && graph.run?.status === 'running';
+    const task = node.task; if (!preserve) this.onDetail?.(task); const editable = task && ['active', 'rework'].includes(task.status) && graph.run?.status === 'running';
     const latest = node.submissions?.find((s) => s.taskVersion === node.version);
     this.drawer.innerHTML = `<div class="graph-drawer-top"><div><p class="eyebrow">${escape(node.assigneeName)} · V${node.version}</p><h2>${escape(node.title)}</h2></div><button class="secondary" data-close-drawer aria-label="关闭">×</button></div>
       <p><span class="status-tag ${escape(node.status)}">${labels[node.status]}</span> ${escape(reason(node.blockedReason))}</p>
       <p>${escape(reviewLabel(node.reviewMode))}</p>
+      ${!graph.owner && editable ? '<p><button class="primary" type="button" data-open-task>进入任务对话</button></p>' : ''}
       ${latest ? `<p role="status">审核：${node.reviewJob ? escape(labels[node.reviewJob.status] || node.reviewJob.status) : node.reviewMode === 'manual' ? '等待老板审核' : '等待 AI 审核'}${node.reviewJob?.errorCode ? ` · ${escape(reason(node.reviewJob.errorCode))}` : ''}</p>` : ''}
       ${task ? `<h3>验收标准</h3><p class="graph-preserve">${escape(task.acceptance)}</p><h3>任务清单</h3>
-        <div id="graph-checklist">${task.checklist.map((i) => `<label><input type="checkbox" data-item="${escape(i.id)}" ${i.done ? 'checked' : ''} ${!editable || graph.owner ? 'disabled' : ''}> ${escape(i.text)}</label>`).join('')}</div>` : '<p>启动计划后下发任务。</p>'}
+        <div id="graph-checklist">${task.checklist.map((i) => `<label><input type="checkbox" data-item="${escape(i.id)}" ${i.done ? 'checked' : ''} ${!editable || graph.owner ? 'disabled' : ''}> ${escape(i.text)}</label>`).join('')}</div>` : '<p>发布计划后下发任务。</p>'}
+      ${!task && node.attachments?.length ? `<h3>选定输入附件</h3><p>${node.attachments.map(f => escape(f.name)).join('、')}</p>` : ''}
+      ${task?.inputs?.files?.length ? `<section class="graph-submission"><h3>输入资料 · 第 ${task.inputs.revision} 版</h3><p>进入任务对话即可使用；ZIP 保留原包，不自动解压。整个项目对参与员工共享。</p>${task.inputs.files.map(f => `<p><button class="text-link" data-preview-input="${escape(f.id)}">${escape(f.name)}</button> · ${f.size} B · <a href="${escape(sessionUrl(`/api/tasks/${task.id}/inputs/${f.id}?revision=${task.inputs.revision}&download=1`))}" download>下载</a><small>${escape(f.path)} · SHA-256 ${escape(f.sha256)}</small></p>`).join('')}</section>` : ''}
       ${(task?.inputManifest || []).map((h) => `<section class="graph-handoff"><h3>上游成果</h3><p class="graph-preserve">${escape(h.summary)}</p>${h.outputs.map((f) => `<button class="text-link" data-open-output="${escape(f.path)}">${escape(f.path)}</button>`).join('')}</section>`).join('')}
       ${(node.reviews || []).map((r) => `<section class="graph-review"><b>${r.source === 'ai' ? 'AI' : '老板'} · ${r.verdict === 'passed' ? '通过' : r.verdict === 'rework' ? '返工' : '需人工判断'} · ${r.status === 'applied' ? '已应用' : r.status === 'superseded' ? '历史意见' : '建议'}</b><p class="graph-preserve">${escape(r.detail.feedback)}</p>${(r.detail.items || []).map((i) => `<small>${escape(i.status)} · ${escape(i.comment)} · 证据：${escape((i.evidence || []).join('、') || '未引用')}</small>`).join('')}${(r.detail.coverage || []).map(f => `<small>${escape(f.path)}：${f.complete ? '文本已读取' : '需人工查看'}${f.reason ? ` · ${escape(coverageLabel(f.reason))}` : ''}</small>`).join('')}</section>`).join('')}
-      ${latest ? `<section class="graph-submission"><h3>本轮提交 · ${latest.kind === 'manual' ? '人工成果' : 'Codex 成果'}</h3><p class="graph-preserve">${escape(latest.resultSummary || latest.finalReplySnapshot)}</p><p class="graph-preserve">${escape(latest.employeeNote || '')}</p><small>固定快照 ${escape(latest.snapshotCommitSha?.slice(0, 12))} · 附件 ${latest.outputsManifest.length} 个</small><div class="graph-attachments">${latest.outputsManifest.map((f) => `<article class="graph-attachment">${isRaster(f.path) ? `<img loading="lazy" src="${escape(artifactUrl(latest.id, f))}&preview=1" alt="${escape(f.path)}">` : '<span class="graph-file-icon">文件</span>'}<div><button class="text-link" data-preview-submission="${escape(latest.id)}" data-path="${escape(f.path)}">${escape(f.path)}</button><small>${f.size} B · 固定提交版本</small><a class="text-link" href="${escape(artifactUrl(latest.id, f))}&download=1" download>下载</a></div></article>`).join('')}</div></section>` : ''}
+      ${latest ? `<section class="graph-submission"><h3>本轮提交 · ${latest.kind === 'manual' ? '人工成果' : 'Codex 成果'}</h3><p class="graph-preserve">${escape(latest.resultSummary || latest.finalReplySnapshot)}</p><p class="graph-preserve">${escape(latest.employeeNote || '')}</p><small>采用资料第 ${latest.inputs?.revision || 0} 版 · 固定快照 ${escape(latest.snapshotCommitSha?.slice(0, 12))} · 附件 ${latest.outputsManifest.length} 个</small><div class="graph-attachments">${latest.outputsManifest.map((f) => `<article class="graph-attachment">${isRaster(f.path) ? `<img loading="lazy" src="${escape(artifactUrl(latest.id, f))}&preview=1" alt="${escape(f.path)}">` : '<span class="graph-file-icon">文件</span>'}<div><button class="text-link" data-preview-submission="${escape(latest.id)}" data-path="${escape(f.path)}">${escape(f.path)}</button><small>${f.size} B · 固定提交版本</small><a class="text-link" href="${escape(artifactUrl(latest.id, f))}&download=1" download>下载</a></div></article>`).join('')}</div></section>` : ''}
       ${(node.submissions || []).filter(s => s.taskVersion !== node.version).map(s => `<details class="graph-submission"><summary>历史交付 · V${s.taskVersion} · ${s.outputsManifest.length} 个附件</summary><p class="graph-preserve">${escape(s.resultSummary || s.finalReplySnapshot)}</p>${s.outputsManifest.map(f => `<p><button class="text-link" data-preview-submission="${escape(s.id)}" data-path="${escape(f.path)}">${escape(f.path)}</button> · <a href="${escape(artifactUrl(s.id, f))}&download=1" download>下载</a></p>`).join('')}</details>`).join('')}
       ${!graph.owner && editable ? `<form id="graph-submit-form"><label>${native ? '已选择 Codex 最终回复，补充交付说明' : '成果说明'}<textarea name="summary" rows="5" maxlength="8000" ${native ? '' : 'required'}></textarea></label>
       <p>必交文件：${escape((node.requiredOutputs || []).join('、') || '无指定文件')}</p>
       <div id="graph-upload-zone" class="graph-upload-zone"><label>上传交付文件（可多选或拖入）<input id="graph-upload-input" type="file" multiple></label><small>提交时上传；图片显示缩略，其他文件显示卡片。含必交文件最多 30 个、合计 32 MiB。失败时已上传文件保留在项目中，移除已上传项会将该文件移入回收站。</small></div><div id="graph-upload-list" class="graph-attachments"></div>
       <label>工作区文件路径（每行一个）<textarea name="outputs" rows="3" placeholder="当前员工项目内的绝对路径，或 reports/result.pdf"></textarea></label><small>路径指 Portal 服务器上的当前项目工作区；你电脑上的文件请使用上传。</small><button class="secondary" type="button" data-check-files>校验文件清单</button><div id="graph-files-result" role="status"></div>
       <label>已知限制 / 备注<textarea name="note" rows="2" maxlength="4000"></textarea></label>
-      <p class="form-error" role="alert"></p><div class="dialog-actions"><button class="secondary" type="button" data-open-task>进入任务对话</button><button class="secondary" type="button" data-save-checklist>保存清单</button><button class="primary" type="submit">提交验收</button></div></form>` : ''}
+      <p class="form-error" role="alert"></p><div class="dialog-actions"><button class="secondary" type="button" data-save-checklist>保存清单</button><button class="primary" type="submit">提交验收</button></div></form>` : ''}
       ${graph.owner && latest?.verdict === 'pending' && graph.run?.status === 'running' ? `<label>审核意见 / 修改要求<textarea id="graph-review-feedback" rows="4" maxlength="8000"></textarea></label><div class="dialog-actions"><button class="secondary" data-verdict="rework">打回重做</button><button class="primary" data-verdict="passed">通过并交付</button></div>` : ''}`;
     if (preview) this.drawer.append(preview);
     if (!this.drawer.open) this.drawer.showModal();
@@ -491,7 +500,7 @@ export class WorkGraphUI {
       detail.submissionKey ||= crypto.randomUUID();
       detail.submissionBody ||= {
         kind: detail.native ? 'codex' : 'manual', ...(detail.native || {}), taskVersion: task.version,
-        checklistRevision: task.checklistRevision, idempotencyKey: detail.submissionKey, resultSummary: data.get('summary'),
+        inputRevision: detail.node.task.inputs?.revision || 0, checklistRevision: task.checklistRevision, idempotencyKey: detail.submissionKey, resultSummary: data.get('summary'),
         outputs: [...String(data.get('outputs') || '').split('\n').map((s) => s.trim()).filter(Boolean), ...detail.uploads.map(e => e.path)], note: data.get('note') };
       await this.api(`/api/tasks/${task.id}/submissions`, { method: 'POST', body: detail.submissionBody });
       ensureCurrent();
@@ -527,8 +536,18 @@ export class WorkGraphUI {
       const detail = this.detail; await this.saveChecklist();
       if (this.detail === detail && this.drawer.open) this.toast('清单已保存');
     }
-    else if (button.hasAttribute('data-open-task')) { const id = this.detail.node.task.id; this.closeDetail(); await this.openTaskChat(id); }
+    else if (button.hasAttribute('data-open-task')) { const id = this.detail.node.task.id; this.closeDetail(false); await this.openTaskChat(id); }
     else if (button.dataset.openOutput) { const id = this.detail.graph.projectId; this.closeDetail(); await this.openFile(id, button.dataset.openOutput); }
+    else if (button.dataset.previewInput) {
+      const detail = this.detail; const request = Symbol(); detail.previewRequest = request;
+      const endpoint = `/api/tasks/${detail.node.task.id}/inputs/${encodeURIComponent(button.dataset.previewInput)}?revision=${detail.node.task.inputs.revision}`;
+      const { file } = await this.api(endpoint);
+      if (this.detail !== detail || !this.drawer.open || detail.previewRequest !== request) return;
+      let preview = $('#graph-artifact-preview', this.drawer);
+      if (!preview) { preview = document.createElement('section'); preview.id = 'graph-artifact-preview'; this.drawer.append(preview); }
+      preview.innerHTML = `<h3>${escape(file.name || file.path)}</h3><pre class="graph-preserve">${escape(file.content || '未提取正文，请下载查看。压缩包内容尚未分析。')}</pre>`;
+      preview.scrollIntoView({ block: 'nearest' });
+    }
     else if (button.dataset.previewSubmission) {
       const detail = this.detail; const request = Symbol(); detail.previewRequest = request;
       const endpoint = sessionUrl(`/api/task-submissions/${encodeURIComponent(button.dataset.previewSubmission)}/artifact?path=${encodeURIComponent(button.dataset.path)}`);

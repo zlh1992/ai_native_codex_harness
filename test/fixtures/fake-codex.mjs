@@ -81,6 +81,21 @@ async function memoryTurn(threadId, turnId, prompt) {
   }
 }
 
+async function dispatchTurn(threadId, turnId, prompt) {
+  try {
+    const input = JSON.parse(prompt.split('[[dispatch-upgrade]]')[1]);
+    if (!threadTools.get(threadId)?.includes('dispatch_history')) throw new Error('missing new tools');
+    const history = toolData(await callTool(threadId, turnId, 'dispatch_history', {}));
+    if (!history.messages.some(m => m.content.includes('上一轮资料'))) throw new Error('prior history missing');
+    const file = toolData(await callTool(threadId, turnId, 'dispatch_project', {
+      action: 'capture', projectId: input.projectId, path: 'brief.txt', idempotencyKey: input.captureKey }));
+    const result = toolData(await callTool(threadId, turnId, 'dispatch_prepare', {
+      title: '带资料任务', acceptance: '完成客户方案', assigneeUserId: input.employeeId, attachmentIds: [file.id], idempotencyKey: input.dispatchKey }));
+    if (result.status !== 'accepted') throw new Error('receipt must be accepted before run finishes');
+    completeTurn(threadId, turnId, '请求已受理，等待后台准备并发布。');
+  } catch { notify('turn/completed', { threadId, turn: { id: turnId, status: 'failed', error: { message: 'Dispatch fixture failed' }, items: [] } }); }
+}
+
 async function browserTurn(threadId, turnId, prompt) {
   try {
     const args = JSON.parse(prompt.split('[[browser]]')[1]);
@@ -137,7 +152,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   }, origins: {}, layers: null });
   if (method === 'skills/extraRoots/set' || method === 'thread/name/set' || method === 'thread/goal/set') return respond(id, {});
   if (method === 'skills/list') return respond(id, { data: (params.cwds || []).map((cwd) => ({
-    cwd, skills: ['task-execution', 'work-graph-planning', 'work-graph-review'].map((name) => ({ name,
+    cwd, skills: ['task-execution', 'work-graph-planning', 'work-graph-review', 'task-dispatch'].map((name) => ({ name,
       path: path.resolve(process.cwd(), `portal-skills/${name}/SKILL.md`), enabled: true })),
   })) });
   if (method === 'thread/start') {
@@ -179,6 +194,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     notify('thread/tokenUsage/updated', { threadId: params.threadId, turnId, tokenUsage: { total: usage(count), last: usage(1) } });
     if (threadTools.get(params.threadId)?.includes('work_graph_context')) { void workflowTurn(params.threadId, turnId, prompt); return; }
     if (prompt.includes('[[memory-tools]]')) { void memoryTurn(params.threadId, turnId, prompt); return; }
+    if (prompt.includes('[[dispatch-upgrade]]')) { void dispatchTurn(params.threadId, turnId, prompt); return; }
     if (prompt.includes('[[browser]]')) { void browserTurn(params.threadId, turnId, prompt); return; }
     if (prompt.includes('[[workspace-exec]]')) { void workspaceTurn(params.threadId, turnId, prompt); return; }
     if (prompt.includes('[[hold]]')) heldTurns.set(turnId, { threadId: params.threadId, prompt, steers: [] });
