@@ -545,7 +545,9 @@ export class WorkGraphUI {
       if (this.detail !== detail || !this.drawer.open || detail.previewRequest !== request) return;
       let preview = $('#graph-artifact-preview', this.drawer);
       if (!preview) { preview = document.createElement('section'); preview.id = 'graph-artifact-preview'; this.drawer.append(preview); }
-      preview.innerHTML = `<h3>${escape(file.name || file.path)}</h3><pre class="graph-preserve">${escape(file.content || '未提取正文，请下载查看。压缩包内容尚未分析。')}</pre>`;
+      preview.innerHTML = `<h3>${escape(file.name || file.path)}</h3>${file.mimeType?.startsWith('image/')
+        ? `<img src="${escape(sessionUrl(endpoint + '&preview=1'))}" alt="任务输入图片" style="max-width:100%;height:auto">`
+        : `<pre class="graph-preserve">${escape(file.content || '未提取正文，请下载查看。压缩包内容尚未分析。')}</pre>`}`;
       preview.scrollIntoView({ block: 'nearest' });
     }
     else if (button.dataset.previewSubmission) {

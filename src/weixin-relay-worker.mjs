@@ -1,8 +1,8 @@
 // One private IPC child per Portal identity; no HTTP listener or Codex runtime.
-import { createDecipheriv, createHash } from 'node:crypto';
 import { fetch, ProxyAgent, Agent } from 'undici';
 import { getBotQr, getQrStatus, getUpdates, sendMessage } from '../.tools/weixin-transport.mjs';
 import { resolveOutboundProxy } from './outbound-proxy.mjs';
+import { decodeWeixinAttachment } from './weixin-media.mjs';
 
 export function weixinUrl(value, media = false) {
   const url = new URL(value);
@@ -37,17 +37,11 @@ async function execute(op, p) {
     item_list: [{ type: 1, text_item: { text: p.text } }] } });
   if (op === 'download') {
     const item = p.file;
-    if (Number(item.len) > 50 * 1024 * 1024 || !item.media?.aes_key) throw new Error('WEIXIN_FILE_INVALID');
+    if (Number(item.len) > 50 * 1024 * 1024 || (!item.media?.aes_key && item.kind !== 'image')) throw new Error('WEIXIN_FILE_INVALID');
     const url = item.media.full_url || `https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=${encodeURIComponent(item.media.encrypt_query_param || '')}`;
     const response = await boundedFetch(url, {}, { proxyMode: p.proxyMode, media: true, limit: 50 * 1024 * 1024 + 32 });
     if (!response.ok) throw new Error('WEIXIN_DOWNLOAD_FAILED');
-    let key = Buffer.from(item.media.aes_key, 'base64');
-    if (key.length === 32 && /^[a-f0-9]{32}$/i.test(key.toString())) key = Buffer.from(key.toString(), 'hex');
-    if (key.length !== 16) throw new Error('WEIXIN_FILE_INVALID');
-    const decipher = createDecipheriv('aes-128-ecb', key, null);
-    const bytes = Buffer.concat([decipher.update(await response.arrayBuffer()), decipher.final()]);
-    if (bytes.length > 50 * 1024 * 1024 || (item.len && Number(item.len) !== bytes.length)
-      || (item.md5 && createHash('md5').update(bytes).digest('hex') !== item.md5.toLowerCase())) throw new Error('WEIXIN_FILE_INVALID');
+    const bytes = decodeWeixinAttachment(item, await response.arrayBuffer());
     return { bytes: bytes.toString('base64') };
   }
   throw new Error('WEIXIN_OPERATION_INVALID');

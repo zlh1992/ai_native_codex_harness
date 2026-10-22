@@ -15,6 +15,8 @@ import { TaskMaterials } from '../src/task-materials.mjs';
 import { TaskDispatchService } from '../src/task-dispatch-service.mjs';
 import { DispatchRuntime } from '../src/dispatch-runtime.mjs';
 import { WeixinService } from '../src/weixin-service.mjs';
+import { toolImageContent } from '../src/raster-image.mjs';
+const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jq1sAAAAASUVORK5CYII=', 'base64');
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-dispatch-'));
@@ -58,7 +60,7 @@ function weixinFixture(t) {
     if (op === 'qr') return { qrcode: 'synthetic', qrcode_img_content: 'synthetic-test-code' };
     if (op === 'qrStatus') return { status: 'confirmed', ilink_bot_id: 'test-account', bot_token: 'synthetic-token', ilink_user_id: 'test-sender', baseurl: 'https://ilinkai.weixin.qq.com' };
     if (op === 'poll') return { ret: 0, msgs: messages, get_updates_buf: 'cursor' };
-    if (op === 'download') return { bytes: Buffer.from(input.file.fixture).toString('base64') };
+    if (op === 'download') return { bytes: (input.file.kind === 'image' ? png : Buffer.from(input.file.fixture)).toString('base64') };
     if (op === 'send') { if (failSend) throw new Error('uncertain fixture'); return { ret: 0 }; }
   }, stop() {} };
   f.codex.interrupt = async () => {};
@@ -101,6 +103,28 @@ test('Weixin revoke during download prevents persistence and late replies; banne
   assert.equal(f.materials.list(f.boss.id, f.project.id).length, 0);
   assert.equal(f.db.db.prepare('SELECT COUNT(*) n FROM weixin_outbox').get().n, 0);
   assert.equal(f.calls.filter(c => c.op === 'send').length, 0);
+});
+
+test('ordinary Weixin images become immutable materials, stay private and resolve employees by username', async t => {
+  const f = weixinFixture(t), row = await f.bind();
+  f.db.updateUser(f.employee.id, { displayName: 'Different display name' });
+  f.setMessages([f.message('photo', [{ type: 2, image_item: { media: { full_url: 'https://novac2c.cdn.weixin.qq.com/fixture' } } }])]);
+  await f.wx.poll(row); await f.wx.process(row); await f.wx.poll(row); await f.wx.process(row);
+  const chat = f.db.getChat(f.wx.connection(row.id).chat_id);
+  const active = { chat, user: f.db.getUserById(f.boss.id), project: f.project, threadId: 'root' }, runtime = new DispatchRuntime(f);
+  const context = await runtime.call(active, 'dispatch_context', {}, 'root');
+  assert.equal(context.employees.find(e => e.username === 'alice').name, 'Different display name');
+  assert.equal(context.materials.length, 1); assert.equal(context.materials[0].name, '微信图片-1.png');
+  assert.equal(f.store.runs().length, 0);
+  const output = await runtime.call(active, 'dispatch_read_material', { attachmentId: context.materials[0].id }, 'root');
+  assert.equal(toolImageContent(output).imageUrl, `data:image/png;base64,${png.toString('base64')}`);
+  assert.ok(!JSON.stringify(output).includes(png.toString('base64')));
+  await assert.rejects(runtime.call({ ...active, user: f.other }, 'dispatch_read_material', { attachmentId: output.id }, 'root'), { code: 'DISPATCH_ROOT_REQUIRED' });
+  const request = { ...f.request([output.id]), chatId: chat.id };
+  const receipt = f.service.request(f.boss.id, request); f.execute();
+  const task = f.service.receipt(receipt.id, f.boss.id).tasks[0];
+  assert.deepEqual(f.materials.readTask(task.id, f.employee.id, output.id).bytes, png);
+  assert.throws(() => f.materials.readTask(task.id, f.other.id, output.id), { code: 'PROJECT_ACCESS_REVOKED' });
 });
 
 test('uncertain Weixin send remains distinct from unread and is not automatically resent', async t => {
@@ -220,14 +244,36 @@ test('Weixin restart keeps completed data and never replays in-flight execution 
 });
 
 
-test('Weixin HTTP response without an explicit send acknowledgement stays uncertain', async t => {
+test('Weixin default-zero transport responses confirm server acceptance without marking notifications read', async t => {
   const f = weixinFixture(t), row = await f.bind();
   f.setMessages([f.message('no-ack', [{ type: 4, file_item: { file_name: 'note.txt', len: '4', fixture: 'note' } }])]);
   await f.wx.poll(row); await f.wx.process(row);
   const relay = f.wx.relay(row), original = relay.request;
   relay.request = (op, input) => op === 'send' ? Promise.resolve({}) : original(op, input);
   await f.wx.deliver(row);
-  assert.equal(f.db.db.prepare('SELECT status FROM weixin_outbox').get().status, 'uncertain');
+  assert.equal(f.db.db.prepare('SELECT status FROM weixin_outbox').get().status, 'sent');
+  assert.equal(f.db.db.prepare('SELECT COUNT(*) n FROM task_notifications WHERE read_at IS NOT NULL').get().n, 0);
+  await f.wx.deliver(row);
+  assert.equal(f.db.db.prepare('SELECT COUNT(*) n FROM weixin_outbox').get().n, 1);
+});
+
+test('Weixin explicit rejection and malformed responses remain failed or uncertain without resending', async t => {
+  const f = weixinFixture(t), row = await f.bind();
+  f.setMessages([f.message('response-cases', [])]); await f.wx.poll(row); await f.wx.process(row);
+  const relay = f.wx.relay(row), original = relay.request;
+  for (const [response, status, code] of [
+    [{ ret: 1 }, 'failed', 'WEIXIN_REJECTED'], [{ errcode: -14 }, 'failed', 'WEIXIN_REJECTED'],
+    [{ ret: 'invalid' }, 'uncertain', 'DELIVERY_UNCONFIRMED'], [null, 'uncertain', 'DELIVERY_UNCONFIRMED'],
+    [{ ret: '0', errcode: 0 }, 'sent', null],
+  ]) {
+    f.db.db.prepare("UPDATE weixin_outbox SET status='queued'").run();
+    let sends = 0;
+    relay.request = (op, input) => op === 'send' ? (sends++, Promise.resolve(response)) : original(op, input);
+    await f.wx.deliver(row); await f.wx.deliver(row);
+    assert.equal(sends, 1);
+    const item = f.db.db.prepare('SELECT status,error_code FROM weixin_outbox').get();
+    assert.equal(item.status, status); assert.equal(item.error_code, code);
+  }
 });
 
 

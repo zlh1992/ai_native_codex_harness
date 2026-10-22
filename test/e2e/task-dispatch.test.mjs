@@ -90,4 +90,18 @@ test('dispatch HTTP and Chrome: old conversation upgrade, ACL, immutable inputs,
   await json(boss, `/api/tasks/${taskId}/inputs`, { method: 'POST', status: 201, body: { taskVersion: task.version, expectedRevision: 1, attachmentIds: [second.id], idempotencyKey: randomUUID() } });
   assert.equal((await json(staff, `/api/tasks/${taskId}/inputs`)).inputs.revision, 2);
   assert.deepEqual(Buffer.from(await (await request(staff, `/api/tasks/${taskId}/inputs/${inputs.files[0].id}?revision=1&download=1`)).arrayBuffer()), bytes);
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jq1sAAAAASUVORK5CYII=', 'base64');
+  const { material: photo } = await json(boss, `/api/projects/${project.id}/materials?chat=${chat.id}&name=photo.png`,
+    { method: 'POST', status: 201, headers: { 'idempotency-key': randomUUID() }, body: png });
+  await json(boss, `/api/tasks/${taskId}/inputs`, { method: 'POST', status: 201,
+    body: { taskVersion: task.version, expectedRevision: 2, attachmentIds: [photo.id], idempotencyKey: randomUUID() } });
+  const previewPath = `/api/tasks/${taskId}/inputs/${photo.id}?revision=3&preview=1`;
+  const preview = await request(staff, previewPath);
+  assert.equal(preview.headers.get('content-type'), 'image/png');
+  assert.deepEqual(Buffer.from(await preview.arrayBuffer()), png);
+  await request(stranger, previewPath, { status: 403 });
+  await page.reload(); await page.locator('#work-graph-drawer[open]').waitFor();
+  await page.locator(`[data-preview-input="${photo.id}"]`).click();
+  await until(() => page.locator('img[alt="任务输入图片"]').evaluateAll(images => images.some(img => img.complete && img.naturalWidth > 0)));
+  assert.deepEqual(errors, []);
 });

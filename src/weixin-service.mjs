@@ -6,6 +6,7 @@ import { WeixinRelay } from './weixin-relay.mjs';
 import { invariant } from './errors.mjs';
 import { MATERIAL_LIMIT, materialName } from './task-materials.mjs';
 import { parseWechatCommand, formatWechatModelCatalog, resolveWechatModel } from './wechat-channel-commands.mjs';
+import { weixinAttachment, weixinAttachmentName } from './weixin-media.mjs';
 
 const now = () => new Date().toISOString();
 const key = value => createHash('sha256').update(value).digest('hex');
@@ -178,16 +179,16 @@ export class WeixinService {
       this.sql.prepare("UPDATE weixin_inbox SET status='processing',chat_id=? WHERE id=?").run(chat.id, message.id); marked = true;
       const payload = JSON.parse(message.payload_json), items = payload.item_list || [];
       const text = items.filter(i => i.type === 1).map(i => i.text_item?.text || '').join('\n').trim();
-      const fileItems = items.filter(i => i.type === 4).map(i => i.file_item);
+      const fileItems = items.filter(i => [2, 4].includes(i.type)).map(weixinAttachment);
       invariant(fileItems.length <= 30 && fileItems.reduce((n, f) => n + Number(f?.len || 0), 0) <= MATERIAL_LIMIT,
         413, 'MATERIAL_LIMIT', '每批最多 30 份资料、50 MiB。');
       const files = []; let size = 0;
       for (let index = 0; index < fileItems.length; index++) {
-        const file = fileItems[index]; materialName(file?.file_name); this.check(row);
+        const file = fileItems[index]; if (file.kind === 'file') materialName(file.file_name); this.check(row);
         const result = await this.relay(row).request('download', { file }); this.check(row);
         const bytes = Buffer.from(result.bytes, 'base64'); size += bytes.length;
         invariant(size <= MATERIAL_LIMIT, 413, 'MATERIAL_LIMIT', '资料超过 50 MiB。');
-        files.push(this.materials.storeFile({ userId: user.id, projectId: project.id, chatId: chat.id, bytes, name: file.file_name,
+        files.push(this.materials.storeFile({ userId: user.id, projectId: project.id, chatId: chat.id, bytes, name: weixinAttachmentName(file, bytes, index),
           idempotencyKey: key(`${row.id}:${message.external_id}:${index}`) }));
       }
       if (files.length && user.role !== 'admin') this.materials.importFiles(project, files);
@@ -209,9 +210,9 @@ export class WeixinService {
         if (command.type === 'models') response = formatWechatModelCatalog({ config: this.config, chat, user });
         if (command.type === 'model') { this.db.updateChat(chat.id, { preferredModel: resolveWechatModel(command.value) }); response = '当前微信对话模型已更新。'; }
         if (command.type === 'new') { invariant(!chat.taskId, 409, 'TASK_CHAT_REQUIRED', '任务对话请从任务入口进入；切换普通项目可开始普通对话。'); this.sql.prepare('UPDATE weixin_connections SET chat_id=NULL WHERE id=?').run(row.id); response = '已开启新的普通对话，历史已保留。'; }
-      } else if (items.some(i => ![1, 4].includes(i.type))) response = '此消息包含暂不支持的图片或语音，请作为原始文件发送，或在前端上传。文字任务尚未执行。';
+      } else if (items.some(i => ![1, 2, 4].includes(i.type))) response = '此消息包含暂不支持的语音或视频，请转为文字或原始文件发送。文字任务尚未执行。';
       else if (!text) response = files.length ? `已收到 ${files.length} 份资料：${files.map(f => f.name).join('、')}。尚未派发，请明确说明交给谁、做什么。`
-        : '目前支持文字和原始文件附件。请作为文件发送，或在前端上传。';
+        : '目前支持文字、图片和原始文件附件。';
       else {
         this.check(row);
         if (chat.taskId) this.graphs.taskFor(chat.taskId, user.id);
@@ -268,9 +269,13 @@ export class WeixinService {
         this.check(row);
         const result = await this.relay(row).request('send', { ...credentials, senderId: row.sender_id, clientId: item.id,
           text: text.length > 3500 ? `${text.slice(0, 3400)}\n完整结果请在前端查看。` : text });
+        // The pinned transport omits default-zero result codes on successful sends.
+        const valid = result && typeof result === 'object' && !Array.isArray(result);
+        const ret = Number(result?.ret ?? 0), errcode = Number(result?.errcode ?? 0);
+        const known = valid && Number.isFinite(ret) && Number.isFinite(errcode);
+        const status = !known ? 'uncertain' : ret || errcode ? 'failed' : 'sent';
         this.sql.prepare('UPDATE weixin_outbox SET status=?,error_code=?,updated_at=? WHERE id=?')
-          .run(result.ret === 0 && !result.errcode ? 'sent' : result.ret || result.errcode ? 'failed' : 'uncertain',
-            result.ret === 0 && !result.errcode ? null : result.ret || result.errcode ? 'WEIXIN_REJECTED' : 'DELIVERY_UNCONFIRMED', now(), item.id);
+          .run(status, status === 'sent' ? null : status === 'failed' ? 'WEIXIN_REJECTED' : 'DELIVERY_UNCONFIRMED', now(), item.id);
       } catch { this.sql.prepare("UPDATE weixin_outbox SET status='uncertain',error_code='DELIVERY_UNCERTAIN',updated_at=? WHERE id=?").run(now(), item.id); }
     } finally { this.sending.delete(row.id); }
   }

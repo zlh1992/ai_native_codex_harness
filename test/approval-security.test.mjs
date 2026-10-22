@@ -57,6 +57,27 @@ async function waitFor(predicate) {
   throw new Error('timed out waiting for approval processing');
 }
 
+test('project image reads return native pixels while events stay metadata-only and escapes are rejected', async t => {
+  const { db, workspace, codex, active } = fixture();
+  t.after(() => db.close());
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jq1sAAAAASUVORK5CYII=', 'base64');
+  workspace.writeFile(active.project, 'input.png', png);
+  const responses = new Map(), events = [];
+  active.emit = (event, data) => events.push({ event, data });
+  codex.client.respond = (id, response) => responses.set(id, response);
+  const read = async (id, file) => {
+    codex.client.emit('serverRequest', { method: 'item/tool/call', id,
+      params: { threadId: active.threadId, turnId: active.turnId, callId: `image-${id}`, tool: 'workspace_read_file', arguments: { path: file } } });
+    return waitFor(() => responses.get(id));
+  };
+  const result = await read(100, 'input.png');
+  assert.equal(result.success, true);
+  assert.equal(result.contentItems.find(c => c.type === 'inputImage').imageUrl, `data:image/png;base64,${png.toString('base64')}`);
+  assert.equal(JSON.stringify(events).includes(png.toString('base64')), false);
+  assert.equal((await read(101, '../outside.png')).success, false);
+  assert.equal((await read(102, '.codex/credentials.png')).success, false);
+});
+
 test('native file changes fail closed for missing or reserved targets and auto-accept safe targets', async () => {
   const { db, workspace, codex, active } = fixture();
   const responses = new Map();

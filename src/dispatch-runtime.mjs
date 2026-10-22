@@ -1,4 +1,5 @@
 import { invariant } from './errors.mjs';
+import { imageToolResult, rasterType } from './raster-image.mjs';
 const tool = (name, description, properties = {}, required = []) => ({ type: 'function', name, description,
   inputSchema: { type: 'object', properties, required, additionalProperties: false } });
 const str = { type: 'string' }; const ids = { type: 'array', items: str, maxItems: 30 };
@@ -35,7 +36,7 @@ export class DispatchRuntime {
       403, 'WORKFLOW_AUTHORIZATION_CHANGED', '账号或项目策略已变化。');
     }; check();
     if (name === 'dispatch_context') return {
-      employees: this.db.listUsers().filter(u => u.role === 'user' && u.status === 'active').map(u => ({ id: u.id, name: u.displayName, profile: this.store.profile(u.id) })),
+      employees: this.db.listUsers().filter(u => u.role === 'user' && u.status === 'active').map(u => ({ id: u.id, username: u.username, name: u.displayName, profile: this.store.profile(u.id) })),
       projects: this.db.listProjectsForUser(active.user.id).filter(p => p.accessKind === 'owner' && p.projectType === 'standard')
         .map(p => ({ id: p.id, name: p.name })),
       materials: this.materials.list(active.user.id, active.project.id, active.chat.id), receipts: this.service.list(active.user.id, active.chat.id) };
@@ -50,7 +51,9 @@ export class DispatchRuntime {
     }
     if (name === 'dispatch_read_material') {
       const row = this.materials.owned(this.materials.row(args.attachmentId), active.user.id);
-      const result = await this.materials.text({ ...this.materials.public(row), bytes: this.materials.bytes(row) });
+      const bytes = this.materials.bytes(row);
+      const result = rasterType(bytes) ? imageToolResult(bytes, this.materials.public(row))
+        : await this.materials.text({ ...this.materials.public(row), bytes });
       check(); this.materials.owned(row, active.user.id); return result;
     }
     if (name === 'dispatch_prepare') return this.service.request(active.user.id, { ...args, projectId: active.project.id, chatId: active.chat.id });

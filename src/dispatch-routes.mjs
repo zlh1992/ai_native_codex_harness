@@ -1,6 +1,7 @@
 import { invariant } from './errors.mjs';
 import { readBody, readJson, sendJson } from './http-utils.mjs';
 import { MATERIAL_LIMIT } from './task-materials.mjs';
+import { rasterType } from './raster-image.mjs';
 
 export function createDispatchRoutes({ config, db, service, materials, requireMutation, refreshSession }) {
   return async (req, res, url, session) => {
@@ -56,14 +57,20 @@ export function createDispatchRoutes({ config, db, service, materials, requireMu
       else if (req.method === 'GET') {
         const revision = url.searchParams.has('revision') ? Number(url.searchParams.get('revision')) : null;
         const file = materials.readTask(match[1], session.user.id, match[2], revision);
-        if (url.searchParams.get('download') === '1') {
+        if (url.searchParams.get('preview') === '1') {
+          const mimeType = rasterType(file.bytes);
+          invariant(mimeType, 415, 'PREVIEW_UNSUPPORTED', '此文件请下载查看；仅支持位图预览。');
+          res.writeHead(200, { 'content-type': mimeType, 'content-length': file.bytes.length,
+            'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; sandbox" });
+          res.end(file.bytes);
+        } else if (url.searchParams.get('download') === '1') {
           res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': file.bytes.length,
             'content-disposition': "attachment; filename*=UTF-8''" + encodeURIComponent(file.name),
             'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; sandbox" });
           res.end(file.bytes);
         } else {
           const text = await materials.text(file); session = refreshSession(session); materials.taskAccess(match[1], session.user.id);
-          reply(200, { file: text });
+          reply(200, { file: { ...text, mimeType: rasterType(file.bytes) } });
         }
       } else return false;
       return true;
