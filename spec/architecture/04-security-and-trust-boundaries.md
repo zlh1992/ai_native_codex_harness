@@ -83,6 +83,8 @@ HTML 专用 CSP 允许自包含产物的内联脚本和样式，以及 `data:`/`
 
 ## Codex 工具面
 
+Codex 的服务级模型连接在每次子进程启动前解析 `OUTBOUND_PROXY`，主进程与隔离搜索客户端使用同一 system/direct/显式地址规则；不继承宿主 HTTP/HTTPS/ALL_PROXY/NO_PROXY 覆盖，读取或配置失败不直连兜底。该连接使用既有上游认证，不授予员工命令或浏览器联网能力；工具仍逐次校验账号权限并保留 Seatbelt。代理环境不进入项目工具或日志，隐私项目不因此获得云端回退。
+
 App Server 启动时关闭内置 Shell、unified exec、浏览器、插件、外部 MCP、computer use、image generation、workspace dependencies、skill search 和 web search 等不受 Portal ACL 控制的能力。
 
 允许的写入面分两类：

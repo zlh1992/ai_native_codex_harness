@@ -41,6 +41,8 @@ Portal 启动时冻结 public HTML/JS/CSS 与固定 Sortable 模块的内存快�
 
 Codex initialize/ready 不证明上游模型认证可用。使用本机 ChatGPT 登录时，模型请求地址应与该认证方式匹配；恢复默认官方地址后必须执行真实模型请求验证。模型 401 不属于微信扫码故障，不应通过重置微信绑定处理。
 
+Codex 主进程和独立搜索客户端在每次启动前解析 `OUTBOUND_PROXY`（默认 system），通过有限代理环境连接官方上游；后台服务不能假设 launchd 继承终端代理，也不能假设原生 HTTP 客户端读取 macOS 系统代理。direct 会清除宿主遗留代理覆盖；系统配置错误在启动前失败，连接失败不自动直连或切换模型。节点切换且代理入口不变时后续连接跟随 VPN；长驻 Codex 进程不能热更新代理环境，系统代理端口变化后须等待运行排空再重启 Portal，保留原 thread/history。每条命令和 Chrome 的动态代理机制不变。
+
 `/api/me` 和 health 的 memory 状态用于诊断索引进程启动/降级，不等于每用户向量就绪；`nativeCodexMemory` 必须始终为 `false`。`PORTAL_MEMORY_ENABLED=false` 只停用 Portal 记忆 CRUD，不能解除 Codex 原生记忆关闭不变量。四个 memory 动态工具在 thread start/resume 注册，升级应排空运行后重启 Portal；已取消关键词提取及其配置，不重放历史提取任务。
 
 ## Codex 协议升级流程
@@ -65,7 +67,7 @@ Codex initialize/ready 不证明上游模型认证可用。使用本机 ChatGPT 
 
 ## 发布检查表
 
-网络与项目工具配置见 [执行指南](../../docs/EXECUTION_BROWSER.md)。DEFAULT_NETWORK_ACCESS 只影响新账号；发布改为 true 时不得批量回写旧账号网络位。GET /api/admin/dashboard 的 defaults.networkAccess 与后端创建默认值相同；显式 false 始终保留。VPN 节点或系统 HTTP/HTTPS 代理端口变化不要求重启 Portal；OUTBOUND_PROXY/COMMAND_GIT_BIN 等静态配置修改仍需安全重启。
+网络与项目工具配置见 [执行指南](../../docs/EXECUTION_BROWSER.md)。DEFAULT_NETWORK_ACCESS 只影响新账号；发布改为 true 时不得批量回写旧账号网络位。GET /api/admin/dashboard 的 defaults.networkAccess 与后端创建默认值相同；显式 false 始终保留。命令与浏览器跟随 VPN 节点和系统 HTTP/HTTPS 代理端口变化不要求重启 Portal；长驻 Codex 模型连接的端口更新，以及 OUTBOUND_PROXY/COMMAND_GIT_BIN 等静态配置修改需安全重启。
 
 - 当前变更报告的计划、实际改动、验证、结论与遗留项已经填写。
 - 架构或契约变化已同步到 `spec/architecture/`。

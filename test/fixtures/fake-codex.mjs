@@ -143,7 +143,11 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   if (!method && toolResponses.has(id)) { const resolve = toolResponses.get(id); toolResponses.delete(id); resolve(message); return; }
   if (id === undefined) return;
   if (method === 'initialize') return respond(id, { userAgent: 'codex-cli/0.150.0-alpha.8 fake-e2e' });
+  if (method === 'test/proxy-environment') return respond(id, Object.fromEntries(
+    ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
+      'PORTAL_TEST_SECRET', 'HOME', 'CODEX_HOME'].map(key => [key, process.env[key] ?? null])));
   if (method === 'config/read') return respond(id, { config: {
+    web_search: process.argv.includes('web_search="live"') ? 'live' : 'disabled',
     features: { memories: String(process.env.CODEX_HOME || '').includes('fake-native-memory-enabled') },
     memories: {
       generate_memories: String(process.env.CODEX_HOME || '').includes('fake-native-memory-enabled'),

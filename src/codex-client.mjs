@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
 import { buildSeatbeltProfile } from './sandbox.mjs';
+import { resolveOutboundProxy, proxyEnvironment } from './outbound-proxy.mjs';
 
 export const PORTAL_MEMORY_CONFIG = Object.freeze({
   features: Object.freeze({ memories: false }),
@@ -18,9 +19,10 @@ function rpcError(value) {
 }
 
 export class CodexAppServerClient extends EventEmitter {
-  constructor(config) {
+  constructor(config, { readProxy } = {}) {
     super();
     this.config = config;
+    this.readProxy = readProxy;
     this.process = null;
     this.pending = new Map();
     this.nextId = 1;
@@ -43,6 +45,12 @@ export class CodexAppServerClient extends EventEmitter {
   }
 
   async #start() {
+    this.stopping = false;
+    this.lastError = null;
+    // Native HTTP clients do not automatically inherit macOS's system proxy.
+    // Resolve once per process launch, including isolated search clients.
+    const proxy = await resolveOutboundProxy(this.config, { read: this.readProxy });
+    if (this.stopping) throw Object.assign(new Error('Codex 启动已取消。'), { code: 'CODEX_START_CANCELLED' });
     const disabledFeatures = [
       'apps', 'plugins', 'shell_tool', 'unified_exec', 'view_image', 'browser_use',
       'in_app_browser', 'computer_use', 'image_generation',
@@ -69,15 +77,12 @@ export class CodexAppServerClient extends EventEmitter {
     }
     if (this.config.searchOnly) args.push('-c', `web_search="${this.config.summaryOnly ? 'disabled' : 'live'}"`, '-c', 'agents.enabled=false',
       '--disable', 'remote_plugin', '--disable', 'tool_suggest');
-    this.stopping = false;
-    this.lastError = null;
     // App Server authenticates from local Codex state and does not need Portal,
     // Cloudflare, Git, CI, or arbitrary developer secrets from the web process.
     const childEnv = {};
     for (const key of [
       'HOME', 'PATH', 'TMPDIR', 'LANG', 'LC_ALL', 'USER', 'LOGNAME', 'SHELL', 'TERM',
       'CODEX_HOME', 'XDG_CONFIG_HOME', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
-      'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
     ]) {
       if (process.env[key] !== undefined) childEnv[key] = process.env[key];
     }
@@ -105,6 +110,9 @@ export class CodexAppServerClient extends EventEmitter {
       binary = '/usr/bin/sandbox-exec';
       spawnArgs = ['-p', profile, ...(scriptFixture ? [process.execPath, this.config.codexBin] : [this.config.codexBin]), ...args];
     }
+    // Apply after the search-only environment reset. Never inherit stale host
+    // proxy overrides (especially ALL_PROXY/NO_PROXY) over OUTBOUND_PROXY.
+    Object.assign(childEnv, proxyEnvironment(proxy));
     this.process = spawn(binary, spawnArgs, {
       cwd: this.config.rootDir,
       env: childEnv,
