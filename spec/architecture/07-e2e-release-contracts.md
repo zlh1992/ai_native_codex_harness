@@ -210,7 +210,7 @@ HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake ap
 
 ## VPN、工具与账号网络
 
-`test/codex-client.test.mjs` 验证真实子进程的 system/显式/direct 代理环境、启动时读取新端口、宿主代理覆盖清除、配置错误不启动及独立搜索沙箱中代理保留。该测试不替代真实模型请求；发布仍需双角色的实际推理验收。模型服务级联网不放宽下面的员工工具禁网门控。
+`test/codex-client.test.mjs` 验证真实子进程的 system/显式/direct 代理环境、启动时读取新端口、宿主代理覆盖清除、配置错误不启动及独立搜索沙箱中代理保留。同一客户端测试还固定 start/resume/fork 对宿主及参数新增 MCP 条目的禁用，保留 Portal 动态工具。该测试不替代真实模型请求；发布仍需双角色的实际推理验收。模型服务级联网不放宽下面的员工工具禁网门控。
 
 `test/command-runtime.test.mjs` 用受控 HTTP/CONNECT 代理、真实 TLS、Git dumb HTTP 和临时 wheel 验证代理链路、独立命令安装后直接发现 CLI、真实 Git HTTP helper、节点/端口切换和断线恢复；禁网命令即使手动指定本地代理也不能连接。`test/outbound-proxy.test.mjs` 固定每次系统读取、端口更新、无代理、无效/PAC/SOCKS 拒绝及 Chrome 原生系统模式。
 

@@ -55,7 +55,7 @@ snapshot_download(
 PY
 fi
 
-CODEX_CANDIDATE="${CODEX_BIN:-/Applications/ChatGPT.app/Contents/Resources/codex}"
+CODEX_CANDIDATE="${CODEX_BIN:-/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex}"
 if [[ ! -x "$CODEX_CANDIDATE" ]]; then
   if command -v codex >/dev/null 2>&1; then CODEX_CANDIDATE="$(command -v codex)";
   else echo "未找到 Codex。请安装 ChatGPT/Codex，并先完成 codex login。" >&2; exit 2; fi

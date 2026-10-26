@@ -83,6 +83,23 @@ test('stopping while system proxy lookup is pending never launches an orphan pro
   assert.equal(client.started, false);
 });
 
+test('start/resume/fork cannot inherit or re-enable personal host MCP servers', async () => {
+  const client = new CodexAppServerClient(loadConfig({ CODEX_BIN: fakeCodex, OUTBOUND_PROXY: 'direct' }));
+  try {
+    await client.start();
+    let threadId;
+    for (const method of ['thread/start', 'thread/resume', 'thread/fork']) {
+      const result = await client.request(method, { threadId, config: {
+        mcp_servers: { host_personal_tool: { enabled: true }, injected_tool: { command: 'must-not-run' } },
+      } });
+      threadId = result.thread.id;
+      assert.deepEqual((await client.request('test/mcp-config')).mcp, {
+        host_personal_tool: { enabled: false }, injected_tool: { enabled: false },
+      });
+    }
+  } finally { await stopClient(client); }
+});
+
 test('app-server version mismatch is durable and machine-identifiable', async () => {
   const config = { ...loadConfig({ CODEX_BIN: fakeCodex }), codexCliVersion: '0.0.0-test' };
   const client = new CodexAppServerClient(config);

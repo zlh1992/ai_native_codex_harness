@@ -47,7 +47,7 @@ Codex 主进程和独立搜索客户端在每次启动前解析 `OUTBOUND_PROXY`
 
 ## Codex 协议升级流程
 
-当前 pin：`codex-cli 0.150.0-alpha.8`。
+当前 pin：`codex-cli 0.164.0-alpha.11.1`。生成包含 Portal 初始化时已启用的 experimental API；只使用 Portal 既有白名单工具和 RPC，不因 schema 增加新能力而自动开放。
 
 1. 读取目标二进制版本：`codex --version`。
 2. 生成到临时目录，并与 `protocol/generated/` 对比删除、变化和新增类型。
@@ -55,7 +55,7 @@ Codex 主进程和独立搜索客户端在每次启动前解析 `OUTBOUND_PROXY`
 4. 用目标二进制执行：
 
    ```bash
-   codex app-server generate-ts --out protocol/generated
+   codex app-server generate-ts --experimental --out protocol/generated
    ```
 
 5. 同步更新 `src/config.mjs`、`protocol/version.json`、fake app-server、协议测试和架构/实施报告。

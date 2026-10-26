@@ -16,7 +16,7 @@ assert.equal(fs.existsSync(path.join(process.cwd(), 'config.toml')), false);
 const send = packet => process.stdout.write(`${JSON.stringify(packet)}\n`);
 readline.createInterface({ input: process.stdin }).on('line', line => {
   const { method, id, params } = JSON.parse(line);
-  if (method === 'initialize') send({ id, result: { userAgent: 'codex/0.150.0-alpha.8 test' } });
+  if (method === 'initialize') send({ id, result: { userAgent: 'codex/0.164.0-alpha.11.1 test' } });
   if (method === 'config/read') send({ id, result: { config: { features: { memories: false }, memories: { generate_memories: false, use_memories: false }, web_search: summary ? 'disabled' : 'live' } } });
   if (method === 'thread/start') {
     assert.equal(params.ephemeral, true); assert.equal(params.model, 'gpt-5.6-luna'); assert.deepEqual(params.dynamicTools, []);

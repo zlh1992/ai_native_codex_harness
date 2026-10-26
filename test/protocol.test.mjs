@@ -7,8 +7,10 @@ const read = (file) => fs.readFileSync(new URL(file, import.meta.url), 'utf8');
 
 test('generated app-server schema contains every native employee workflow contract', () => {
   const version = JSON.parse(read('../protocol/version.json'));
-  assert.equal(version.codexCli, '0.150.0-alpha.8');
+  assert.equal(version.codexCli, '0.164.0-alpha.11.1');
   assert.equal(loadConfig({}).codexCliVersion, version.codexCli);
+  assert.match(version.generatedBy, /--experimental/);
+  assert.match(read('../protocol/generated/v2/ThreadStartParams.ts'), /dynamicTools\?: Array<DynamicToolSpec>/);
   assert.ok(read('../src/codex-client.mjs').includes('Codex 协议版本不匹配'));
   const client = read('../protocol/generated/ClientRequest.ts');
   for (const method of ['thread/fork', 'thread/read', 'thread/goal/set', 'thread/goal/get', 'skills/list', 'turn/start', 'turn/interrupt', 'turn/steer', 'config/read']) {

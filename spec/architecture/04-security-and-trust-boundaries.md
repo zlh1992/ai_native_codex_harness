@@ -87,6 +87,8 @@ Codex 的服务级模型连接在每次子进程启动前解析 `OUTBOUND_PROXY`
 
 App Server 启动时关闭内置 Shell、unified exec、浏览器、插件、外部 MCP、computer use、image generation、workspace dependencies、skill search 和 web search 等不受 Portal ACL 控制的能力。
 
+个人配置中的 MCP 不受 apps/plugins 开关约束。Portal 在 thread/start、thread/resume 和 thread/fork 时将有效配置及调用参数中的 MCP 条目固定为 enabled=false；不修改宿主配置，Portal 动态工具继续按当前用户 ACL 执行。
+
 允许的写入面分两类：
 
 1. `workspace_*` dynamic tools：每次调用都通过 Portal 上下文、ACL、路径和 turn mode 校验。

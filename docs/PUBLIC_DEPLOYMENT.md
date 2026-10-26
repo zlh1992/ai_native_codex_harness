@@ -104,9 +104,9 @@ PUBLIC_TUNNEL_MODE=tailscale
 
 ## 固定 Codex 二进制
 
-本项目协议固定为 `0.150.0-alpha.8`。ChatGPT App 自动更新可能替换其内置二进制；运行中的旧进程继续在线不代表下一次重启仍兼容。若 `--version` 或 initialize 版本不同，应安装官方 `@openai/codex` 的同一精确版本，把本机 `.env` 的 `CODEX_BIN` 指向该版本的独立可执行文件，再运行完整 gate 与隔离真实冒烟。不要只修改 pin 字符串绕过检查。
+本项目协议固定为 `0.164.0-alpha.11.1`。ChatGPT App 自动更新可能替换其内置二进制；运行中的旧进程继续在线不代表下一次重启仍兼容。若 `--version` 或 initialize 版本不同，应准备官方同一精确版本的完整独立运行包，把本机 `.env` 的 `CODEX_BIN` 指向该版本的可执行文件，再运行完整 gate 与隔离真实冒烟。不要只修改 pin 字符串绕过检查。
 
-本次部署使用 `.tools/codex-0.150.0-alpha.8/` 下的官方 npm macOS 架构包；`.tools` 与 `.env` 不提交 Git。升级协议仍按 [协议升级流程](../spec/architecture/08-operations-protocol-and-evolution.md) 执行。
+独立运行包可来自相同精确版本的官方 npm 架构包，或本机官方 App 的完整 `codex-cli` 包；保留 app bundle、资源与辅助二进制，不能只复制入口 shell 脚本。当前验证包保存在 `.tools/codex-0.164.0-alpha.11.1/`，`CODEX_BIN` 指向其中 `CodexCLI.app/Contents/MacOS/codex`；`.tools` 与 `.env` 不提交 Git，旧版本留作回滚。升级协议仍按 [协议升级流程](../spec/architecture/08-operations-protocol-and-evolution.md) 执行。
 
 ## 无本地 Qwen 的部署
 

@@ -30,6 +30,7 @@ export class CodexAppServerClient extends EventEmitter {
     this.started = false;
     this.stopping = false;
     this.lastError = null;
+    this.hostMcpNames = [];
   }
 
   async start() {
@@ -147,6 +148,7 @@ export class CodexAppServerClient extends EventEmitter {
     }
     this.notify('initialized', {});
     const effective = await this.request('config/read', { includeLayers: false }, 15_000);
+    this.hostMcpNames = Object.keys(effective?.config?.mcp_servers || {});
     const memories = effective?.config?.memories;
     const features = effective?.config?.features;
     if (features?.memories !== false || memories?.generate_memories !== false || memories?.use_memories !== false) {
@@ -192,6 +194,13 @@ export class CodexAppServerClient extends EventEmitter {
   }
 
   request(method, params = {}, timeoutMs = this.config.codexRequestTimeoutMs) {
+    if (['thread/start', 'thread/resume', 'thread/fork'].includes(method)) {
+      // User-level MCP entries are independent of the apps/plugins feature
+      // switches. Never give a Portal thread the host's personal MCP tools.
+      const names = new Set([...this.hostMcpNames, ...Object.keys(params.config?.mcp_servers || {})]);
+      params = { ...params, config: { ...params.config,
+        mcp_servers: Object.fromEntries([...names].map(name => [name, { enabled: false }])) } };
+    }
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {

@@ -39,7 +39,7 @@
 
 ## 协议锁定
 
-`protocol/generated/` 是由本机 `codex-cli 0.150.0-alpha.8` 直接生成的 TypeScript 协议。App Server 初始化时会核对同一版本，不匹配则拒绝就绪；`test/protocol.test.mjs` 检查本项目依赖的方法、事件和字段。升级 Codex 二进制时应重新生成 schema、同步固定版本并先通过契约测试。启动脚本会区分 Web 已监听、Codex 正在启动和 Codex 启动失败，协议不匹配时会立即显示原因，不再无提示等待 60 秒。
+`protocol/generated/` 是由本机 `codex-cli 0.164.0-alpha.11.1` 直接生成的 TypeScript 协议。App Server 初始化时会核对同一版本，不匹配则拒绝就绪；`test/protocol.test.mjs` 检查本项目依赖的方法、事件和字段。升级 Codex 二进制时应重新生成 schema、同步固定版本并先通过契约测试。启动脚本会区分 Web 已监听、Codex 正在启动和 Codex 启动失败，协议不匹配时会立即显示原因，不再无提示等待 60 秒。
 
 ## 角色入口与分享历史
 

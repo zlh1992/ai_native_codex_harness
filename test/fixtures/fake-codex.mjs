@@ -12,6 +12,7 @@ const toolResponses = new Map();
 let nextTool = 1;
 let nextThread = 1;
 let nextTurn = 1;
+let lastMcpConfig;
 
 function write(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -140,13 +141,16 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   let message;
   try { message = JSON.parse(line); } catch { return; }
   const { id, method, params = {} } = message;
+  if (['thread/start', 'thread/resume', 'thread/fork'].includes(method)) lastMcpConfig = params.config?.mcp_servers;
   if (!method && toolResponses.has(id)) { const resolve = toolResponses.get(id); toolResponses.delete(id); resolve(message); return; }
   if (id === undefined) return;
-  if (method === 'initialize') return respond(id, { userAgent: 'codex-cli/0.150.0-alpha.8 fake-e2e' });
+  if (method === 'initialize') return respond(id, { userAgent: 'codex-cli/0.164.0-alpha.11.1 fake-e2e' });
   if (method === 'test/proxy-environment') return respond(id, Object.fromEntries(
     ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
       'PORTAL_TEST_SECRET', 'HOME', 'CODEX_HOME'].map(key => [key, process.env[key] ?? null])));
+  if (method === 'test/mcp-config') return respond(id, { mcp: lastMcpConfig });
   if (method === 'config/read') return respond(id, { config: {
+    mcp_servers: process.argv.some(value => value.startsWith('web_search=')) ? {} : { host_personal_tool: { enabled: true } },
     web_search: process.argv.includes('web_search="live"') ? 'live' : 'disabled',
     features: { memories: String(process.env.CODEX_HOME || '').includes('fake-native-memory-enabled') },
     memories: {
