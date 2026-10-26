@@ -204,8 +204,8 @@ export class CodexService extends EventEmitter {
       'Never attempt to inspect host credentials, Codex state, environment secrets, parent directories, or another user workspace.',
       'All workspace_* tool paths must be relative to the authorized project. The host will reject escapes and symlinks.',
       ...(this.wechatOwnerProjects.bindingFor(context) ? [
-        'This is the boss WeChat hub chat. You may use owner_projects_list and owner_project_* to list, read, and search standard Portal projects owned by this boss.',
-        'Those owner project tools are read-only. They exclude employee-owned projects, shared-only projects, local-private projects, and unmanaged host directories.',
+        'This is an authorized WeChat chat. Use owner_projects_list and owner_project_* to list, read, and search ordinary projects currently authorized for this user (owned or shared).',
+        'These tools are read-only, use the current user access, and exclude unauthorized projects, private projects, other chats and host directories. They do not switch the current project; workspace tools remain scoped to the current project.',
       ] : []),
       `Outbound network access for this user is ${context.user.networkAccess ? 'enabled' : 'disabled'}.`,
       'Explain meaningful changes and verify work with the available project tools.',
@@ -292,20 +292,21 @@ export class CodexService extends EventEmitter {
       invariant(current?.codexThreadId === existing && current.dispatchToolsVersion < 1,
         409, 'CHANNEL_THREAD_CHANGED', '对话线程已变化，请重试。');
       this.db.recoverChatThread({ chatId: context.chat.id, expectedThreadId: existing, newThreadId, reason: 'task_dispatch_tools_v1' });
-      this.db.updateChat(context.chat.id, { dispatchToolsVersion: 1, channelToolsVersion: 1 });
+      this.db.updateChat(context.chat.id, { dispatchToolsVersion: 1, channelToolsVersion: 2 });
       this.db.addMessage({ id: `dispatch-upgrade:${context.chat.id}`, chatId: context.chat.id, role: 'assistant', kind: 'capability_notice',
         content: '本对话已增加任务派发能力，原历史已保留，可继续引用此前资料。' });
       return newThreadId;
     }
     const channelTools = this.wechatOwnerProjects.bindingFor(context);
-    if (existing && channelTools && context.chat.channelToolsVersion < 1) {
+    if (existing && channelTools && context.chat.channelToolsVersion < 2) {
       const newThreadId = await this.#startThread(context);
       const current = this.db.getChat(context.chat.id);
-      invariant(current?.codexThreadId === existing && current.channelToolsVersion < 1,
+      invariant(this.wechatOwnerProjects.bindingFor(context) && this.db.getUserById(context.user.id)?.status === 'active', 403, 'PROJECT_ACCESS_REVOKED', '线程升级期间授权已变化。');
+      invariant(current?.codexThreadId === existing && current.channelToolsVersion < 2,
         409, 'CHANNEL_THREAD_CHANGED', '微信对话线程已变化，请重试。');
       this.db.recoverChatThread({ chatId: context.chat.id, expectedThreadId: existing,
-        newThreadId, reason: 'wechat_owner_project_tools_v1' });
-      this.db.updateChat(context.chat.id, { channelToolsVersion: 1 });
+        newThreadId, reason: 'wechat_authorized_project_tools_v2' });
+      this.db.updateChat(context.chat.id, { channelToolsVersion: 2 });
       return newThreadId;
     }
     const policyChanged = existing && this.contextByThread.get(existing)?.user.networkAccess !== context.user.networkAccess;
@@ -328,7 +329,8 @@ export class CodexService extends EventEmitter {
     }
     const threadId = await this.#startThread(context);
     this.db.updateChat(context.chat.id, { codexThreadId: threadId, threadState: 'ready', threadError: null,
-      ...(this.dispatchRuntime?.eligible(context) ? { dispatchToolsVersion: 1, channelToolsVersion: 1 } : {}) });
+      ...(this.dispatchRuntime?.eligible(context) ? { dispatchToolsVersion: 1 } : {}),
+      ...(this.wechatOwnerProjects.bindingFor(context) ? { channelToolsVersion: 2 } : {}) });
     return threadId;
   }
 

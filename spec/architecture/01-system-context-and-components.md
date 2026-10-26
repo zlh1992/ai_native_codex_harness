@@ -85,3 +85,5 @@ CODEX_HOME                                  原生 Codex thread/登录；由所�
 ## 工作图组件
 
 WorkGraphStore 管理持久状态；ProjectContextService 固定输入；ProjectShareService 批量准备授权；WorkGraphService 管理清单/交付/依赖；TaskReviewService 管理验收；WorkflowScheduler 和 WorkGraphRuntime 复用 Codex 运行；静态 WorkGraphUI 复用任务首页。 详细契约见 [多人 Work Graph](09-human-work-graph.md)，操作见 [工作图指南](../../docs/WORK_GRAPH.md)。
+
+新版多用户微信连接的项目查询复用同组只读工具，按当前用户有效 owner/shared access 执行，旧老板绑定继续保持 owner-only。详见[微信渠道](12-weixin-task-dispatch.md)。

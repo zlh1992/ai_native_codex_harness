@@ -178,7 +178,7 @@ export class WeixinService {
       let chat = this.chat(this.connection(row.id), project, user);
       this.sql.prepare("UPDATE weixin_inbox SET status='processing',chat_id=? WHERE id=?").run(chat.id, message.id); marked = true;
       const payload = JSON.parse(message.payload_json), items = payload.item_list || [];
-      const text = items.filter(i => i.type === 1).map(i => i.text_item?.text || '').join('\n').trim();
+      const text = items.filter(i => i.type === 1 || i.type === 3).map(i => i.type === 3 ? (typeof i.voice_item?.text === 'string' ? i.voice_item.text : '') : i.text_item?.text || '').join('\n').trim();
       const fileItems = items.filter(i => [2, 4].includes(i.type)).map(weixinAttachment);
       invariant(fileItems.length <= 30 && fileItems.reduce((n, f) => n + Number(f?.len || 0), 0) <= MATERIAL_LIMIT,
         413, 'MATERIAL_LIMIT', '每批最多 30 份资料、50 MiB。');
@@ -197,7 +197,11 @@ export class WeixinService {
       let response;
       const taskCommand = text.match(/^(?:处理任务\s*|\/task\s+)([a-f0-9-]{36})$/i);
       const command = parseWechatCommand(text);
-      if (taskCommand) {
+      if (items.some(i => i.type === 3 && (typeof i.voice_item?.text !== 'string' || !i.voice_item.text.trim()))) {
+        response = '此语音没有可用的转写文字，请转文字后重新发送。本条消息中的任务尚未执行。';
+      } else if (items.some(i => ![1, 2, 3, 4].includes(i.type))) {
+        response = '此消息包含暂不支持的视频或其他类型，请转为文字或原始文件发送。文字任务尚未执行。';
+      } else if (taskCommand) {
         invariant(!files.length, 400, 'WEIXIN_SWITCH_WITH_FILES', '资料已留在原项目；请单独发送处理任务指令，避免归属不清。');
         const { task } = this.graphs.taskFor(taskCommand[1], user.id);
         invariant(['active', 'rework'].includes(task.status), 409, 'TASK_NOT_ACTIVE', '任务正在等待前置任务或已提交、结束。');
@@ -210,7 +214,7 @@ export class WeixinService {
         if (command.type === 'models') response = formatWechatModelCatalog({ config: this.config, chat, user });
         if (command.type === 'model') { this.db.updateChat(chat.id, { preferredModel: resolveWechatModel(command.value) }); response = '当前微信对话模型已更新。'; }
         if (command.type === 'new') { invariant(!chat.taskId, 409, 'TASK_CHAT_REQUIRED', '任务对话请从任务入口进入；切换普通项目可开始普通对话。'); this.sql.prepare('UPDATE weixin_connections SET chat_id=NULL WHERE id=?').run(row.id); response = '已开启新的普通对话，历史已保留。'; }
-      } else if (items.some(i => ![1, 2, 4].includes(i.type))) response = '此消息包含暂不支持的语音或视频，请转为文字或原始文件发送。文字任务尚未执行。';
+      }
       else if (!text) response = files.length ? `已收到 ${files.length} 份资料：${files.map(f => f.name).join('、')}。尚未派发，请明确说明交给谁、做什么。`
         : '目前支持文字、图片和原始文件附件。';
       else {

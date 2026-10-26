@@ -11,22 +11,22 @@ const TOOL_NAMES = new Set([
 export const WECHAT_OWNER_PROJECT_TOOLS = Object.freeze([
   {
     type: 'function', name: 'owner_projects_list',
-    description: 'List standard Portal projects owned by the current boss. This excludes employee-owned, shared-only, local-private, and unmanaged host projects.',
+    description: 'List standard Portal projects currently authorized for this user, including owned and shared projects. Excludes local-private and unmanaged host projects.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
     type: 'function', name: 'owner_project_list',
-    description: 'Read-only list of files and directories in one standard Portal project owned by the current boss. Paths are relative to that target project.',
+    description: 'Read-only list of files and directories in one standard Portal project currently authorized for this user. Paths are relative to that target project.',
     inputSchema: { type: 'object', properties: { project_id: { type: 'string' }, path: { type: 'string' }, max_depth: { type: 'integer', minimum: 1, maximum: 12 } }, required: ['project_id'], additionalProperties: false },
   },
   {
     type: 'function', name: 'owner_project_read_file',
-    description: 'Read one UTF-8 text file from a standard Portal project owned by the current boss. The operation is read-only and the path is target-project-relative.',
+    description: 'Read one UTF-8 text file from a standard Portal project currently authorized for this user. The operation is read-only and the path is target-project-relative.',
     inputSchema: { type: 'object', properties: { project_id: { type: 'string' }, path: { type: 'string' } }, required: ['project_id', 'path'], additionalProperties: false },
   },
   {
     type: 'function', name: 'owner_project_search',
-    description: 'Search literal text in UTF-8 files inside one standard Portal project owned by the current boss. The operation is read-only.',
+    description: 'Search literal text in UTF-8 files inside one standard Portal project currently authorized for this user. The operation is read-only.',
     inputSchema: { type: 'object', properties: { project_id: { type: 'string' }, query: { type: 'string' }, path: { type: 'string' } }, required: ['project_id', 'query'], additionalProperties: false },
   },
 ]);
@@ -41,30 +41,38 @@ export class WechatOwnerProjectTools {
   handles(name) { return TOOL_NAMES.has(name); }
 
   bindingFor(context) {
+    if (this.config.weixinEnabled && context?.chat && context?.project && context?.user
+      && context.project.projectType === 'standard' && context.user.networkAccess
+      && (!this.config.weixinPilotUserIds?.length || this.config.weixinPilotUserIds.includes(context.user.id))) {
+      const row = this.db.db.prepare("SELECT * FROM weixin_connections WHERE user_id=? AND chat_id=? AND project_id=? AND access_id=? AND status='active'")
+        .get(context.user.id, context.chat.id, context.project.id, context.project.accessId);
+      if (row && row.credential_epoch === this.db.db.prepare('SELECT workflow_policy_epoch FROM users WHERE id=?').get(context.user.id)?.workflow_policy_epoch
+        && this.db.getProjectForUser(context.project.id, context.user.id)?.accessId === context.project.accessId) return row;
+    }
     if (!this.config.wechatChannelEnabled || !this.config.wechatChannelProjectId) return null;
     if (!context?.chat || !context?.project || !context?.user) return null;
     if (context.chat.projectId !== this.config.wechatChannelProjectId || context.project.id !== this.config.wechatChannelProjectId) return null;
     const binding = this.db.getChannelBindingByChat(CHANNEL, context.chat.id);
     if (!binding || binding.status !== 'active') return null;
     if (binding.userId !== context.user.id || binding.projectId !== context.project.id || binding.chatId !== context.chat.id) return null;
-    if (context.project.projectType !== 'standard' || context.project.userId !== context.user.id || context.project.accessKind !== 'owner') return null;
+    if (context.user.role !== 'admin' || context.project.projectType !== 'standard' || context.project.userId !== context.user.id || context.project.accessKind !== 'owner') return null;
     return binding;
   }
 
   toolsFor(context) { return this.bindingFor(context) ? WECHAT_OWNER_PROJECT_TOOLS : []; }
 
   #assertHub(active) {
-    invariant(this.bindingFor(active), 403, 'WECHAT_OWNER_PROJECT_TOOLS_FORBIDDEN', '该对话不是有效的老板微信项目入口。');
+    invariant(this.bindingFor(active), 403, 'WECHAT_OWNER_PROJECT_TOOLS_FORBIDDEN', '该对话不是当前有效的微信项目入口。');
     const user = this.db.getUserById(active.user.id);
-    invariant(user?.status === 'active' && user.role === 'admin', 403, 'WECHAT_OWNER_REQUIRED', '微信项目入口只允许当前活动老板使用。');
+    invariant(user?.status === 'active' && user.networkAccess, 403, 'WECHAT_OWNER_REQUIRED', '微信项目入口要求当前活动且获准联网的用户。');
     return user;
   }
 
   #target(active, projectId) {
     const user = this.#assertHub(active);
     const project = this.db.getProjectForUser(String(projectId || ''), user.id);
-    invariant(project && project.userId === user.id && project.accessKind === 'owner' && project.projectType === 'standard',
-      403, 'OWNER_PROJECT_FORBIDDEN', '目标项目不是当前老板本人拥有的标准项目。');
+    invariant(project && project.projectType === 'standard' && (this.bindingFor(active)?.user_id || (project.userId === user.id && project.accessKind === 'owner')),
+      403, 'OWNER_PROJECT_FORBIDDEN', '目标项目不是当前用户获准访问的普通项目。');
     return project;
   }
 
@@ -73,14 +81,15 @@ export class WechatOwnerProjectTools {
     if (name === 'owner_projects_list') {
       const user = this.#assertHub(active);
       const projects = this.db.listProjectsForUser(user.id)
-        .filter((project) => project.userId === user.id && project.accessKind === 'owner' && project.projectType === 'standard')
+        .filter((project) => project.projectType === 'standard' && (this.bindingFor(active)?.user_id || (project.userId === user.id && project.accessKind === 'owner')))
         .map((project) => ({
           id: project.id,
           name: project.name,
           slug: project.slug,
           description: project.description || '',
           updatedAt: project.updatedAt,
-          hub: project.id === this.config.wechatChannelProjectId,
+          hub: project.id === active.project.id,
+          accessKind: project.accessKind,
         }));
       return { projects };
     }

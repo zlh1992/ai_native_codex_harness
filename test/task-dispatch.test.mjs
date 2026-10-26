@@ -292,3 +292,45 @@ test('read-only packaging works during the boss turn while task imports still re
   assert.throws(() => f.service.prepare(f.store.claimJob()), { code: 'WORKSPACE_BUSY' });
   assert.throws(() => f.materials.importFiles(f.project, [file]), { code: 'WORKSPACE_BUSY' });
 });
+
+test('voice transcript executes once; missing transcript and mixed unsupported items never execute', async t => {
+  const f = weixinFixture(t), row = await f.bind(), prompts = [];
+  f.codex.runTurn = async ({ prompt }) => { prompts.push(prompt); return { text: 'synthetic reply' }; };
+  f.setMessages([
+    f.message('voice-ok', [{ type: 3, voice_item: { text: '分析测试资料' } }]),
+    f.message('voice-empty', [{ type: 3, voice_item: { text: '  ' } }, { type: 1, text_item: { text: '/new' } }]),
+    f.message('voice-video', [{ type: 3, voice_item: { text: '不得执行' } }, { type: 5 }]),
+  ]);
+  await f.wx.poll(row);
+  for (let i = 0; i < 3; i++) await f.wx.process(f.wx.connection(row.id));
+  await f.wx.poll(row); await f.wx.process(f.wx.connection(row.id));
+  assert.deepEqual(prompts, ['分析测试资料']);
+  const responses = f.db.db.prepare('SELECT response_text FROM weixin_inbox ORDER BY id').all();
+  assert.match(responses[1].response_text, /没有可用的转写/);
+  assert.match(responses[2].response_text, /视频/);
+});
+
+test('multi-user Weixin project tools use current user access and reject revocation, private and unshared targets', async t => {
+  const { WechatOwnerProjectTools } = await import('../src/wechat-owner-project-tools.mjs');
+  const f = weixinFixture(t);
+  const own = f.db.createProject({ userId: f.employee.id, slug: 'staff-own', name: 'Staff own' });
+  const privateProject = f.db.createProject({ userId: f.boss.id, slug: 'private', name: 'Private', projectType: 'local_private' });
+  const sharedPath = path.join(f.config.dataDir, 'staff-share');
+  f.db.grantProjectAccess({ projectId: f.project.id, userId: f.employee.id, treePath: sharedPath, branchName: 'shared/staff' });
+  const binding = f.wx.bind(f.employee.id, own.id);
+  for (let i = 0; i < 100 && f.wx.connection(binding.connection.id).status === 'pending'; i++) await new Promise(r => setTimeout(r, 5));
+  const row = f.wx.connection(binding.connection.id);
+  const user = f.db.getUserById(f.employee.id), chat = f.wx.chat(row, own, user);
+  const active = { user, chat, project: own };
+  const tools = new WechatOwnerProjectTools({ config: f.config, db: f.db, workspace: { readFile: p => ({ tree: p.treePath }) } });
+  assert.equal(tools.toolsFor(active).length, 4);
+  assert.deepEqual(new Set(tools.call(active, 'owner_projects_list').projects.map(p => p.id)), new Set([own.id, f.project.id]));
+  assert.equal(tools.call(active, 'owner_project_read_file', { project_id: f.project.id, path: 'x' }).tree, sharedPath);
+  assert.throws(() => tools.call(active, 'owner_project_read_file', { project_id: privateProject.id, path: 'x' }), { code: 'OWNER_PROJECT_FORBIDDEN' });
+  f.db.db.prepare("UPDATE project_access SET status='revoked' WHERE project_id=? AND user_id=?").run(f.project.id, user.id);
+  assert.throws(() => tools.call(active, 'owner_project_read_file', { project_id: f.project.id, path: 'x' }), { code: 'OWNER_PROJECT_FORBIDDEN' });
+  f.db.updateUser(user.id, { networkAccess: false });
+  assert.throws(() => tools.call(active, 'owner_projects_list'), { code: 'WECHAT_OWNER_PROJECT_TOOLS_FORBIDDEN' });
+  f.db.db.prepare("UPDATE weixin_connections SET status='revoked' WHERE id=?").run(row.id);
+  assert.equal(tools.toolsFor(active).length, 0);
+});
