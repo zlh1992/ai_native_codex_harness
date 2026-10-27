@@ -47,6 +47,8 @@ async function workflowTurn(threadId, turnId, prompt) {
       const nodes = ids.length >= 3 ? [node('requirements', ids[0]), node('design', ids[1], ['requirements']),
         node('implementation', ids[2], ['requirements']), node('delivery', ids[0], ['design', 'implementation'], true)]
         : [node('delivery', ids[0], [], true)];
+      // Explicit fixture for the unattended HTTP regression; no production heuristics.
+      if (context.project?.name === 'Team Graph') for (const n of nodes) n.checklist.push({ text: 'Compare submitted evidence', phase: 'review' });
       toolData(await callTool(threadId, turnId, 'work_graph_submit_plan', { graph: { schemaVersion: 1, title: 'Generated team graph', nodes } }));
     } else {
       const currentFiles = context.files.filter(file => !file.evidenceRef);

@@ -38,6 +38,11 @@ let checkingSession = false;
 let taskBoard;
 const workGraphUI = new WorkGraphUI({ api, toast, openTask, refreshTasks: loadTasks,
   onDetail: task => { if (!task && !state.taskTarget) return; state.taskTarget = task?.id || null; saveLocation(!task); if (task && state.taskDispatchEnabled) void markTaskRead(task.id); },
+  openWorkspace: async projectId => {
+    cancelLocationRestore();
+    if (!state.projects.some(p => p.id === projectId)) await loadProjects();
+    if (await selectProject(state.projects.find(p => p.id === projectId))) switchView('workbench');
+  },
   openFile: async (projectId, relative) => {
     cancelLocationRestore();
     if (!state.projects.some((p) => p.id === projectId)) await loadProjects();

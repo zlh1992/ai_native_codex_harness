@@ -27,7 +27,7 @@ export class ProjectContextService {
       .filter((file) => file.type === 'file' && /\.(md|txt|json|csv|tsv)$/i.test(file.path)).map((file) => file.path).slice(0, 30);
     invariant(Array.isArray(paths) && paths.length <= 30, 400, 'INVALID_CONTEXT_PATHS', '资料文件最多 30 个。');
     paths = [...new Set(paths.map(graphRelativePath))];
-    const files = []; const manifest = []; let remaining = 48 * 1024;
+    const files = []; const manifest = (baseline.excludedLocalRepositories || []).map(path => ({ path, used: false, reason: 'LOCAL_REPOSITORY_EXCLUDED' })); let remaining = 48 * 1024;
     for (const relative of paths) {
       try {
         const [file] = this.worktrees.readSnapshotFiles({ projectRoot: root, commitSha: baseline.commitSha,

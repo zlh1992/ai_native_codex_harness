@@ -70,8 +70,11 @@ export function validateGraph(input, { candidateIds = null, employeeFor = null }
     400, 'INVALID_DEPENDENCIES', '依赖必须为不重复的节点标识列表。');
     invariant(Array.isArray(node.checklist) && node.checklist.length >= 1 && node.checklist.length <= 30,
       400, 'INVALID_CHECKLIST', '任务清单须包含 1–30 项。');
-    const checklist = node.checklist.map((item, index) => ({ id: `item-${index + 1}`,
-      text: graphText(typeof item === 'string' ? item : item?.text, '清单项', 1000), done: false }));
+    const checklist = node.checklist.map((item, index) => {
+      const phase = typeof item === 'string' ? 'delivery' : item?.phase || 'delivery';
+      invariant(['delivery', 'review'].includes(phase), 400, 'INVALID_CHECKLIST', '清单阶段须为 delivery 或 review。');
+      return { id: `item-${index + 1}`, text: graphText(typeof item === 'string' ? item : item?.text, '清单项', 1000), phase, done: false };
+    });
     invariant(Array.isArray(node.outputs) && node.outputs.length <= 30,
       400, 'INVALID_OUTPUTS', '成果须为最多 30 个相对文件路径；人工说明任务可为空。');
     const outputs = node.outputs.map(graphRelativePath);

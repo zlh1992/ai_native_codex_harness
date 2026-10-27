@@ -203,7 +203,7 @@ async function grant(projectId, fixedUserId = '', memoryConfirmationToken = null
       $('#confirm-dialog').showModal();
       return;
     }
-    toast(result.restored ? '已恢复该员工原有 worktree、对话与授权。' : `已从 Git 基线 ${String(result.access?.baseSha || '').slice(0, 12)} 创建独立 worktree，已复制 ${result.copiedChats || 0} 段对话。`);
+    toast(result.restored ? '已恢复该员工原有 worktree、对话与授权。' : `已从 Git 基线 ${String(result.access?.baseSha || '').slice(0, 12)} 创建独立 worktree，已复制 ${result.copiedChats || 0} 段对话。${result.excludedLocalRepositories?.length ? `本地嵌套仓库未共享：${result.excludedLocalRepositories.join('、')}` : ''}`);
     await load();
   } catch (error) { toast(error.message, 'error'); }
 }

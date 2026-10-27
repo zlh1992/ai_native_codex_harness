@@ -50,7 +50,7 @@ export class ProjectShareService {
       access = this.db.grantProjectAccessWithChats({ id: accessId, projectId: project.id, userId,
         treePath: tree.treePath, branchName: tree.branchName, baseSha: tree.baseSha }, snapshots);
       return { access, restored: false, copiedChats: snapshots.length, includedLocalChanges: tree.includedLocalChanges,
-        untrackedFiles: tree.untrackedFiles, scope };
+        untrackedFiles: tree.untrackedFiles, excludedLocalRepositories: tree.excludedLocalRepositories, scope };
     } catch (error) {
       if (tree && !access) try { this.worktrees.discardUnboundShare({ projectRoot: this.workspace.projectRoot(project), ...tree }); } catch { /* retain for recovery */ }
       throw error;

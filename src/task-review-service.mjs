@@ -98,9 +98,20 @@ export class TaskReviewService {
       const access = this.db.getProjectAccessById(submission.projectAccessId);
       invariant(access?.status === 'active' && access.userId === task.assigneeUserId && access.projectId === project.id,
         403, 'SUBMISSION_ACCESS_REVOKED', '交付绑定的原授权已失效。');
-      delivery = this.worktrees.deliverSubmission({ projectRoot: this.workspace.projectRoot(project), treePath: access.treePath,
-        snapshotCommitSha: submission.snapshotCommitSha, snapshotTreeSha: submission.snapshotTreeSha,
-        taskId: task.id, taskVersion: task.version });
+      try {
+        delivery = this.worktrees.deliverSubmission({ projectRoot: this.workspace.projectRoot(project), treePath: access.treePath,
+          snapshotCommitSha: submission.snapshotCommitSha, snapshotTreeSha: submission.snapshotTreeSha,
+          taskId: task.id, taskVersion: task.version });
+      } catch (error) {
+        if (job && ['DELIVERY_MERGE_CONFLICT', 'DELIVERY_UNSUPPORTED_ENTRY', 'DELIVERY_RESERVED_PATH', 'GIT_FAILED'].includes(error.code)) {
+          this.store.assertJob(job.id, job.leaseToken);
+          const current = this.store.job(job.id);
+          const deliveryBlockedState = this.worktrees.deliveryState(this.workspace.projectRoot(project));
+          this.store.sql.prepare("UPDATE workflow_jobs SET payload_json=? WHERE id=? AND lease_token=? AND status='leased'")
+            .run(JSON.stringify({ ...current.payload, deliveryBlockedState }), job.id, job.leaseToken);
+        }
+        throw error;
+      }
     }
     return this.store.transaction(() => {
       if (job) this.store.assertJob(job.id, job.leaseToken);
@@ -111,7 +122,7 @@ export class TaskReviewService {
         delivery ? date : null, submission.id, task.version);
       invariant(changed.changes === 1, 409, 'SUBMISSION_NOT_PENDING', '该提交已经审核。');
       if (review.verdict === 'rework') {
-        const checklist = task.checklist.map((item) => ({ ...item, done: review.detail.items.find((r) => r.id === item.id)?.status === 'passed' }));
+        const checklist = task.checklist.map((item) => ({ ...item, done: item.phase !== 'review' && review.detail.items.find((r) => r.id === item.id)?.status === 'passed' }));
         this.db.db.prepare(`UPDATE tasks SET status='rework',version=version+1,checklist_json=?,checklist_revision=checklist_revision+1,
           blocked_reason=NULL,updated_at=? WHERE id=? AND version=?`).run(JSON.stringify(checklist), date, task.id, task.version);
       } else {

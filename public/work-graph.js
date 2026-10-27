@@ -8,11 +8,16 @@ const labels = { draft: '草稿', preparing: '准备共享', ready: '等待前�
   queued: '排队中', leased: '处理中', retry_wait: '等待重试', succeeded: '已完成', needs_attention: '需要处理' };
 const reasons = { PREPARING: '正在准备成员共享', WAITING_DEPENDENCIES: '等待前序验收', WAITING_EMPLOYEE: '等待员工完成当前任务',
   WORKSPACE_BUSY: '等待工作区空闲', WAITING_REVIEW: '等待验收', WAITING_OWNER_REVIEW: '等待老板决定',
-  INPUT_WORKTREE_DIRTY: '有未提交工作，请先处理', INPUT_BASE_DIVERGED: '输入基线分叉，请处理冲突',
+  INPUT_WORKTREE_DIRTY: '员工工作区有未提交文件；请先在工作区保留或整理，处理后自动继续', INPUT_BASE_DIVERGED: '输入基线分叉，请处理冲突',
   PROJECT_ACCESS_REVOKED: '项目授权已撤销', MEMBER_POLICY_CHANGED: '员工策略变化，请老板处理',
   CODEX_NOT_READY: '等待 Codex 服务', MODEL_DELIVERY_UNCERTAIN: '上次调用结果不确定，请核对后台对话',
   PLANNER_TRANSIENT_NETWORK: '模型响应流网络中断，尚未保存计划',
   WORKFLOW_RESULT_MISSING: '模型已结束，但未提交有效的结构化结果',
+  DELIVERY_UNSUPPORTED_ENTRY: '快照含符号链接或已跟踪的嵌套仓库，请整理为普通交付文件',
+  DELIVERY_RESERVED_PATH: '快照含内部保留目录，请从交付范围中移除',
+  DELIVERY_WORKTREE_INVALID: '原交付工作区不可用，请恢复项目授权或目录',
+  GIT_FAILED: 'Git 交付失败，尚未完成合并；请核对项目状态',
+  REVIEW_NEEDS_OWNER: '证据不完整或需要人工判断，请老板核对',
   DELIVERY_MERGE_CONFLICT: '成果合并冲突，请处理', WORKFLOW_AUTHORIZATION_CHANGED: '账号策略变化，请恢复授权',
   INDEPENDENT_VALIDATION_REQUIRED: '需要独立验证，请老板验收', REWORK_LIMIT_REACHED: '已到自动返工上限',
   DELIVERY_SCOPE_REVIEW_REQUIRED: '存在无关工作，请核对交付范围', MODEL_BUDGET_EXCEEDED: '已到模型调用预算' };
@@ -20,17 +25,32 @@ const reason = (code) => reasons[code] || (code ? '等待处理，请查看后�
 const date = (value) => value ? new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
 const runLabels = { queued: '等待模型容量', starting: '连接模型', running: '模型生成中', completed: '模型已结束', failed: '模型调用失败', interrupted: '模型已中断' };
 export function jobProgress(job) {
+  if (job.type && !['plan.generate', 'submission.review'].includes(job.type)) return `${job.type === 'review.apply' ? '应用审核结果与交付' : '后台推进'} · ${labels[job.status] || job.status} · 尝试 ${job.attempt || 0}/${job.maxAttempts || '—'} · 此步骤不调用模型`;
   const p = job.progress || {};
   return `配置模型 ${p.configuredModel || '—'} / ${p.configuredEffort || '—'} · 已调用 ${p.modelCalls || 0} 次 · ${runLabels[p.runStatus] || '等待调度'} · ${p.receiptSaved ? '已保存业务结果' : '尚未保存业务结果'}`;
 }
 export function jobAttentionMarkup(job) {
   const safe = job.recovery === 'retry'; const resume = job.recovery === 'resume';
+  const apply = job.type === 'review.apply';
   return `<div class="graph-job"><b>${job.type === 'plan.generate' ? '计划生成待恢复' : '后台任务待恢复'}</b><span>${escape(safe && job.errorCode === 'MODEL_DELIVERY_UNCERTAIN' ? reasons.PLANNER_TRANSIENT_NETWORK : reason(job.errorCode))}</span>
     <p>${escape(jobProgress(job))}</p><p>开始 ${escape(date(job.progress?.startedAt))} · 结束 ${escape(date(job.progress?.completedAt))} · 最近工具活动 ${escape(date(job.progress?.lastToolAt))}</p>
-    <p>${resume ? '已有持久结果，将恢复后续步骤，不重新调用模型。' : safe ? '可重新尝试；保留历史，自动尝试达到上限后停止。重试可能增加模型用量。' : '无法确认先前调用是否生效。请先查看后台记录；重新调用可能重复工作并增加模型用量。'}</p>
+    <p>${apply ? '保留已有审核意见；支持自动恢复的交付错误将在工作区变化后重试，其他错误请按提示处理。不会重新调用审核模型，也不会跳过合并校验。' : resume ? '已有持久结果，将恢复后续步骤，不重新调用模型。' : safe ? '可重新尝试；保留历史，自动尝试达到上限后停止。重试可能增加模型用量。' : '无法确认先前调用是否生效。请先查看后台记录；重新调用可能重复工作并增加模型用量。'}</p>
     ${job.chatId ? `<button class="secondary" data-job-chat="${escape(job.chatId)}">查看后台记录</button>` : ''}
     ${job.recovery === 'confirm' ? `<label><input type="checkbox" data-ack="${escape(job.id)}"> 已查看记录，确认重新调用</label>` : ''}
     <button class="secondary" data-retry-job="${escape(job.id)}" ${job.recovery === 'blocked' ? 'disabled' : ''}>${resume ? '恢复后续步骤' : '重新尝试'}</button></div>`;
+}
+export function reviewProgressLabel(node) {
+  if (node.status === 'passed') return '已通过并完成交付';
+  const job = node.reviewJob || node.reviewProgress;
+  if (job?.type === 'review.apply') {
+    if (job.status === 'needs_attention') return `审核意见已保存，应用受阻：${reason(job.errorCode)}`;
+    return '审核意见已保存，正在应用交付或返工结果';
+  }
+  if (job?.status === 'needs_attention') return `审核待恢复：${reason(job.errorCode)}`;
+  if (node.blockedReason === 'WAITING_OWNER_REVIEW' || node.reviewMode === 'manual') return '等待老板审核';
+  if (node.status === 'submitted' && node.reviewMode === 'assisted') return '等待 AI 审核意见，随后由老板决定';
+  if (node.status === 'submitted') return '等待 AI 审核；通过后自动交付并推进';
+  return labels[node.status] || '';
 }
 const reviewLabel = mode => mode === 'auto' ? 'AI 自动审核 · 推进 / 打回' : mode === 'manual' ? '老板人工审核' : '老板审核 · AI 提供意见';
 const coverageLabel = code => ({ UNSUPPORTED_FORMAT: '格式暂不支持内容审核', NO_EXTRACTABLE_TEXT: '未提取到正文',
@@ -67,8 +87,8 @@ export function graphLayout(nodes) {
 }
 
 export class WorkGraphUI {
-  constructor({ api, toast, openTask, openFile, refreshTasks, onDetail }) {
-    Object.assign(this, { api, toast, openTaskChat: openTask, openFile, refreshTasks, onDetail });
+  constructor({ api, toast, openTask, openFile, openWorkspace, refreshTasks, onDetail }) {
+    Object.assign(this, { api, toast, openTaskChat: openTask, openFile, openWorkspace, refreshTasks, onDetail });
     this.zoom = 1; this.graphs = []; this.mode = 'kanban'; this.events = []; this.jobs = []; this.selection = 0;
     this.generationKeys = new Map();
     this.detailEpoch = 0;
@@ -240,6 +260,7 @@ export class WorkGraphUI {
       `${nodes.filter((n) => n.status === 'passed').length} / ${nodes.length}`];
     ['task-active-count', 'task-submitted-count', 'task-passed-count', 'visible-project-count'].forEach((id, index) => { $(`#${id}`).textContent = counts[index]; });
     const run = graph?.run; const canEdit = !run || ['passed', 'cancelled', 'superseded'].includes(run.status);
+    const excludedLocalRepositories = [...new Set([...(graph?.plan?.context?.baseline?.excludedLocalRepositories || []), ...(run?.excludedLocalRepositories || [])])];
     $('#graph-view-help').textContent = viewHelp[this.mode];
     all('[data-view-mode]', this.panel).forEach((button) => {
       const active = button.dataset.viewMode === this.mode;
@@ -248,6 +269,7 @@ export class WorkGraphUI {
     all('[data-zoom]', this.panel).forEach((button) => { button.disabled = this.mode !== 'graph'; });
     $('#graph-run-bar').innerHTML = graph ? `<span class="status-tag ${escape(run?.status || 'draft')}">${labels[run?.status || 'draft']}</span>
       <span>最近检查 ${date(run?.lastCheckedAt)} · 下次 ${date(run?.nextCheckAt)}</span>
+      ${graph.owner && excludedLocalRepositories.length ? `<span>发布基线保留在老板本地、未共享的嵌套仓库：${escape(excludedLocalRepositories.join('、'))}</span>` : ''}
       ${canEdit ? '<button class="secondary" data-edit-plan>编辑计划</button><button class="primary" data-start-graph>发布任务</button>'
         : `<button class="secondary" data-control="${run.status === 'paused' ? 'resume' : 'pause'}">${run.status === 'paused' ? '恢复推进' : '暂停'}</button><button class="secondary danger" data-control="cancel">取消运行</button>`}` : '';
     const board = $('#graph-board');
@@ -261,7 +283,7 @@ export class WorkGraphUI {
       this.kanban ||= new KanbanBoard(board, { key: `${this.user.id}:graph:${graph.id}`, onOpen: key => this.showNode(this.current, key) });
       this.kanban.render(taskColumns, nodes.map(node => ({ id: node.key, column: taskColumn(node), title: node.title,
         tag: node.completionGate ? '最终交付' : reviewLabel(node.reviewMode), person: node.assigneeName,
-        description: reason(node.blockedReason) || node.acceptance || '',
+        description: node.status === 'submitted' ? reviewProgressLabel(node) : reason(node.blockedReason) || node.acceptance || '',
         meta: `V${node.version} · ${node.dueAt ? date(node.dueAt) : '未设截止日期'}`,
         search: `${node.title} ${node.assigneeName} ${labels[node.status]}` })), $('#graph-search').value);
     }
@@ -384,9 +406,10 @@ export class WorkGraphUI {
       <p><span class="status-tag ${escape(node.status)}">${labels[node.status]}</span> ${escape(reason(node.blockedReason))}</p>
       <p>${escape(reviewLabel(node.reviewMode))}</p>
       ${!graph.owner && editable ? '<p><button class="primary" type="button" data-open-task>进入任务对话</button></p>' : ''}
-      ${latest ? `<p role="status">审核：${node.reviewJob ? escape(labels[node.reviewJob.status] || node.reviewJob.status) : node.reviewMode === 'manual' ? '等待老板审核' : '等待 AI 审核'}${node.reviewJob?.errorCode ? ` · ${escape(reason(node.reviewJob.errorCode))}` : ''}</p>` : ''}
-      ${task ? `<h3>验收标准</h3><p class="graph-preserve">${escape(task.acceptance)}</p><h3>任务清单</h3>
-        <div id="graph-checklist">${task.checklist.map((i) => `<label><input type="checkbox" data-item="${escape(i.id)}" ${i.done ? 'checked' : ''} ${!editable || graph.owner ? 'disabled' : ''}> ${escape(i.text)}</label>`).join('')}</div>` : '<p>发布计划后下发任务。</p>'}
+      ${latest ? `<p role="status">${escape(reviewProgressLabel(node))}</p><small>AI 根据固定交付材料核对；不代表平台已独立运行代码。</small>` : ''}
+      ${task ? `<h3>验收标准</h3><p class="graph-preserve">${escape(task.acceptance)}</p><h3>提交前确认与审核清单</h3><p>仅勾选已经完成的交付项；审核项提交后核对，无需提前勾选。</p>
+        <div id="graph-checklist">${task.checklist.map((i) => `<label><input type="checkbox" data-item="${escape(i.id)}" ${i.done && i.phase !== 'review' ? 'checked' : ''} ${!editable || graph.owner || i.phase === 'review' ? 'disabled' : ''}> ${i.phase === 'review' ? '提交后审核 · ' : ''}${escape(i.text)}</label>`).join('')}</div>` : '<p>发布计划后下发任务。</p>'}
+      ${task?.blockedReason === 'INPUT_WORKTREE_DIRTY' ? `<section><h3>待整理文件</h3><ul>${(task.pendingPaths || []).map(p => `<li>${escape(p)}</li>`).join('')}</ul><p>系统不会自动提交、覆盖或删除这些文件。请在本项目工作区整理；无需老板重试，后台会自动重新检查。</p>${!graph.owner ? '<button type="button" class="secondary" data-open-workspace>打开项目工作区</button>' : ''}</section>` : ''}
       ${!task && node.attachments?.length ? `<h3>选定输入附件</h3><p>${node.attachments.map(f => escape(f.name)).join('、')}</p>` : ''}
       ${task?.inputs?.files?.length ? `<section class="graph-submission"><h3>输入资料 · 第 ${task.inputs.revision} 版</h3><p>进入任务对话即可使用；ZIP 保留原包，不自动解压。整个项目对参与员工共享。</p>${task.inputs.files.map(f => `<p><button class="text-link" data-preview-input="${escape(f.id)}">${escape(f.name)}</button> · ${f.size} B · <a href="${escape(sessionUrl(`/api/tasks/${task.id}/inputs/${f.id}?revision=${task.inputs.revision}&download=1`))}" download>下载</a><small>${escape(f.path)} · SHA-256 ${escape(f.sha256)}</small></p>`).join('')}</section>` : ''}
       ${(task?.inputManifest || []).map((h) => `<section class="graph-handoff"><h3>上游成果</h3><p class="graph-preserve">${escape(h.summary)}</p>${h.outputs.map((f) => `<button class="text-link" data-open-output="${escape(f.path)}">${escape(f.path)}</button>`).join('')}</section>`).join('')}
@@ -513,7 +536,7 @@ export class WorkGraphUI {
       if (this.detail === detail && this.drawer.open) {
         all('input,textarea,button,select', form).forEach(e => { e.disabled = Boolean(detail.submissionBody); });
         all('[data-upload-target]', form).forEach(e => { e.disabled ||= detail.uploads[Number(e.dataset.uploadTarget)].uploaded; });
-        all('[data-item]', this.drawer).forEach(e => { e.disabled = Boolean(detail.submissionBody); });
+        all('[data-item]', this.drawer).forEach(e => { e.disabled = Boolean(detail.submissionBody) || detail.node.task.checklist.find(i => i.id === e.dataset.item)?.phase === 'review'; });
         button.disabled = false; button.textContent = detail.submissionBody ? '确认提交结果（重试）' : '提交验收';
       }
     }
@@ -536,6 +559,7 @@ export class WorkGraphUI {
       const detail = this.detail; await this.saveChecklist();
       if (this.detail === detail && this.drawer.open) this.toast('清单已保存');
     }
+    else if (button.hasAttribute('data-open-workspace')) { const id = this.detail.graph.projectId; this.closeDetail(); await this.openWorkspace?.(id); }
     else if (button.hasAttribute('data-open-task')) { const id = this.detail.node.task.id; this.closeDetail(false); await this.openTaskChat(id); }
     else if (button.dataset.openOutput) { const id = this.detail.graph.projectId; this.closeDetail(); await this.openFile(id, button.dataset.openOutput); }
     else if (button.dataset.previewInput) {
@@ -584,7 +608,7 @@ export class WorkGraphUI {
         n.title = $('[name=title]', field).value; n.assigneeUserId = $('[name=assignee]', field).value;
         n.dependsOn = [...$('[name=depends]', field).selectedOptions].map(o => o.value);
         n.acceptance = $('[name=acceptance]', field).value;
-        n.checklist = $('[name=checklist]', field).value.split('\n').map(s => s.trim()).filter(Boolean);
+        n.checklist = ['delivery', 'review'].flatMap(phase => $('[name=' + (phase === 'delivery' ? 'checklist' : 'reviewChecklist') + ']', field).value.split('\n').map(s => s.trim()).filter(Boolean).map(text => ({ text, phase })));
         n.outputs = $('[name=outputs]', field).value.split('\n').map(s => s.trim()).filter(Boolean);
         n.completionGate = $('[name=final]', field).checked;
         n.requiresIndependentValidation = $('[name=independent]', field).checked;
@@ -598,12 +622,12 @@ export class WorkGraphUI {
         ${graph.nodes.map(n => `<fieldset data-edit-node="${escape(n.key)}"><legend>${escape(n.title)}</legend><label>任务名称<input name="title" value="${escape(n.title)}" required maxlength="160"></label>
         <label>负责人<select name="assignee">${this.candidates.map(u => `<option value="${escape(u.id)}" ${u.id === n.assigneeUserId ? 'selected' : ''}>${escape(u.displayName)}</option>`).join('')}</select></label>
         <label>等待哪些任务完成？<select name="depends" multiple>${graph.nodes.filter(p => p.key !== n.key).map(p => `<option value="${escape(p.key)}" ${n.dependsOn.includes(p.key) ? 'selected' : ''}>${escape(p.title)}</option>`).join('')}</select></label>
-        <label>验收标准<textarea name="acceptance" required>${escape(n.acceptance)}</textarea></label><label>任务清单（每行一项）<textarea name="checklist" required>${escape(n.checklist.map(i => typeof i === 'string' ? i : i.text).join('\n'))}</textarea></label>
+        <label>验收标准<textarea name="acceptance" required>${escape(n.acceptance)}</textarea></label><label>员工提交前确认（每行一项）<textarea name="checklist">${escape(n.checklist.filter(i => i.phase !== 'review').map(i => typeof i === 'string' ? i : i.text).join('\n'))}</textarea></label><label>提交后审核标准（每行一项，无需员工勾选）<textarea name="reviewChecklist">${escape(n.checklist.filter(i => i.phase === 'review').map(i => i.text).join('\n'))}</textarea></label>
         <label>必需交付文件（每行一个）<textarea name="outputs">${escape(n.outputs.join('\n'))}</textarea></label>
         <label>本节点验收<select name="nodeReviewMode"><option value="" ${!n.reviewMode ? 'selected' : ''}>继承默认方式</option><option value="manual" ${n.reviewMode === 'manual' ? 'selected' : ''}>老板人工审核</option><option value="auto" ${n.reviewMode === 'auto' ? 'selected' : ''}>AI 自动审核 · 推进 / 打回</option><option value="assisted" ${n.reviewMode === 'assisted' ? 'selected' : ''}>老板审核 · AI 提供意见</option></select></label>
         <label>截止时间<input name="due" type="datetime-local" value="${n.dueAt ? new Date(Date.parse(n.dueAt) - new Date(n.dueAt).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : ''}"></label>
         <label><input name="final" type="checkbox" ${n.completionGate ? 'checked' : ''}> 最终交付节点（整张图仅一个）</label>
-        <label><input name="independent" type="checkbox" ${n.requiresIndependentValidation ? 'checked' : ''}> 需要老板核对独立验证</label>
+        <label><input name="independent" type="checkbox" ${n.requiresIndependentValidation ? 'checked' : ''}> 必须由老板核对独立验证（勾选后不会自动通过）</label>
         <button class="secondary" type="button" data-remove-node="${escape(n.key)}">删除任务</button></fieldset>`).join('')}
         <button class="secondary" type="button" data-add-node>添加任务</button><p class="form-error" role="alert"></p><button class="primary" type="submit">保存新版本</button></form>`;
       const form = $('#graph-plan-form');

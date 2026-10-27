@@ -133,3 +133,22 @@ test('successful submission can clear the drawer before the board refresh comple
   assert.equal(calls.at(-1), '/api/tasks/A/submissions');
   assert.equal(ui.detail, null);
 });
+
+
+test('employee review criteria are visible but not checkable before submission; blocked files have a workspace action', t => {
+  const { ui, document } = fixture(t, async () => ({})); const g = graph();
+  g.run.status = 'running'; g.nodes[0].status = 'active';
+  Object.assign(g.nodes[0].task, { status: 'active', checklist: [
+    { id: 'item-1', text: 'Produce evidence', done: false },
+    { id: 'item-2', text: 'Compare the evidence', phase: 'review', done: false }] });
+  ui.showNode(g, 'A');
+  assert.equal(document.querySelector('[data-item="item-1"]').disabled, false);
+  assert.equal(document.querySelector('[data-item="item-2"]').disabled, true);
+  assert.match(document.querySelector('#graph-checklist').textContent, /提交后审核/);
+  Object.assign(g.nodes[0].task, { status: 'ready', blockedReason: 'INPUT_WORKTREE_DIRTY', pendingPaths: ['draft<unsafe>.md'] });
+  g.nodes[0].status = 'ready'; g.nodes[0].blockedReason = 'INPUT_WORKTREE_DIRTY';
+  ui.showNode(g, 'A');
+  assert.ok(document.querySelector('[data-open-workspace]'));
+  assert.match(ui.drawer.textContent, /draft<unsafe>.md/);
+  assert.equal(document.querySelector('unsafe'), null);
+});

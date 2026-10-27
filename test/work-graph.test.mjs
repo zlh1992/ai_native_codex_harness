@@ -351,6 +351,7 @@ test('dirty downstream trees remain untouched and cannot receive an actionable t
   assert.equal(first.status, 'ready');
   assert.equal(first.blockedReason, 'INPUT_WORKTREE_DIRTY');
   assert.equal(s.workspace.readFile(project, 'private.md').content, 'unsent work');
+  assert.deepEqual(s.graphs.publicTask(first).pendingPaths, ['private.md']);
 });
 
 test('plan history is immutable, edits require revision, and legacy activation cannot start a DAG', (t) => {
@@ -524,4 +525,114 @@ test('populated legacy submission migration retains native evidence and child re
   }
   assert.throws(() => f.store.sql.prepare("UPDATE task_submissions SET kind='manual' WHERE id=?").run(id), /CHECK constraint/);
   assert.equal(f.store.sql.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+});
+
+
+test('review-phase criteria do not require employee attestation, remain fully reviewed and preserve rework history', t => {
+  const f = fixture(t); const s = services(f);
+  f.graph.nodes = [{ ...f.graph.nodes[0], completionGate: true, outputs: ['result.txt'], checklist: [
+    'Write the result', { text: 'Check the supplied result against the required value', phase: 'review' }] }];
+  const plan = f.plan();
+  const run = f.store.start({ roadmapId: plan.roadmapId, ownerId: f.boss.id, expectedVersion: 1,
+    policy: { mode: 'auto', finalMode: 'auto' }, idempotencyKey: randomUUID() });
+  const prep = f.store.claimJob(); s.shares.prepareWorkflow(prep); f.store.finishJob(prep.id, prep.leaseToken);
+  s.graphs.reconcile(run.id);
+  let task = f.store.tasks(run.id)[0];
+  const items = () => task.checklist.map(i => ({ id: i.id, done: i.phase !== 'review' }));
+  assert.throws(() => s.graphs.updateChecklist(task.id, task.assigneeUserId, { taskVersion: 1, revision: task.checklistRevision,
+    items: task.checklist.map(i => ({ id: i.id, done: true })) }), { code: 'REVIEW_ITEM_READ_ONLY' });
+  task = s.graphs.updateChecklist(task.id, task.assigneeUserId, { taskVersion: 1, revision: task.checklistRevision, items: items() });
+  const employeeProject = f.db.getProjectForUser(f.project.id, task.assigneeUserId);
+  s.workspace.writeFile(employeeProject, 'result.txt', 'bad synthetic result');
+  const submission = s.graphs.submit(task.id, task.assigneeUserId, { kind: 'manual', taskVersion: 1,
+    checklistRevision: task.checklistRevision, resultSummary: 'Synthetic result', idempotencyKey: randomUUID() });
+  assert.equal(submission.checklistSnapshot[1].done, false);
+  assert.throws(() => s.reviews.proposal({ submissionId: submission.id, ownerId: f.boss.id, source: 'ai', verdict: 'passed',
+    detail: { items: [{ id: 'item-1', status: 'passed', comment: '', evidence: ['result.txt'] }] } }), { code: 'REVIEW_CHECKLIST_REQUIRED' });
+  const review = s.reviews.proposal({ submissionId: submission.id, ownerId: f.boss.id, source: 'ai', verdict: 'rework',
+    detail: { feedback: 'Replace the wrong value', items: task.checklist.map(i => ({ id: i.id,
+      status: i.phase === 'review' ? 'failed' : 'passed', comment: 'Synthetic evidence', evidence: ['result.txt'] })) } });
+  // Model normally persists read coverage before enqueueing apply.
+  f.store.sql.prepare('UPDATE task_reviews SET detail_json=? WHERE id=?').run(JSON.stringify({ ...review.detail,
+    coverage: [{ path: 'result.txt', complete: true }] }), review.id);
+  const queued = f.store.enqueue({ projectId: f.project.id, ownerId: f.boss.id, runId: run.id, generation: run.generation,
+    taskId: task.id, taskVersion: 1, submissionId: submission.id, type: 'review.apply', dedupeKey: 'synthetic-apply', payload: { reviewId: review.id } });
+  // Lease this job without running a model in this service-level test.
+  f.store.sql.prepare("UPDATE workflow_jobs SET status='leased',lease_token='synthetic',lease_until=? WHERE id=?").run(Date.now() + 60000, queued.id);
+  assert.equal(s.graphs.publicTask(task).reviewProgress.type, 'review.apply');
+  s.reviews.apply(review.id, { ownerId: f.boss.id, job: f.store.job(queued.id) });
+  task = f.db.getTask(task.id);
+  assert.equal(task.status, 'rework'); assert.equal(task.version, 2);
+  assert.equal(task.checklist[0].done, true); assert.equal(task.checklist[1].done, false);
+  assert.equal(f.db.getSubmission(submission.id).verdict, 'rework');
+  assert.equal(s.graphs.publicTask(task).reviewProgress, null);
+});
+
+test('planner receives authorized review capabilities without granting model approval authority', t => {
+  const f = fixture(t); const s = services(f);
+  const context = new ProjectContextService({ ...f, ...s });
+  const runtime = new WorkGraphRuntime({ ...f, ...s, context });
+  const job = runtime.generate(f.project.id, f.boss.id, { prompt: 'Synthetic evidence-based delivery', candidateIds: [f.a.id],
+    reviewPolicy: { mode: 'auto', finalMode: 'auto' }, idempotencyKey: randomUUID() });
+  assert.equal(job.payload.inputs.reviewPolicy.mode, 'auto');
+  assert.equal(job.payload.inputs.reviewCapabilities.independentExecution, false);
+});
+
+
+test('failed delivery automatically resumes only after workspace state changes, without rerunning review', async t => {
+  const f = fixture(t); const s = services(f);
+  f.graph.nodes = [{ ...f.graph.nodes[0], completionGate: true, outputs: ['result.txt'] }];
+  const run = f.store.start({ roadmapId: f.plan().roadmapId, ownerId: f.boss.id, expectedVersion: 1,
+    policy: { mode: 'auto' }, idempotencyKey: randomUUID() });
+  const prep = f.store.claimJob(); s.shares.prepareWorkflow(prep); f.store.finishJob(prep.id, prep.leaseToken);
+  s.graphs.reconcile(run.id); let task = f.store.tasks(run.id)[0];
+  task = s.graphs.updateChecklist(task.id, task.assigneeUserId, { taskVersion: 1, revision: task.checklistRevision,
+    items: task.checklist.map(i => ({ id: i.id, done: true })) });
+  const employeeProject = f.db.getProjectForUser(f.project.id, task.assigneeUserId);
+  s.workspace.writeFile(employeeProject, 'result.txt', 'valid synthetic evidence');
+  const submission = s.graphs.submit(task.id, task.assigneeUserId, { kind: 'manual', taskVersion: 1,
+    checklistRevision: task.checklistRevision, resultSummary: 'Synthetic result', idempotencyKey: randomUUID() });
+  const review = s.reviews.proposal({ submissionId: submission.id, ownerId: f.boss.id, source: 'ai', verdict: 'passed',
+    detail: { items: task.checklist.map(i => ({ id: i.id, status: 'passed', comment: '', evidence: ['result.txt'] })) } });
+  f.store.sql.prepare('UPDATE task_reviews SET detail_json=? WHERE id=?').run(JSON.stringify({ ...review.detail,
+    coverage: [{ path: 'result.txt', complete: true }] }), review.id);
+  const job = f.store.enqueue({ projectId: f.project.id, ownerId: f.boss.id, runId: run.id, generation: run.generation,
+    taskId: task.id, taskVersion: 1, submissionId: submission.id, type: 'review.apply', dedupeKey: 'recover-apply', payload: { reviewId: review.id } });
+  const scheduler = new WorkflowScheduler({ store: f.store, handlers: { 'review.apply': j => s.reviews.apply(review.id, { ownerId: f.boss.id, job: j }) } });
+  const lease = () => {
+    f.store.sql.prepare("UPDATE workflow_jobs SET status='leased',attempt=attempt+1,lease_token='test-lease',lease_until=? WHERE id=?")
+      .run(Date.now() + 60000, job.id); return f.store.job(job.id);
+  };
+  const root = s.workspace.projectRoot(f.project);
+  fs.symlinkSync('/dev/null', path.join(root, 'unsupported-link'));
+  await scheduler.execute(lease());
+  const blocked = f.store.job(job.id);
+  assert.equal(blocked.status, 'needs_attention'); assert.equal(blocked.attempt, 1);
+  assert.match(blocked.payload.deliveryBlockedState, /^[a-f0-9]{64}$/);
+  assert.equal(s.reviews.get(review.id).status, 'suggested');
+  assert.equal(s.graphs.publicTask(f.db.getTask(task.id)).blockedReason, 'DELIVERY_UNSUPPORTED_ENTRY');
+  const employeeView = s.graphs.view(run.roadmapId, task.assigneeUserId);
+  assert.equal(employeeView.nodes[0].reviewJob.type, 'review.apply');
+  assert.equal(JSON.stringify(employeeView).includes('deliveryBlockedState'), false);
+  s.graphs.reconcile(run.id);
+  assert.equal(f.store.job(job.id).status, 'needs_attention');
+  fs.unlinkSync(path.join(root, 'unsupported-link'));
+  fs.writeFileSync(path.join(root, 'unsupported-link'), 'now an ordinary file at the same untracked path');
+  // Changes cannot authorize recovery of historical unknown failures or model jobs.
+  f.store.sql.prepare("UPDATE workflow_jobs SET payload_json=? WHERE id=?").run(JSON.stringify({ reviewId: review.id }), job.id);
+  s.graphs.reconcile(run.id);
+  assert.equal(f.store.job(job.id).status, 'needs_attention');
+  f.store.sql.prepare("UPDATE workflow_jobs SET payload_json=?,error_code='MODEL_RESULT_UNCERTAIN' WHERE id=?")
+    .run(JSON.stringify(blocked.payload), job.id);
+  s.graphs.reconcile(run.id);
+  assert.equal(f.store.job(job.id).status, 'needs_attention');
+  f.store.sql.prepare("UPDATE workflow_jobs SET error_code=? WHERE id=?").run(blocked.errorCode, job.id);
+  s.graphs.reconcile(run.id);
+  assert.equal(f.store.job(job.id).status, 'queued');
+  assert.equal(f.store.job(job.id).payload.reviewId, review.id);
+  await scheduler.execute(lease()); s.graphs.reconcile(run.id);
+  assert.equal(f.store.run(run.id).status, 'passed');
+  assert.equal(s.reviews.get(review.id).status, 'applied');
+  assert.equal(s.workspace.readFile(f.project, 'result.txt').content, 'valid synthetic evidence');
+  assert.equal(f.store.sql.prepare('SELECT COUNT(*) AS n FROM task_reviews WHERE submission_id=?').get(submission.id).n, 1);
 });

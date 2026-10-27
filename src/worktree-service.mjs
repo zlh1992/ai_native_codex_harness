@@ -63,19 +63,36 @@ export class WorktreeService {
     }
   }
 
-  #snapshot(cwd, message) {
-    this.#git(cwd, ['add', '-A']);
+  // Local source clones are not shareable Git blobs. Leave new nested repositories
+  // untouched; tracked gitlinks and every employee submission remain fail-closed.
+  localRepositories(cwd) {
+    const untracked = this.#git(cwd, ['ls-files', '--others', '--exclude-standard', '-z'], { trim: false }).stdout.split('\0');
+    return untracked.filter(relative => relative.endsWith('/') && (() => {
+      const target = path.join(cwd, relative);
+      return fs.lstatSync(target).isDirectory() && fs.existsSync(path.join(target, '.git'))
+        && !this.#git(cwd, ['ls-files', '-z', '--', `:(literal)${relative.slice(0, -1)}`], { trim: false }).stdout;
+    })()).map(relative => relative.slice(0, -1));
+  }
+
+  #stage(cwd, preserveLocalRepositories = false) {
+    const excludedLocalRepositories = preserveLocalRepositories ? this.localRepositories(cwd) : [];
+    this.#git(cwd, ['add', '-A', '--', '.', ...excludedLocalRepositories.map(p => `:(top,literal,exclude)${p}`)]);
     try { this.#assertDeliverableIndex(cwd); }
     catch (error) {
       this.#git(cwd, ['reset', '--mixed', 'HEAD'], { allowFailure: true });
       throw error;
     }
+    return excludedLocalRepositories;
+  }
+
+  #snapshot(cwd, message, preserveLocalRepositories = false) {
+    const excludedLocalRepositories = this.#stage(cwd, preserveLocalRepositories);
     const staged = this.#git(cwd, ['diff', '--cached', '--quiet'], { allowFailure: true });
     if (!staged.ok) this.#git(cwd, ['-c', 'core.hooksPath=/dev/null', 'commit', '-m', message]);
     const [commitSha, treeSha] = this.#git(cwd, ['rev-parse', 'HEAD', 'HEAD^{tree}']).stdout.split('\n');
     invariant(/^[0-9a-f]{40,64}$/i.test(commitSha) && /^[0-9a-f]{40,64}$/i.test(treeSha),
       500, 'DELIVERY_SNAPSHOT_INVALID', 'Git 未返回有效的交付快照。');
-    return { commitSha, treeSha };
+    return { commitSha, treeSha, excludedLocalRepositories };
   }
 
   isReady(projectRoot) {
@@ -94,13 +111,10 @@ export class WorktreeService {
     this.#git(root, ['config', 'user.name', 'Codex Harness']);
     this.#git(root, ['config', 'user.email', 'codex-harness@localhost']);
     if (!this.#git(root, ['rev-parse', '--verify', 'HEAD'], { allowFailure: true }).ok) {
-      this.#git(root, ['add', '-A']);
-      this.#assertDeliverableIndex(root);
+      this.#stage(root, true);
       this.#git(root, ['-c', 'core.hooksPath=/dev/null', 'commit', '--allow-empty', '-m', 'Initialize Codex Harness project']);
     } else if (this.#git(root, ['status', '--porcelain']).stdout) {
-      this.#git(root, ['add', '-A']);
-      this.#assertDeliverableIndex(root);
-      this.#git(root, ['-c', 'core.hooksPath=/dev/null', 'commit', '-m', 'Prepare Codex Harness sharing snapshot']);
+      this.#snapshot(root, 'Prepare Codex Harness sharing snapshot', true);
     }
     return { ready: true, branch: this.#git(root, ['branch', '--show-current']).stdout || 'main' };
   }
@@ -122,12 +136,12 @@ export class WorktreeService {
     const includedLocalChanges = Boolean(this.#git(projectRoot, ['status', '--porcelain']).stdout);
     const untracked = this.#git(projectRoot, ['ls-files', '--others', '--exclude-standard', '-z'], { trim: false }).stdout
       .split('\0').filter(Boolean);
-    baseline ||= this.#snapshot(projectRoot, `Codex Harness sharing baseline for access ${accessId}`);
+    baseline ||= this.#snapshot(projectRoot, `Codex Harness sharing baseline for access ${accessId}`, true);
     try {
       this.#git(projectRoot, ['worktree', 'add', '-b', branchName, treePath, baseline.commitSha]);
       return {
         treePath, branchName, baseSha: baseline.commitSha, baseTreeSha: baseline.treeSha,
-        includedLocalChanges, untrackedFiles: untracked.length,
+        includedLocalChanges, untrackedFiles: untracked.length, excludedLocalRepositories: baseline.excludedLocalRepositories || [],
       };
     } catch (error) {
       this.#git(projectRoot, ['worktree', 'remove', '--force', treePath], { allowFailure: true });
@@ -144,10 +158,33 @@ export class WorktreeService {
 
   snapshotProject(projectRoot) {
     if (!this.isReady(projectRoot)) this.initialize(projectRoot);
-    return this.#snapshot(projectRoot, 'Codex Harness work graph input snapshot');
+    return this.#snapshot(projectRoot, 'Codex Harness work graph input snapshot', true);
+  }
+
+  deliveryState(projectRoot) {
+    // Only a fingerprint is persisted, never raw Git status/diff or file contents.
+    const hash = createHash('sha256').update(this.#git(projectRoot, ['rev-parse', 'HEAD']).stdout)
+      .update(this.#git(projectRoot, ['status', '--porcelain', '-z', '--untracked-files=all'], { trim: false }).stdout);
+    const pending = this.#git(projectRoot, ['ls-files', '--modified', '--others', '--exclude-standard', '-z'], { trim: false }).stdout.split('\0').filter(Boolean);
+    for (const relative of pending) {
+      try {
+        const stat = fs.lstatSync(path.join(projectRoot, relative), { bigint: true });
+        hash.update(JSON.stringify([relative, String(stat.mode), String(stat.size), String(stat.mtimeNs)]));
+      } catch (error) { if (error.code !== 'ENOENT') throw error; hash.update('missing'); }
+    }
+    return hash.digest('hex');
   }
 
   head(projectRoot) { return this.#git(projectRoot, ['rev-parse', 'HEAD']).stdout; }
+
+  pendingPaths(treePath) {
+    invariant(this.isReusableShare({ treePath }), 409, 'INPUT_WORKTREE_INVALID', '任务工作树不可用。');
+    const names = [
+      ...this.#git(treePath, ['diff', '--name-only', '-z', 'HEAD'], { trim: false }).stdout.split('\0'),
+      ...this.#git(treePath, ['ls-files', '--others', '--exclude-standard', '-z'], { trim: false }).stdout.split('\0'),
+    ];
+    return [...new Set(names.filter(Boolean))].filter(p => !p.split('/').some(part => RESERVED_DELIVERY_PARTS.has(part.normalize('NFKC').toLowerCase()))).slice(0, 30);
+  }
 
   synchronizeShare({ projectRoot, treePath, commitSha }) {
     invariant(this.isReady(projectRoot) && this.isReusableShare({ treePath }), 409, 'INPUT_WORKTREE_INVALID', '任务工作树不可用。');
@@ -202,10 +239,16 @@ export class WorktreeService {
     invariant(this.#git(treePath, ['merge-base', '--is-ancestor', snapshotCommitSha, 'HEAD'], { allowFailure: true }).ok,
       409, 'DELIVERY_SNAPSHOT_DETACHED', '任务提交的 Git commit 不属于原授权工作树。');
 
-    const ownerSnapshot = this.#snapshot(projectRoot, `Codex Harness owner snapshot before task ${taskId} v${taskVersion}`);
+    // A committed delivery must converge even if unrelated local files appeared
+    // after the merge and before SQLite recorded the verdict. Do not snapshot twice.
     if (this.#git(projectRoot, ['merge-base', '--is-ancestor', snapshotCommitSha, 'HEAD'], { allowFailure: true }).ok) {
-      return { deliveryCommitSha: ownerSnapshot.commitSha, alreadyDelivered: true };
+      return { deliveryCommitSha: this.head(projectRoot), alreadyDelivered: true };
     }
+    const ownerSnapshot = this.#snapshot(projectRoot, `Codex Harness owner snapshot before task ${taskId} v${taskVersion}`, true);
+    const portablePath = p => p.normalize('NFKC').toLowerCase();
+    const incoming = this.#git(projectRoot, ['diff', '--name-only', '--no-renames', '-z', `HEAD...${snapshotCommitSha}`], { trim: false }).stdout.split('\0').filter(Boolean).map(portablePath);
+    invariant(!ownerSnapshot.excludedLocalRepositories.map(portablePath).some(local => incoming.some(p => p === local || p.startsWith(`${local}/`) || local.startsWith(`${p}/`))),
+      409, 'DELIVERY_MERGE_CONFLICT', '交付路径与老板保留的本地仓库重叠；原目录未修改，请先调整交付路径。');
     const merged = this.#git(projectRoot, [
       '-c', 'core.hooksPath=/dev/null', 'merge', '--no-ff', '--no-edit',
       '-m', `Deliver Codex Harness task ${taskId} v${taskVersion}`, snapshotCommitSha,
@@ -217,7 +260,7 @@ export class WorktreeService {
     const deliveryCommitSha = this.#git(projectRoot, ['rev-parse', 'HEAD']).stdout;
     invariant(this.#git(projectRoot, ['merge-base', '--is-ancestor', snapshotCommitSha, deliveryCommitSha], { allowFailure: true }).ok,
       500, 'DELIVERY_MERGE_INVALID', 'Git 合并完成但交付 commit 未进入 owner 历史。');
-    return { deliveryCommitSha, alreadyDelivered: false };
+    return { deliveryCommitSha, alreadyDelivered: false, excludedLocalRepositories: ownerSnapshot.excludedLocalRepositories };
   }
 
   isReusableShare({ treePath }) {

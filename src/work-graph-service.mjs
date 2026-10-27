@@ -33,6 +33,7 @@ export class WorkGraphService {
     const checklist = task.checklist.map((item) => {
       const change = items.find((i) => i?.id === item.id);
       invariant(change && typeof change.done === 'boolean', 400, 'INVALID_CHECKLIST', '清单项无效。');
+      invariant(item.phase !== 'review' || !change.done, 400, 'REVIEW_ITEM_READ_ONLY', '审核项由提交后的审核流程核对，无需员工勾选。');
       return { ...item, done: change.done };
     });
     return this.store.transaction(() => {
@@ -69,7 +70,7 @@ export class WorkGraphService {
     if (previous) return previous;
     invariant(['active', 'rework'].includes(task.status) && task.version === body.taskVersion
       && task.checklistRevision === body.checklistRevision, 409, 'TASK_VERSION_CHANGED', '任务版本或清单已变化。');
-    invariant(task.checklist.every((item) => item.done), 409, 'CHECKLIST_INCOMPLETE', '请先完成全部清单项。');
+    invariant(task.checklist.every((item) => item.phase === 'review' || item.done), 409, 'CHECKLIST_INCOMPLETE', '请先完成全部提交前确认项。');
     this.idle(project.accessId);
     const kind = body.kind || 'codex';
     invariant(['codex', 'manual'].includes(kind), 400, 'INVALID_SUBMISSION_KIND', '提交来源无效。');
@@ -134,7 +135,7 @@ export class WorkGraphService {
         const project = this.member(task, run);
         if (task.status === 'submitted') {
           const submission = this.db.listSubmissionsForTask(task.id).find((s) => s.taskVersion === task.version && s.verdict === 'pending');
-          if (submission) this.scheduleReview(task, run, submission);
+          if (submission) { this.scheduleReview(task, run, submission); this.recoverDelivery(task, run, owner); }
           continue;
         }
         if (task.status !== 'ready') {
@@ -176,6 +177,34 @@ export class WorkGraphService {
     this.db.db.prepare('UPDATE workflow_runs SET last_checked_at=?,next_check_at=? WHERE id=?')
       .run(new Date().toISOString(), this.store.run(runId).status === 'passed' ? null : new Date(Date.now() + 30_000).toISOString(), runId);
     return { status: this.store.run(runId).status };
+  }
+
+  recoverDelivery(task, run, owner) {
+    // Reuse only an existing auto-review proposal, never replay an uncertain model.
+    // An unchanged workspace cannot reset the bounded attempt budget.
+    const rows = this.store.sql.prepare(`SELECT id FROM workflow_jobs WHERE task_id=? AND task_version=?
+      AND generation=? AND type='review.apply' AND status='needs_attention'
+      AND error_code IN ('DELIVERY_MERGE_CONFLICT','DELIVERY_UNSUPPORTED_ENTRY','DELIVERY_RESERVED_PATH','GIT_FAILED')`)
+      .all(task.id, task.version, run.generation);
+    if (!rows.length) return;
+    this.idle(owner.accessId);
+    for (const row of rows) {
+      const job = this.store.job(row.id);
+      if (!job.payload.deliveryBlockedState) continue; // Historical unknown failures need explicit recovery.
+      const state = this.worktrees.deliveryState(this.workspace.projectRoot(owner));
+      if (state === job.payload.deliveryBlockedState) continue;
+      this.store.transaction(() => {
+        this.store.assertRun(run.id, run.generation); this.member(task, run);
+        const changed = this.store.sql.prepare(`UPDATE workflow_jobs SET status='queued',attempt=0,due_at=?,error_code=NULL,
+          updated_at=? WHERE id=? AND status='needs_attention' AND generation=?`)
+          .run(Date.now(), new Date().toISOString(), job.id, run.generation);
+        if (changed.changes) {
+          this.block(task, 'WAITING_REVIEW');
+          this.store.event({ projectId: task.projectId, runId: run.id, taskId: task.id,
+            recipientId: task.assigneeUserId, type: 'delivery.retrying', payload: { version: task.version } });
+        }
+      });
+    }
   }
 
   handoffFor(taskId, version) {
@@ -247,31 +276,45 @@ export class WorkGraphService {
     const tasks = run && run.planId === plan.id ? this.store.tasks(run.id) : [];
     const safeRun = run ? { id: run.id, status: run.status, revision: run.revision, generation: run.generation,
       pausedReason: run.pausedReason, lastCheckedAt: run.lastCheckedAt, nextCheckAt: run.nextCheckAt,
-      reviewPolicy: run.reviewPolicy } : null;
+      reviewPolicy: run.reviewPolicy,
+      ...(owner ? { excludedLocalRepositories: run.authorization?.baseline?.excludedLocalRepositories || [] } : {}) } : null;
     return { id: roadmapId, projectId: roadmap.projectId, title: plan.graph.title,
       version: plan.version, owner, run: safeRun,
       plan: owner ? { id: plan.id, version: plan.version, graph: plan.graph, context: plan.context } : null,
       nodes: plan.graph.nodes.map((node) => {
         const task = tasks.find((t) => t.nodeKey === node.key);
+        const progress = task ? this.reviewProgress(task) : null;
+        const visibleTask = task && (owner || task.assigneeUserId === userId) ? this.publicTask(task, progress) : null;
         return { key: node.key, title: node.title, assigneeUserId: node.assigneeUserId,
           assigneeName: this.db.getUserById(node.assigneeUserId)?.displayName || '', dependsOn: node.dependsOn,
-          completionGate: node.completionGate, status: task?.status || 'draft', blockedReason: task?.blockedReason || null,
+          completionGate: node.completionGate, status: task?.status || 'draft',
+          blockedReason: progress?.status === 'needs_attention' ? progress.errorCode || 'WORKFLOW_JOB_FAILED' : task?.blockedReason || null,
           taskId: task?.id || null, version: task?.version || 1, dueAt: node.dueAt,
           reviewMode: run ? nodeReviewMode(node, run.reviewPolicy) : node.reviewMode || null,
-          ...(owner || task?.assigneeUserId === userId ? { task: task ? this.publicTask(task) : null,
+          ...(owner || task?.assigneeUserId === userId ? { task: visibleTask,
             requiredOutputs: node.outputs,
             attachments: (node.inputAttachmentIds || []).map(id => this.store.materials?.row(id)).filter(Boolean).map(row => this.store.materials.public(row)),
-            reviewJob: task ? this.db.db.prepare(`SELECT status,error_code AS errorCode FROM workflow_jobs
-              WHERE task_id=? AND task_version=? AND type='submission.review' ORDER BY created_at DESC LIMIT 1`).get(task.id, task.version) || null : null,
+            reviewJob: progress,
             submissions: task ? this.db.listSubmissionsForTask(task.id).map((s) => this.publicSubmission(s)) : [],
             reviews: task ? this.db.db.prepare('SELECT r.* FROM task_reviews r JOIN task_submissions s ON s.id=r.submission_id WHERE s.task_id=? ORDER BY r.created_at')
               .all(task.id).map((r) => ({ id: r.id, submissionId: r.submission_id, source: r.source, verdict: r.verdict,
                 status: r.status, detail: JSON.parse(r.detail_json), createdAt: r.created_at })) : [] } : {}) };
       }) };
   }
-  publicTask(task) { const { assignedAccessId, ...safe } = task;
+  reviewProgress(task) {
+    if (!task.workflowRunId) return null;
+    return this.db.db.prepare(`SELECT type,status,error_code AS errorCode,due_at AS dueAt FROM workflow_jobs
+      WHERE task_id=? AND task_version=? AND type IN ('submission.review','review.apply')
+        AND generation=(SELECT generation FROM workflow_runs WHERE id=?)
+      ORDER BY CASE type WHEN 'review.apply' THEN 0 ELSE 1 END,created_at DESC LIMIT 1`)
+      .get(task.id, task.version, task.workflowRunId) || null;
+  }
+
+  publicTask(task, progress = this.reviewProgress(task)) { const { assignedAccessId, ...safe } = task;
     const run = task.workflowRunId ? this.store.run(task.workflowRunId) : null;
-    return { ...safe, ...(this.store.materials ? { inputs: this.store.materials.current(task.id) } : {}), ...(run ? { workflowStatus: run.status, reviewMode: nodeReviewMode(this.node(task), run.reviewPolicy) } : {}) }; }
+    const access = task.blockedReason === 'INPUT_WORKTREE_DIRTY' ? this.db.getProjectAccessById(task.assignedAccessId) : null;
+    const pendingPaths = access?.status === 'active' && this.worktrees.isReusableShare({ treePath: access.treePath }) ? this.worktrees.pendingPaths(access.treePath) : [];
+    return { ...safe, pendingPaths, ...(progress?.status === 'needs_attention' ? { blockedReason: progress.errorCode || 'WORKFLOW_JOB_FAILED' } : {}), reviewProgress: progress, ...(this.store.materials ? { inputs: this.store.materials.current(task.id) } : {}), ...(run ? { workflowStatus: run.status, reviewMode: nodeReviewMode(this.node(task), run.reviewPolicy) } : {}) }; }
   publicSubmission(submission) {
     const { projectAccessId, codexThreadId, codexTurnId, finalItemId, ...safe } = submission;
     const inputs = this.db.db.prepare('SELECT revision,manifest_json FROM task_submission_inputs WHERE submission_id=?').get(submission.id);

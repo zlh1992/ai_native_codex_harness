@@ -12,7 +12,7 @@ const plannerTool = tool('work_graph_submit_plan', 'Validate and save a structur
       inputAttachmentIds: { type: 'array', items: { type: 'string' }, maxItems: 30 },
       key: { type: 'string' }, title: { type: 'string' }, assigneeUserId: { type: 'string' },
       acceptance: { type: 'string' }, dependsOn: { type: 'array', items: { type: 'string' } },
-      checklist: { type: 'array', items: { type: 'string' } }, outputs: { type: 'array', items: { type: 'string' } },
+      checklist: { type: 'array', items: { anyOf: [{ type: 'string' }, { type: 'object', properties: { text: { type: 'string' }, phase: { type: 'string', enum: ['delivery', 'review'] } }, required: ['text', 'phase'], additionalProperties: false }] } }, outputs: { type: 'array', items: { type: 'string' } },
       completionGate: { type: 'boolean' }, requiresIndependentValidation: { type: 'boolean' }, dueAt: { type: ['string', 'null'] },
     }, required: ['key', 'title', 'assigneeUserId', 'acceptance', 'dependsOn', 'checklist', 'outputs', 'completionGate'], additionalProperties: false } },
   }, required: ['schemaVersion', 'title', 'nodes'], additionalProperties: false } }, required: ['graph'], additionalProperties: false,
@@ -60,12 +60,15 @@ export class WorkGraphRuntime {
     this.store.owner(projectId, ownerId);
     const prior = this.store.sql.prepare('SELECT id FROM workflow_jobs WHERE dedupe_key=?').get(`generate:${projectId}:${key}`);
     if (prior) return this.store.job(prior.id);
+    const policy = reviewPolicy(body.reviewPolicy);
     const inputs = this.context.collect(projectId, ownerId, body);
+    inputs.reviewPolicy = policy;
+    inputs.reviewCapabilities = { evidenceReview: true, independentExecution: false };
     inputs.materials = body.attachmentIds?.length ? this.store.materials.select(body.attachmentIds, ownerId) : [];
     inputs.materialIds = inputs.materials.map(f => f.id);
     return this.store.enqueue({ projectId, ownerId, type: 'plan.generate', dedupeKey: `generate:${projectId}:${key}`,
       payload: { prompt, inputs, ownerEpoch: this.store.policyEpoch(ownerId), autoStart: body.autoStart === true,
-        reviewPolicy: reviewPolicy(body.reviewPolicy) } });
+        reviewPolicy: policy } });
   }
 
   async interruptMember(userId, projectId = null) {

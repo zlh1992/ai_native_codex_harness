@@ -6,7 +6,7 @@ import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
@@ -130,6 +130,13 @@ test('human Work Graph HTTP: planner, automatic files-only sharing, review/rewor
     staff.push(await login(user.username, password));
   }
   const { project } = await json(boss, '/api/projects', { method: 'POST', expect: 201, body: { name: 'Team Graph' } });
+  // This pre-existing owner-only clone previously broke planning and final delivery.
+  const setupDb = new DatabaseSync(path.join(base, 'harness.sqlite'), { readOnly: true });
+  const ownerProject = setupDb.prepare('SELECT user_id,slug FROM projects WHERE id=?').get(project.id); setupDb.close();
+  const ownerRoot = path.join(base, 'workspaces', ownerProject.user_id, ownerProject.slug);
+  const localClone = path.join(ownerRoot, 'source-clone'); fs.mkdirSync(localClone);
+  execFileSync('/usr/bin/git', ['-C', localClone, 'init'], { stdio: 'pipe' });
+  fs.writeFileSync(path.join(localClone, 'local.txt'), 'keep original owner-only source');
   const { job } = await json(boss, `/api/projects/${project.id}/work-graphs/generate`, { method: 'POST', expect: 202,
     body: { prompt: 'Make a team delivery plan', candidateIds: staff.map(s => s.user.id), autoStart: true,
       reviewPolicy: { mode: 'auto', finalMode: 'auto' }, idempotencyKey: randomUUID() } });
@@ -139,6 +146,8 @@ test('human Work Graph HTTP: planner, automatic files-only sharing, review/rewor
   const read = async () => (await json(boss, `/api/work-graphs/${graphId}`)).graph;
   let graph = await until(read, g => g.nodes[0].status === 'active');
   assert.equal(graph.nodes.length, 4);
+  assert.deepEqual(graph.plan.context.baseline.excludedLocalRepositories, ['source-clone']);
+  assert.deepEqual(graph.run.excludedLocalRepositories, ['source-clone']);
   assert.equal(graph.nodes[0].task.reviewMode, 'auto');
   const { chat: firstTaskChat } = await json(staff[0], `/api/tasks/${graph.nodes[0].taskId}/chat`, { method: 'POST', body: {} });
   const firstTaskContext = await json(staff[0], `/api/chats/${firstTaskChat.id}`);
@@ -148,6 +157,7 @@ test('human Work Graph HTTP: planner, automatic files-only sharing, review/rewor
   for (const employee of staff) {
     const visible = await json(employee, `/api/work-graphs/${graphId}`);
     assert.equal(visible.graph.plan, null);
+    assert.equal(visible.graph.run.excludedLocalRepositories, undefined);
     assert.ok(visible.graph.nodes.filter(n => n.assigneeUserId !== employee.user.id).every(n => !n.task && !n.submissions));
   }
   await request(boss, `/api/projects/${project.id}/file?path=forbidden-workflow-write.txt`, { expect: 404 });
@@ -155,7 +165,7 @@ test('human Work Graph HTTP: planner, automatic files-only sharing, review/rewor
     const current = await read(); const node = current.nodes.find(n => n.key === key);
     const employee = staff.find(s => s.user.id === node.assigneeUserId);
     const { task } = await json(employee, `/api/tasks/${node.taskId}/checklist`, { method: 'PATCH', body: {
-      taskVersion: node.task.version, revision: node.task.checklistRevision, items: node.task.checklist.map(i => ({ id: i.id, done: true })) } });
+      taskVersion: node.task.version, revision: node.task.checklistRevision, items: node.task.checklist.map(i => ({ id: i.id, done: i.phase !== 'review' })) } });
     const body = { taskVersion: task.version, checklistRevision: task.checklistRevision, kind: 'manual', resultSummary, idempotencyKey: randomUUID() };
     const result = await json(employee, `/api/tasks/${task.id}/submissions`, { method: 'POST', expect: 201, body });
     const again = await json(employee, `/api/tasks/${task.id}/submissions`, { method: 'POST', expect: 201, body });
@@ -182,6 +192,9 @@ test('human Work Graph HTTP: planner, automatic files-only sharing, review/rewor
   await submit('delivery', 'Final delivery complete');
   graph = await until(read, g => g.run.status === 'passed');
   assert.ok(graph.nodes.every(n => n.status === 'passed'));
+  assert.ok(graph.nodes.every(n => n.task.checklist.some(i => i.phase === 'review' && !i.done)));
+  assert.ok(graph.nodes.every(n => n.reviewJob.type === 'review.apply' && n.reviewJob.status === 'succeeded'));
+  assert.equal(fs.readFileSync(path.join(localClone, 'local.txt'), 'utf8'), 'keep original owner-only source');
   const { events } = await json(staff[1], `/api/projects/${project.id}/events?format=json`);
   assert.ok(events.length > 0);
   assert.ok(events.every(e => !JSON.stringify(e).includes('needs-rework')));
