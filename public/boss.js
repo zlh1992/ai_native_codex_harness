@@ -114,9 +114,9 @@ function renderProjects() {
       }
     }
     return `<article class="project-card ${mine ? 'mine' : ''}">
-      <div class="project-top"><div><h3>${escapeHtml(project.name)}</h3><p>${escapeHtml(project.description || project.slug)}</p></div><span class="scope-tag">${mine ? 'OWNER' : 'METADATA ONLY'}</span></div>
+      <div class="project-top"><div><h3>${escapeHtml(project.name)}${project.archived ? " · 已归档" : ""}</h3><p>${escapeHtml(project.description || project.slug)}</p></div><span class="scope-tag">${mine ? 'OWNER' : 'METADATA ONLY'}</span></div>
       <div class="project-meta"><div><small>所有者</small><b>${escapeHtml(project.displayName || project.username)}</b></div><div><small>授权工作树</small><b>${shares.length ? `${shares.length} 个独立 worktree` : project.repoKind === 'git' ? 'Git ready' : '未初始化 Git'}</b></div></div>
-      <div class="project-actions">${actions}</div>
+      <div class="project-actions">${actions}${mine ? `<button class="secondary" data-archive="${project.id}">${project.archived ? "恢复项目" : "归档项目"}</button><button class="secondary danger" data-delete-project="${project.id}">永久删除 · 释放空间</button>` : ""}</div>
     </article>`;
   }).join('') || '<div class="empty">还没有项目。</div>';
 
@@ -155,7 +155,7 @@ async function openUser(user = null) {
   $('[name=username]', form).value = user?.username || '';
   $('[name=username]', form).disabled = Boolean(user);
   $('[name=displayName]', form).value = user?.displayName || '';
-  $('[name=password]', form).required = !user;
+  $('[name=password]', form).required = false;
   $('[name=maxProjects]', form).value = user?.maxProjects || 100;
   $('[name=maxStorageGb]', form).value = Math.max(1, Math.round((user?.maxStorageBytes || 2 * 1024 ** 3) / 1024 ** 3));
   $('[name=maxConcurrentTurns]', form).value = user?.maxConcurrentTurns || 40;
@@ -268,7 +268,11 @@ $('#confirm-form').addEventListener('submit', async (event) => {
   submit.disabled = true;
   try {
     if (pendingShare) await grant(pendingShare.projectId, pendingShare.userId, pendingShare.token);
-    else await revoke(pending.projectId, pending.accessId);
+        else if (pending.permanent) {
+      await api(`/api/projects/${pending.projectId}?permanent=1`, { method: 'DELETE', headers: { 'x-confirm-project-id': pending.projectId } });
+      await load();
+    } else await revoke(pending.projectId, pending.accessId);
+
     state.pendingRevoke = null; state.pendingMemoryShare = null;
     $('#confirm-dialog').close();
   } catch (error) {
@@ -292,7 +296,13 @@ $('#user-form').addEventListener('submit', async (event) => {
     networkAccess: form.get('networkAccess') === 'on',
   };
   if (!id) body.username = form.get('username');
-  if (form.get('password')) body.password = form.get('password');
+  if (form.get('password')) {
+    if (form.get('password') !== form.get('passwordConfirmation')) {
+      $('.form-error', target).textContent = '两次输入的密码不一致。'; return;
+    }
+    body.password = form.get('password');
+    body.passwordConfirmation = form.get('passwordConfirmation');
+  }
   if (id) body.status = form.get('active') === 'on' ? 'active' : 'disabled';
   try {
     const saved = await api(id ? `/api/admin/users/${id}` : '/api/admin/users', { method: id ? 'PATCH' : 'POST', body });
@@ -345,3 +355,24 @@ async function bootstrap() {
 }
 
 bootstrap();
+
+$('#project-grid').addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-archive], [data-delete-project]');
+  if (!button) return;
+  const project = state.data.projects.find((item) => item.id === (button.dataset.archive || button.dataset.deleteProject));
+  if (!project) return;
+  try {
+    if (button.dataset.archive) {
+      await api(`/api/projects/${project.id}/archive`, { method: 'POST', body: { archived: !project.archived } });
+    } else {
+      state.pendingRevoke = { projectId: project.id, permanent: true };
+      $('#confirm-form h2').textContent = '永久删除项目';
+      $('#confirm-message').textContent = `永久删除“${project.name}”及全部文件和对话？此操作不可恢复，会释放空间。共享或运行中的项目须先处理。`;
+      $('#confirm-dialog-submit').textContent = '永久删除';
+      $('.form-error', $('#confirm-form')).textContent = '';
+      $('#confirm-dialog').showModal();
+      return;
+    }
+    await load();
+  } catch (error) { toast(error.message, 'error'); }
+});

@@ -90,7 +90,7 @@ async function request(session, pathname, { method = 'GET', body, headers = {}, 
 
 async function login(username, password) {
   const endpoint = username === 'gateboss' ? '/api/boss/login' : '/api/employee/login';
-  const response = await request(null, endpoint, { method: 'POST', body: { username, password } });
+  const response = await request(null, endpoint, { method: 'POST', body: { username, password, passwordConfirmation: password } });
   const cookie = String(response.headers.get('set-cookie') || '').split(';')[0];
   assert.match(cookie, /^codex_harness_session=/);
   const session = { cookie, csrf: '' };
@@ -165,10 +165,10 @@ test('fixed Portal release gate', { timeout: 60_000 }, async (t) => {
 
   await t.test('boss creates two employees and grants isolated worktrees from one project snapshot', async () => {
     firstUser = (await json(boss, '/api/admin/users', {
-      method: 'POST', body: { username: 'gatefirst', displayName: 'Gate First', password: passwords.first, maxProjects: 10, maxStorageBytes: 1024 ** 3, maxConcurrentTurns: 4 }, expect: 201,
+      method: 'POST', body: { username: 'gatefirst', displayName: 'Gate First', password: passwords.first, passwordConfirmation: passwords.first, maxProjects: 10, maxStorageBytes: 1024 ** 3, maxConcurrentTurns: 4 }, expect: 201,
     })).user;
     secondUser = (await json(boss, '/api/admin/users', {
-      method: 'POST', body: { username: 'gatesecond', displayName: 'Gate Second', password: passwords.second, maxProjects: 10, maxStorageBytes: 1024 ** 3, maxConcurrentTurns: 4 }, expect: 201,
+      method: 'POST', body: { username: 'gatesecond', displayName: 'Gate Second', password: passwords.second, passwordConfirmation: passwords.second, maxProjects: 10, maxStorageBytes: 1024 ** 3, maxConcurrentTurns: 4 }, expect: 201,
     })).user;
     project = (await json(boss, '/api/projects', {
       method: 'POST', body: { name: 'Release gate project', description: 'multi-employee isolation' }, expect: 201,
@@ -192,7 +192,7 @@ test('fixed Portal release gate', { timeout: 60_000 }, async (t) => {
       method: 'POST', body: { title: 'Owner design history' }, expect: 201,
     })).chat;
     const ownerModels = (await json(boss, '/api/me')).models.map((model) => model.id);
-    assert.deepEqual(ownerModels, ['gpt-6.1-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']);
+    assert.deepEqual(ownerModels, ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']);
     await request(boss, `/api/chats/${ownerChat.id}`, { method: 'PATCH', body: { preferredModel: 'arbitrary-model' }, expect: 400 });
     await request(boss, `/api/chats/${ownerChat.id}`, { method: 'PATCH', body: { preferredModel: 'gpt-reserve' }, expect: 400 });
     await request(boss, `/api/chats/${ownerChat.id}`, { method: 'PATCH', body: { preferredModel: 'codex-auto-review' }, expect: 400 });
@@ -399,7 +399,7 @@ test('fixed Portal release gate', { timeout: 60_000 }, async (t) => {
   await t.test('role portals reject wrong accounts and shared chat forks keep history and execution private', async () => {
     assert.match(await (await request(null, '/boss/login')).text(), /老板登录/);
     assert.match(await (await request(null, '/employee')).text(), /员工登录/);
-    await request(null, '/api/employee/login', { method: 'POST', body: { username: 'gateboss', password: 'GateBossPassword!123' }, expect: 403 });
+    await request(null, '/api/employee/login', { method: 'POST', body: { username: 'gateboss', password: 'GateBossPassword!123', passwordConfirmation: 'GateBossPassword!123' }, expect: 403 });
     await request(null, '/api/boss/login', { method: 'POST', body: { username: 'gatefirst', password: passwords.first }, expect: 403 });
     const first = await login('gatefirst', passwords.first);
     const second = await login('gatesecond', passwords.second);
@@ -414,7 +414,7 @@ test('fixed Portal release gate', { timeout: 60_000 }, async (t) => {
     assert.equal((await json(first, '/api/me')).defaultEffort, 'medium');
     assert.equal((await json(boss, '/api/me')).defaultEffort, 'high');
     const employeeModelIds = (await json(first, '/api/me')).models.map((model) => model.id);
-    assert.deepEqual(employeeModelIds, ['gpt-6.1-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']);
+    assert.deepEqual(employeeModelIds, ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']);
     assert.equal(fork.preferredEffort, null);
     await request(first, `/api/chats/${fork.id}`, { method: 'PATCH', body: { preferredModel: 'gpt-6-astra' }, expect: 400 });
     for (const model of (await json(first, '/api/me')).models) {
@@ -646,6 +646,48 @@ test('fixed Portal release gate', { timeout: 60_000 }, async (t) => {
     assert.equal(auditText.includes('fake secret diff body'), false);
   });
 
+  await t.test('Fast ACL, shared archive metadata, permanent owner deletion and self password change', async () => {
+    const first = await login('gatefirst', passwords.first);
+    const own = (await json(first, '/api/projects', { method: 'POST', body: { name: 'Employee archive' }, expect: 201 })).project;
+    const chat = (await json(first, `/api/projects/${own.id}/chats`, { method: 'POST', body: { title: 'Fast' }, expect: 201 })).chat;
+    await request(boss, `/api/chats/${chat.id}`, { method: 'PATCH', body: { fastMode: true }, expect: 403 });
+    await request(first, `/api/chats/${chat.id}`, { method: 'PATCH', body: { fastMode: 'true' }, expect: 400 });
+    assert.equal((await json(first, `/api/chats/${chat.id}`, { method: 'PATCH', body: { fastMode: true } })).chat.fastMode, true);
+    assert.equal((await json(first, `/api/chats/${chat.id}`)).chat.fastMode, true);
+    await request(first, `/api/projects/${own.id}/archive`, { method: 'POST', body: { archived: true } });
+    assert.equal((await json(boss, '/api/admin/dashboard')).projects.find((p) => p.id === own.id).archived, true);
+    await request(boss, `/api/projects/${own.id}?permanent=1`, { method: 'DELETE', headers: { 'x-confirm-project-id': own.id }, expect: 403 });
+    await request(first, `/api/projects/${project.id}/archive`, { method: 'POST', body: { archived: true } });
+    assert.equal((await json(boss, `/api/projects/${project.id}`)).project.archived, true);
+    await request(boss, `/api/projects/${project.id}/archive`, { method: 'POST', body: { archived: false } });
+    const disposable = (await json(boss, '/api/projects', { method: 'POST', body: { name: 'Delete disposable' }, expect: 201 })).project;
+    await request(boss, `/api/projects/${disposable.id}?permanent=1`, { method: 'DELETE', expect: 400 });
+    const root = path.join(base, 'workspaces', boss.user.id, disposable.slug);
+    assert.equal(fs.existsSync(root), true);
+    const deleted = await json(boss, `/api/projects/${disposable.id}?permanent=1`, { method: 'DELETE', headers: { 'x-confirm-project-id': disposable.id } });
+    assert.equal(deleted.recoverable, false);
+    await request(boss, `/api/projects/${disposable.id}`, { expect: 403 });
+    assert.equal(fs.existsSync(root), false);
+    assert.equal(fs.readdirSync(path.join(base, 'trash', boss.user.id, 'projects')).some((entry) => entry.includes(disposable.id)), false);
+    const account = (await json(boss, '/api/admin/users', { method: 'POST', body: { username: 'selfchange' }, expect: 201 })).user;
+    const employee = await login('selfchange', '123321123321');
+    const otherSession = await login('selfchange', '123321123321');
+    const password = 'ChangedByEmployee!123';
+    await request(employee, '/api/me/password', { method: 'POST', body: { password, passwordConfirmation: 'mismatch' }, expect: 400 });
+    await request(boss, `/api/admin/users/${account.id}`, { method: 'PATCH', body: { password, passwordConfirmation: 'mismatch' }, expect: 400 });
+    const selfProject = (await json(employee, '/api/projects', { method: 'POST', body: { name: 'Self drain' }, expect: 201 })).project;
+    const selfChat = (await json(employee, `/api/projects/${selfProject.id}/chats`, { method: 'POST', body: { title: 'Self drain' }, expect: 201 })).chat;
+    const held = request(employee, `/api/chats/${selfChat.id}/turns`, { method: 'POST', body: { prompt: '[[hold]] self change', mode: 'edit' } });
+    await waitUntil(async () => (await json(employee, `/api/chats/${selfChat.id}`)).latestTurnRun?.status === 'running', 'self password turn did not start');
+    await request(employee, '/api/me/password', { method: 'POST', body: { password, passwordConfirmation: password } });
+    assert.ok(parseSse(await (await held).text()).some((event) => event.event === 'turn_error'));
+    await request(employee, '/api/me', { expect: 401 });
+    await request(otherSession, '/api/me', { expect: 401 });
+    await login('selfchange', password);
+    const auditText = JSON.stringify(await json(boss, '/api/admin/audit'));
+    assert.equal(auditText.includes(password), false);
+  });
+
   await t.test('password reset revokes sessions and drains the employee turn before returning', async () => {
     const second = await login('gatesecond', passwords.second);
     const resetChat = (await json(second, `/api/projects/${project.id}/chats`, {
@@ -657,7 +699,7 @@ test('fixed Portal release gate', { timeout: 60_000 }, async (t) => {
     await waitUntil(async () => (await json(second, `/api/chats/${resetChat.id}`)).latestTurnRun?.status === 'running',
       'password reset test turn never started');
     const nextPassword = 'EmployeeTwoReset!123';
-    await request(boss, `/api/admin/users/${secondUser.id}`, { method: 'PATCH', body: { password: nextPassword } });
+    await request(boss, `/api/admin/users/${secondUser.id}`, { method: 'PATCH', body: { password: nextPassword, passwordConfirmation: nextPassword } });
     assert.ok(parseSse(await (await heldTurn).text()).some((event) => event.event === 'turn_error'));
     await request(second, '/api/me', { expect: 401 });
     passwords.second = nextPassword;

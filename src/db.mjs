@@ -352,6 +352,8 @@ export class HarnessDatabase {
     this.#ensureColumn('chats', 'use_memory', 'INTEGER NOT NULL DEFAULT 1');
     this.#ensureColumn('chats', 'save_memory', 'INTEGER NOT NULL DEFAULT 1');
     this.#ensureColumn('chats', 'memory_context_reset_at', 'TEXT');
+    this.#ensureColumn('chats', 'fast_mode', 'INTEGER NOT NULL DEFAULT 0');
+    this.#ensureColumn('projects', 'archived', 'INTEGER NOT NULL DEFAULT 0');
     this.#ensureColumn('chats', 'preferred_mode', "TEXT NOT NULL DEFAULT 'execute' CHECK(preferred_mode IN ('edit','execute'))");
     this.#ensureColumn('chats', 'channel_tools_version', 'INTEGER NOT NULL DEFAULT 0');
     this.#ensureColumn('project_access', 'base_sha', 'TEXT');
@@ -564,6 +566,7 @@ export class HarnessDatabase {
   mapProject(row) {
     return row ? {
       id: row.id, userId: row.user_id, slug: row.slug, name: row.name,
+      archived: Boolean(row.archived),
       projectType: row.project_type || 'standard',
       description: row.description, createdAt: row.created_at, updatedAt: row.updated_at,
       username: row.username, displayName: row.display_name,
@@ -699,6 +702,11 @@ export class HarnessDatabase {
     return this.getProject(id);
   }
 
+  setProjectArchived(id, archived) {
+    this.db.prepare('UPDATE projects SET archived=?,updated_at=? WHERE id=?').run(archived ? 1 : 0, now(), id);
+    return this.getProject(id);
+  }
+
   touchProject(id) { this.db.prepare('UPDATE projects SET updated_at=? WHERE id=?').run(now(), id); }
   deleteProject(id) { this.db.prepare('DELETE FROM projects WHERE id=?').run(id); }
 
@@ -808,6 +816,7 @@ export class HarnessDatabase {
       codexThreadId: row.codex_thread_id, status: row.status, archivedAt: row.archived_at || null,
       purpose: row.purpose || 'normal', workflowJobId: row.workflow_job_id || null,
       preferredMode: row.preferred_mode || 'execute',
+      fastMode: Boolean(row.fast_mode),
       preferredModel: row.preferred_model || null,
       preferredEffort: row.preferred_effort || null,
       controlMode: row.control_mode || 'manual', localSessionId: row.local_session_id || null,
@@ -847,6 +856,7 @@ export class HarnessDatabase {
     for (const [key, column] of [
       ['archivedAt', 'archived_at'], ['title', 'title'], ['codexThreadId', 'codex_thread_id'], ['status', 'status'],
       ['taskId', 'task_id'], ['taskVersion', 'task_version'], ['threadState', 'thread_state'],
+      ['fastMode', 'fast_mode'],
       ['threadError', 'thread_error'], ['preferredMode', 'preferred_mode'], ['preferredModel', 'preferred_model'], ['preferredEffort', 'preferred_effort'],
       ['controlMode', 'control_mode'], ['localSessionId', 'local_session_id'],
       ['useMemory', 'use_memory'], ['saveMemory', 'save_memory'],

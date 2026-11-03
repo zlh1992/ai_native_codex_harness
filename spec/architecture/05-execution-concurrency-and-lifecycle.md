@@ -135,3 +135,5 @@ Codex 主客户端在 active-root 过滤之前计量 root/子代理和迟到通�
 ## 微信与任务资料扩展
 
 微信消息按连接串行处理；文件接收不调用模型。派发后台等待来源空闲后复用 Work Graph，明确发布不自动替员工执行。输入补充下一轮生效，旧运行/旧提交版本固定；旧 chat 仅在派发相关请求时按工具版本迁移并保存 lineage。详见 [微信生命周期](12-weixin-task-dispatch.md)。
+
+Fast 模式在每个 run 创建时冻结；HTTP 或 portal_fast_mode 在运行中修改只作用于后续 root turn，包括后续队列输入，不改变已运行 context。Fast 开启时覆盖 effort 为 high、model 为 gpt-6-luna，turn/start 显式发送 serviceTier=fast，关闭时发送 null 清除上一轮服务等级。不会重建 thread 或更改子代理策略。上游失败沿用既有错误处理，不静默换模型。

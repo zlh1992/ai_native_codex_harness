@@ -145,3 +145,5 @@ submission 的 chat/run 外键使用 `ON DELETE SET NULL`，同时保存不可�
 ## 微信与任务资料扩展
 
 新增 task_materials/dispatches、task_input_revisions/usage/submission_inputs、task_notifications 和 weixin_connections/inbox/outbox 为独立业务事实源。正文与凭据不进 journal，dispatch 明细不复制正文、不做云端摘要。微信发送中/处理中重启标记 uncertain，不自动重放；网页未读与微信投递独立。task 深链接保留到登录返回、刷新和前进后退。详见 [派发恢复](12-weixin-task-dispatch.md)。
+
+Fast 和项目归档分别通过幂等 ADD COLUMN 增加 chats.fast_mode 与 projects.archived，旧行均默认为 0；迁移不改变旧模型偏好、历史、ACL 或密码。回退旧代码可以保留这两个附加字段，但旧界面不会展示归档或启用 Fast；永久删除的数据无法通过代码回退恢复，必须依赖删除前备份。

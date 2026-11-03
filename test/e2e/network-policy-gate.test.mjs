@@ -38,7 +38,7 @@ test('network defaults preserve old restrictions and a boss toggle takes effect 
     assert.equal(response.status, expected, `${method} ${route}`); return response.json();
   };
   const login = async (username, boss = false) => {
-    const response = await fetch(origin + (boss ? '/api/boss/login' : '/api/employee/login'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username, password: 'PolicyFixturePassword!123' }) });
+    const response = await fetch(origin + (boss ? '/api/boss/login' : '/api/employee/login'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username, password: 'PolicyFixturePassword!123', passwordConfirmation: 'PolicyFixturePassword!123' }) });
     assert.equal(response.status, 200); const session = { cookie: response.headers.get('set-cookie').split(';')[0], csrf: '' };
     const me = await json(session, '/api/me'); session.csrf = me.csrfToken; return session;
   };
@@ -46,7 +46,7 @@ test('network defaults preserve old restrictions and a boss toggle takes effect 
   const boss = await login('policyboss', true);
   assert.equal((await json(boss, '/api/me')).user.networkAccess, true);
   assert.equal((await json(boss, '/api/admin/dashboard')).defaults.networkAccess, true);
-  const create = body => json(boss, '/api/admin/users', 'POST', { password: 'PolicyFixturePassword!123', ...body }, 201);
+  const create = body => json(boss, '/api/admin/users', 'POST', { password: 'PolicyFixturePassword!123', passwordConfirmation: 'PolicyFixturePassword!123', ...body }, 201);
   const old = (await create({ username: 'policyold', networkAccess: false })).user;
   const fresh = (await create({ username: 'policynew' })).user;
   assert.equal(old.networkAccess, false); assert.equal(fresh.networkAccess, true);

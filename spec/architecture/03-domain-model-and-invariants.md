@@ -148,7 +148,7 @@ queued -> starting -> running -> completed
 
 ## 对话模型与推理强度偏好
 
-`chats.preferred_model` 与 `chats.preferred_effort` 为 nullable、按对话保存的 root 偏好。老板与员工均可在自己的普通项目/任务对话选择 Portal 模型白名单；该目录由部署策略控制，老板和员工相同；当前仅允许 GPT-6.1 Sol 及 GPT-5.6 Sol/Terra/Luna，不包含 Astra、隐藏 reserve 或内部审核模型。默认模型来自 `CODEX_MODEL`。员工默认强度 medium，老板默认 `CODEX_REASONING_EFFORT`（默认 high）；强度解析依次为本次显式请求、chat 偏好、角色默认，非法值拒绝。已有模型偏好保留；当偏好模型退出当前白名单时，不改写数据库值，运行按当前 `CODEX_MODEL` 执行，新的 API 选择仍拒绝退役 ID。旧 chat 强度为 null，不回写历史运行。分享的新副本不复制模型/强度偏好，采用接收者默认；恢复既有授权保留原 chat 偏好。隐私项目不能设置这些 GPT 偏好，后台 planner/reviewer 不接受浏览器修改。
+`chats.preferred_model` 与 `chats.preferred_effort` 为 nullable、按对话保存的 root 偏好。老板与员工均可在自己的普通项目/任务对话选择 Portal 模型白名单；该目录由部署策略控制，老板和员工相同；当前允许 GPT-6 Luna、GPT-6.1 Sol 及 GPT-5.6 Sol/Terra/Luna，不包含 Astra、隐藏 reserve 或内部审核模型。默认模型来自 `CODEX_MODEL`。员工默认强度 medium，老板默认 `CODEX_REASONING_EFFORT`（默认 high）；强度解析依次为本次显式请求、chat 偏好、角色默认，非法值拒绝。已有模型偏好保留；当偏好模型退出当前白名单时，不改写数据库值，运行按当前 `CODEX_MODEL` 执行，新的 API 选择仍拒绝退役 ID。旧 chat 强度为 null，不回写历史运行。分享的新副本不复制模型/强度偏好，采用接收者默认；恢复既有授权保留原 chat 偏好。隐私项目不能设置这些 GPT 偏好，后台 planner/reviewer 不接受浏览器修改。
 
 模型和强度仅在没有运行、恢复或待处理输入时修改；队列保存入队时的强度，run 冻结模型/强度。后续偏好不能改写已经派发或排队的工作；steer 沿用当前 turn 配置。上游不支持模型/强度时显式失败，不静默降级。
 
@@ -184,3 +184,9 @@ steering -> paused (delivery uncertain; never automatically resend)
 ## 微信与任务资料扩展
 
 任务输入资料独立于上游成果 inputManifest；连接、资料、派发回执、输入 revision、采用版本及通知的领域关系见 [微信派发](12-weixin-task-dispatch.md)。每批一个协作项目，整个项目仍是共享边界。
+
+## Fast、归档与自助密码
+- chats.fast_mode 默认为 false，独立于原模型偏好。所有角色都可修改自己的普通项目/任务 chat（隐私项目和后台调度 chat 拒绝）；true 时后续 root turn 固定 gpt-6-luna/high/fast，false 恢复原模型/请求推理强度。分享副本不复制 Fast 偏好。
+- projects.archived 是项目全局展示状态，有效 owner/shared access 可归档或恢复；老板全局元数据可见已归档。归档不撤权、不删除、不暂停任务；工作台默认隐藏且可显示恢复。
+- 老板可显式永久删除自己的项目；普通 DELETE 继续可恢复。永久删除同样拒绝 active share、busy runtime 和 retained worktree，不授予老板员工项目删除权。
+- 员工可自行改密，双输入一致且满足既有长度约束；成功更新撤销全部会话并排空任务。新员工可使用产品约定初始口令，现有账号不迁移密码。

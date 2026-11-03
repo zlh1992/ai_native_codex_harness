@@ -19,6 +19,11 @@ const TURN_MODES = new Set(['edit', 'execute']);
 
 const DYNAMIC_TOOLS = Object.freeze([
   {
+    type: 'function', name: 'portal_fast_mode',
+    description: 'Enable or disable GPT-6 Luna high reasoning with Fast service tier for subsequent turns in this private chat. Does not change the current turn.',
+    inputSchema: { type: 'object', properties: { enabled: { type: 'boolean' } }, required: ['enabled'], additionalProperties: false },
+  },
+  {
     type: 'function', name: 'workspace_list',
     description: 'List files and directories inside this user project. Paths are project-relative.',
     inputSchema: { type: 'object', properties: { path: { type: 'string' }, max_depth: { type: 'integer', minimum: 1, maximum: 12 } }, additionalProperties: false },
@@ -607,7 +612,7 @@ export class CodexService extends EventEmitter {
     const userActive = [...this.activeByChat.values()].filter((entry) => entry.user.id === user.id).length;
     const userPending = this.pendingByUser.get(user.id) || 0;
     invariant(userActive + userPending < user.maxConcurrentTurns, 429, 'USER_CONCURRENCY_LIMIT', '已达到该用户的并发任务上限。');
-    const reasoningEffort = rootEffort(this.config, chat, user, effort);
+    const reasoningEffort = chat.fastMode ? 'high' : rootEffort(this.config, chat, user, effort);
     if (chat.taskId) {
       const task = this.db.getTaskForUser(chat.taskId, user.id);
       invariant(task && task.projectId === project.id, 403, 'TASK_FORBIDDEN', '任务不存在或不属于你。');
@@ -745,6 +750,7 @@ export class CodexService extends EventEmitter {
         cwd: this.workspace.projectRoot(project),
         model: context.model,
         effort: reasoningEffort,
+        serviceTier: chat.fastMode ? 'fast' : null,
         approvalPolicy: 'on-request',
         approvalsReviewer: 'user',
         sandboxPolicy: { type: 'readOnly', networkAccess: false },
@@ -1429,6 +1435,11 @@ export class CodexService extends EventEmitter {
     const project = this.db.getProjectForUser(active.project.id, user.id);
     invariant(project && project.accessId === active.project.accessId, 403, 'PROJECT_ACCESS_REVOKED', '项目授权已撤销。');
     if (this.wechatOwnerProjects.handles(name)) return this.wechatOwnerProjects.call(active, name, args);
+    if (name === 'portal_fast_mode') {
+      invariant(typeof args.enabled === 'boolean', 400, 'INVALID_FAST_MODE', 'enabled 必须是布尔值。');
+      this.db.updateChat(active.chat.id, { fastMode: args.enabled ? 1 : 0 });
+      return { fastMode: args.enabled, effective: 'next_turn', model: args.enabled ? 'gpt-6-luna' : rootModel(this.config, { ...active.chat, fastMode: false }, user), effort: args.enabled ? 'high' : null, serviceTier: args.enabled ? 'fast' : null };
+    }
     if (name === 'workspace_list') {
       return this.workspace.tree(project, args.path || '', Math.min(12, Math.max(1, Number(args.max_depth) || 5)));
     }

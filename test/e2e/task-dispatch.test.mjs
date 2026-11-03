@@ -39,12 +39,12 @@ test('dispatch HTTP and Chrome: old conversation upgrade, ACL, immutable inputs,
   };
   const json = async (...args) => (await request(...args)).json();
   const login = async (username, boss = false) => {
-    const res = await request(null, `/api/${boss ? 'boss' : 'employee'}/login`, { method: 'POST', body: { username, password: 'DispatchFixture!123' } });
+    const res = await request(null, `/api/${boss ? 'boss' : 'employee'}/login`, { method: 'POST', body: { username, password: 'DispatchFixture!123', passwordConfirmation: 'DispatchFixture!123' } });
     const session = { cookie: res.headers.get('set-cookie').split(';')[0] }; session.csrf = (await json(session, '/api/me')).csrfToken; return session;
   };
   await start(false); const boss = await login('dispatchboss', true);
-  const { user: employee } = await json(boss, '/api/admin/users', { method: 'POST', status: 201, body: { username: 'dispatchstaff', displayName: '张三', password: 'DispatchFixture!123', maxStorageBytes: 1024 ** 3 } });
-  const { user: other } = await json(boss, '/api/admin/users', { method: 'POST', status: 201, body: { username: 'dispatchother', displayName: '李四', password: 'DispatchFixture!123' } });
+  const { user: employee } = await json(boss, '/api/admin/users', { method: 'POST', status: 201, body: { username: 'dispatchstaff', displayName: '张三', password: 'DispatchFixture!123', passwordConfirmation: 'DispatchFixture!123', maxStorageBytes: 1024 ** 3 } });
+  const { user: other } = await json(boss, '/api/admin/users', { method: 'POST', status: 201, body: { username: 'dispatchother', displayName: '李四', password: 'DispatchFixture!123', passwordConfirmation: 'DispatchFixture!123' } });
   const staff = await login('dispatchstaff'), stranger = await login(other.username);
   const { project } = await json(boss, '/api/projects', { method: 'POST', status: 201, body: { name: '老板收件箱' } });
   const { chat } = await json(boss, `/api/projects/${project.id}/chats`, { method: 'POST', status: 201, body: { title: '现有对话' } });

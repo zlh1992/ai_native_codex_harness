@@ -38,7 +38,7 @@
 - **FS-002**：`.git`、`.codex` 及共享 worktree 的 Git indirection 不得通过文件 API、workspace tool、原生 file-change approval 或 Seatbelt 暴露；原生 approval 无法取得完整目标集合时必须拒绝。
 - **FS-003**：共享项目必须为每个 active 员工建立独立 `project_access` 和 worktree；同一项目同一员工最多一个 active access。新授权必须先把 owner 当前 Git 可见的 tracked/untracked/删除状态提交为不可变基线，并将 `base_sha` 返回和持久化；不能从旧 HEAD 建树后留下一个未绑定的易变 patch。窄例外是完全未跟踪的嵌套 Git 仓库：owner 快照排除并返回排除清单，保留原目录及内容；交付不得触及这些目录。已跟踪 gitlink、员工提交中的 gitlink/符号链接及保留路径仍拒绝，不自动移动或删除文件。
 - **FS-004**：同一 chat 任一时刻最多一个 active root turn；同一 access/worktree 的不同 chat 可以并发。浏览器文件修改、submission 快照与 owner delivery 必须等待整个 access/worktree 空闲。浏览器编辑器覆盖既有文件时必须携带读取所得 SHA-256 `If-Match` 版本；stale save 返回 `FILE_VERSION_CONFLICT`，不能静默覆盖另一标签页或先前写入。并发 turn/命令若修改同一文件可能相互观察或覆盖，当前不承诺自动冲突解决。
-- **FS-005**：删除文件或项目默认移动到项目 trash，不能在普通 Web 流程中不可恢复销毁。
+- **FS-005**：删除文件或项目默认移动到项目 trash，普通删除仍可恢复；老板可显式永久删除自己的项目释放空间，保留全部生命周期和交付历史保护。
 - **FS-006**：命令环境不得继承 Portal、隧道、Codex 或其他项目秘密；新普通账号默认联网，可在创建或之后按用户关闭，既有账号的联网位不随默认值改变。隐私项目命令一律禁网。仅获准联网的普通项目使用当前系统 HTTP/HTTPS 代理或显式无凭据代理；禁网也禁止连接本地代理。命令 `HOME`/`TMPDIR` 按 user.id + project_access.id 隔离，不能跨项目复用。
 - **FS-007**：项目 HTML 必须默认以可切回源码的受限 iframe 渲染。iframe 与 HTML HTTP 响应都必须 sandbox，禁止 `allow-same-origin`、表单、弹窗、顶层导航、嵌套 frame、worker 和网络 API；不得为了预览把项目脚本提升为 Portal 同源脚本，或绕过 `project_access`、canonical path 与文件读取边界。
 
@@ -74,7 +74,7 @@
 ## 明确未承诺
 
 - 敌对互联网多租户、组织级数据隔离或按用户独立上游计费。
-- OIDC、MFA、邀请、首次强制改密、用户自助改密、设备会话管理。
+- OIDC、MFA、邀请、首次强制改密、设备会话管理。
 - 每 task/chat 独立 worktree、同文件并发冲突自动解决、PR 或完整代码审核 UI；当前只承诺 access worktree 的提交快照与 `passed` owner merge。
 - 任意顶层 chat 实时互发消息或持续 transcript 同步；同一用户的 Portal 记忆召回和显式 share 的一次性完整历史 fork 已纳入支持，但不构成跨用户记忆共享。
 - Linux/Windows 命令沙箱兼容性。

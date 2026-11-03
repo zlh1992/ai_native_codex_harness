@@ -49,6 +49,8 @@
         <span id="model-badge" class="model-badge"></span>
         <select id="model-select" class="model-badge hidden" aria-label="对话模型" title="选择当前对话的模型；任务和队列结束后可切换" disabled></select>
         <span id="user-chip" class="user-chip"></span>
+        <button id="change-password" class="secondary">修改密码</button>
+        <button id="fast-mode" class="secondary" disabled>Fast：关闭</button>
         <button id="home-button" class="icon-button" data-view="tasks" title="返回任务看板，保留登录">返回首页</button>
         <button id="logout-button" class="icon-button logout-button" title="退出当前账号">退出登录</button>
       </div>
@@ -86,6 +88,7 @@
           <div><p class="eyebrow">WORKSPACES</p><h2>项目</h2></div>
           <button id="new-project" class="square-button" title="新建项目">＋</button>
         </div>
+        <label><input id="show-archived" type="checkbox">显示已归档项目</label>
         <div id="project-list" class="project-list empty-state">暂无项目</div>
         <div class="storage-card">
           <div><span>空间用量</span><b id="storage-label">0 B</b></div>
@@ -237,5 +240,16 @@
       <div class="dialog-actions"><button class="secondary" value="cancel" formnovalidate>返回</button><button id="queue-edit-save" class="primary" value="save">保存修改</button></div>
     </form>
   </dialog>
+<dialog id="password-dialog">
+  <form id="password-form">
+    <h2>修改登录密码</h2>
+    <label>新密码<input name="password" type="text" minlength="12" maxlength="256" autocomplete="new-password" required></label>
+    <label>再次输入新密码<input name="passwordConfirmation" type="text" minlength="12" maxlength="256" autocomplete="new-password" required></label>
+    <p>修改后会退出所有登录并停止当前任务，请重新登录。</p>
+    <p id="password-error" class="form-error"></p>
+    <button type="submit" value="cancel" formnovalidate>取消</button>
+    <button type="submit">确认修改</button>
+  </form>
+</dialog>
 </body>
 </html>

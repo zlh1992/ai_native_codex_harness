@@ -2,6 +2,7 @@ import { invariant } from './errors.mjs';
 
 // Deployment-approved root models, shared by boss, employees and channel commands.
 export const ROOT_MODELS = Object.freeze([
+  { id: 'gpt-6-luna', label: 'GPT-6 Luna' },
   { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol' },
   { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
   { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
@@ -14,6 +15,7 @@ export function validateModel(model) {
 }
 
 export function rootModel(config, chat, user) {
+  if (chat?.fastMode) return 'gpt-6-luna';
   // Retired preferences stay stored for history, but run with the current
   // configured default. New API selections still pass through validateModel.
   return chat?.preferredModel && ROOT_MODELS.some((entry) => entry.id === chat.preferredModel)

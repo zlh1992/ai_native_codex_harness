@@ -106,3 +106,5 @@
 - [2026-10-20 项目对话归档](2026-10-20-chat-archive.md)
 
 - [2026-10-27 微信项目授权查询与语音转写](2026-10-27-weixin-project-voice.md)
+
+- [Fast、归档、密码与公网部署](2026-11-04-fast-archive-password.md)

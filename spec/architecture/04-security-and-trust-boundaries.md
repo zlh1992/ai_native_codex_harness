@@ -150,3 +150,9 @@ reviewer root 必须在当前 turn 读取固定上下文，方可提交审核意
 ## 模型选择与用量看板
 
 普通项目的老板/员工均可为自己的 chat 选择白名单 GPT 和有效强度；这不改变 provider、沙箱、内容 ACL 或 Luna 子代理策略。隐私项目仍仅老板访问且不可改 GPT 偏好。GET /api/admin/token-usage 只允许活动 admin，跨用户仅返回用量元数据（人员、模型、日期与计数），不返回 prompt、文件、搜索词、chat/native thread/run 标识或正文。生产诊断只输出计数和状态。
+
+自助改密 POST /api/me/password 和管理员密码 PATCH 必须校验 passwordConfirmation，确认字段与口令都不进入审计。网页新密码双输入按产品要求显示明文，登录输入仍隐藏。自助路径在解析请求和哈希 await 后复验 session；策略生效后撤销全部会话并按已有生命周期排空。
+
+项目归档 POST /api/projects/:id/archive 校验有效 project access 和 CSRF/Origin。永久删除 DELETE /api/projects/:id?permanent=1 除 owner/admin、全部既有生命周期屏障外，要求 x-confirm-project-id 与当前项目一致；仅清除本次移动到受控 trash 的目录，不遍历其他回收站。
+
+portal_fast_mode dynamic tool 绑定 active 用户、access 与 chat，只可更新后续偏好，不能指定任意模型/thread/cwd。HTTP PATCH fastMode 通过相同私有 chat ACL。

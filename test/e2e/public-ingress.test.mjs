@@ -79,7 +79,7 @@ test('fixed role hosts enforce ingress before routes and preserve role login and
     }
     assert.equal((await request('/assets/00000000000000000000/app.js')).status, 404);
     assert.equal((await request(`${prefix}/package.json`)).status, 404);
-    const credentials = { username: 'ingressboss', password: 'IngressFixturePassword!123' };
+    const credentials = { username: 'ingressboss', password: 'IngressFixturePassword!123', passwordConfirmation: 'IngressFixturePassword!123' };
     assert.equal((await request('/api/boss/login', { origin: 'https://staff.example.com' }, credentials)).status, 403);
     const login = await request('/api/boss/login', { origin: 'https://boss.example.com', 'x-forwarded-for': '198.51.100.2' }, credentials);
     assert.equal(login.status, 200);
@@ -100,7 +100,7 @@ test('fixed role hosts enforce ingress before routes and preserve role login and
     const staff = [];
     for (let i = 0; i < 2; i++) {
       const username = `tabemployee${i}`; const password = 'SyntheticTabPassword!123';
-      const createdUser = await request('/api/admin/users', authHeaders, { username, password });
+      const createdUser = await request('/api/admin/users', authHeaders, { username, password, passwordConfirmation: password });
       assert.equal(createdUser.status, 201);
       const selector = String(i + 1).repeat(32);
       const response = await request('/api/employee/login', { ...staffOrigin, 'cf-connecting-ip': `203.0.113.${20+i}` }, { username, password, sessionSelector: selector });

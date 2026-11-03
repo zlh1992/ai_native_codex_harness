@@ -424,7 +424,14 @@ function renderProjects() {
   const root = $('#project-list');
   if (!state.projects.length) { root.className = 'project-list empty-state'; root.textContent = '还没有项目，点击 ＋ 创建'; return; }
   root.className = 'project-list';
-  root.innerHTML = state.projects.map((project) => `<button class="project-item ${state.selectedProject?.id === project.id ? 'active' : ''}" data-id="${project.id}"><b><i class="project-dot"></i>${escapeHtml(project.name)}</b><span>${project.projectType === 'local_private' ? '隐私 · 本地 · 不可分享 · ' : project.accessKind === 'shared' ? '共享给我 · ' : ''}${escapeHtml(project.description || project.slug)}</span></button>`).join('');
+  root.innerHTML = state.projects.filter((project) => !project.archived || $('#show-archived').checked).map((project) => `<button class="project-item ${state.selectedProject?.id === project.id ? 'active' : ''}" data-id="${project.id}"><b><i class="project-dot"></i>${escapeHtml(project.name)}${project.archived ? " · 已归档" : ""}</b><span>${project.projectType === 'local_private' ? '隐私 · 本地 · 不可分享 · ' : project.accessKind === 'shared' ? '共享给我 · ' : ''}${escapeHtml(project.description || project.slug)}</span></button><button class="secondary" data-archive="${project.id}">${project.archived ? '恢复项目' : '归档项目'}</button>`).join('');
+  $$('[data-archive]', root).forEach((button) => button.addEventListener('click', async () => {
+    const project = state.projects.find((item) => item.id === button.dataset.archive);
+    try {
+      await api(`/api/projects/${project.id}/archive`, { method: 'POST', body: { archived: !project.archived } });
+      await loadProjects();
+    } catch (error) { toast(error.message, 'error'); }
+  }));
   $$('.project-item', root).forEach((button) => button.addEventListener('click', () => { cancelLocationRestore(); void selectProject(state.projects.find((item) => item.id === button.dataset.id)).catch(error => toast(error.message, 'error')); }));
 }
 
@@ -1702,6 +1709,12 @@ setupResizers(); health(); bootstrap();
 
 function updateModelSelect() {
   const local = state.selectedProject?.projectType === 'local_private';
+  const fast = Boolean(state.selectedChat?.fastMode);
+  $('#fast-mode').disabled = local || !state.selectedChat || Boolean(state.modelSaving);
+  $('#fast-mode').textContent = fast ? 'Fast：Luna · high · 开启' : 'Fast：关闭';
+  $('#fast-mode').setAttribute('aria-pressed', String(fast));
+  $('#effort-select').disabled = fast;
+  if (fast) $('#effort-select').value = 'high';
   const select = $('#model-select');
   select.classList.toggle('hidden', local);
   $('#model-badge').classList.toggle('hidden', !local);
@@ -1713,9 +1726,9 @@ function updateModelSelect() {
   updateConcurrencyIndicator();
   select.value = state.selectedChat?.preferredModel || '';
   const locked = !state.selectedChat || Boolean(state.modelSaving) || selectedChatRunning() || Boolean(state.inputQueues.get(state.selectedChat?.id)?.length);
-  select.disabled = locked;
-  $('#effort-select').value = state.selectedChat?.preferredEffort || '';
-  $('#effort-select').disabled = locked;
+  select.disabled = locked || fast;
+  $('#effort-select').value = fast ? 'high' : state.selectedChat?.preferredEffort || '';
+  $('#effort-select').disabled = locked || fast;
 }
 
 $('#local-control').addEventListener('change', async (event) => {
@@ -1749,3 +1762,30 @@ async function saveModelPreference(key, value) {
 }
 $('#model-select').addEventListener('change', event => saveModelPreference('preferredModel', event.target.value));
 $('#effort-select').addEventListener('change', event => saveModelPreference('preferredEffort', event.target.value));
+$('#show-archived').addEventListener('change', renderProjects);
+$('#fast-mode').addEventListener('click', async () => {
+  const chat = state.selectedChat, generation = sessionClient.generation();
+  if (!chat) return;
+  state.modelSaving = true; updateModelSelect();
+  try {
+    const data = await api(`/api/chats/${chat.id}`, { method: 'PATCH', body: { fastMode: !chat.fastMode } });
+    if (generation !== sessionClient.generation()) return;
+    Object.assign(chat, data.chat);
+    toast('Fast 设置已保存，下一轮生效。');
+  } catch (error) { toast(error.message, 'error'); }
+  finally { state.modelSaving = false; updateModelSelect(); }
+});
+$('#change-password').addEventListener('click', () => {
+  $('#password-form').reset();
+  $('#password-error').textContent = '';
+  $('#password-dialog').showModal();
+});
+$('#password-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (event.submitter?.value === 'cancel') return $('#password-dialog').close();
+  const form = new FormData(event.currentTarget);
+  try {
+    await api('/api/me/password', { method: 'POST', body: { password: form.get('password'), passwordConfirmation: form.get('passwordConfirmation') } });
+    location.href = state.me?.role === 'admin' ? '/boss/login' : '/employee';
+  } catch (error) { $('#password-error').textContent = error.message; }
+});

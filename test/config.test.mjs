@@ -42,10 +42,10 @@ test('new users default to network access while explicit operator restrictions r
 });
 
 test('configured defaults cannot bypass the deployment model allowlist', () => {
-  for (const model of ['gpt-6.1-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+  for (const model of ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
     assert.equal(loadConfig({ CODEX_MODEL: model }).codexModel, model);
   }
-  for (const model of ['gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol', 'arbitrary-model']) {
+  for (const model of ['gpt-6-astra', 'gpt-6-sol', 'arbitrary-model']) {
     assert.throws(() => loadConfig({ CODEX_MODEL: model }), { code: 'INVALID_MODEL' });
   }
   assert.equal(loadConfig({}).localQwenEnabled, false);

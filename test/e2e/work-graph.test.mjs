@@ -91,7 +91,7 @@ async function request(session, pathname, { method = 'GET', body, headers = {}, 
 
 async function login(username, password) {
   const endpoint = username === 'gateboss' ? '/api/boss/login' : '/api/employee/login';
-  const response = await request(null, endpoint, { method: 'POST', body: { username, password } });
+  const response = await request(null, endpoint, { method: 'POST', body: { username, password, passwordConfirmation: password } });
   const cookie = String(response.headers.get('set-cookie') || '').split(';')[0];
   assert.match(cookie, /^codex_harness_session=/);
   const session = { cookie, csrf: '' };
@@ -125,7 +125,7 @@ test('human Work Graph HTTP: planner, automatic files-only sharing, review/rewor
   for (let i = 0; i < 3; i++) {
     const password = 'TeamMemberPassword!123';
     const { user } = await json(boss, '/api/admin/users', { method: 'POST', expect: 201,
-      body: { username: `graphstaff${i}`, displayName: `Member ${i}`, password } });
+      body: { username: `graphstaff${i}`, displayName: `Member ${i}`, password, passwordConfirmation: password } });
     await json(boss, `/api/admin/users/${user.id}/profile`, { method: 'PATCH', body: { revision: 0, jobTitle: 'Researcher', skills: ['writing'] } });
     staff.push(await login(user.username, password));
   }

@@ -50,12 +50,12 @@ test('private project HTTP ACL, scoped memory, manual approval and queue work wi
   await until(async () => { try { const h = await (await fetch(origin + '/api/health')).json(); return h.localQwen?.state === 'ready'; } catch { return false; } });
   const health = await json(null, '/api/health'); assert.equal(health.codex, false); assert.equal(health.localQwen.state, 'ready');
   const login = async (username, password, role) => {
-    const response = await request(null, `/api/${role}/login`, { username, password });
+    const response = await request(null, `/api/${role}/login`, { username, password, passwordConfirmation: password });
     const session = { cookie: response.headers.get('set-cookie').split(';')[0], csrf: '' };
     session.csrf = (await json(session, '/api/me')).csrfToken; return session;
   };
   const boss = await login('privateboss', 'SyntheticBossPassword123!', 'boss');
-  const { user: employee } = await json(boss, '/api/admin/users', { username: 'privateemployee', displayName: 'Employee', password: 'SyntheticEmployee123!' }, 201);
+  const { user: employee } = await json(boss, '/api/admin/users', { username: 'privateemployee', displayName: 'Employee', password: 'SyntheticEmployee123!', passwordConfirmation: 'SyntheticEmployee123!' }, 201);
   const worker = await login('privateemployee', 'SyntheticEmployee123!', 'employee');
   await json(worker, '/api/projects', { name: 'denied', projectType: 'local_private' }, 403);
   const { project } = await json(boss, '/api/projects', { name: 'Local private test', projectType: 'local_private' }, 201);

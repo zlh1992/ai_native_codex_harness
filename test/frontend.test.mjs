@@ -185,7 +185,7 @@ test('model selector restores each chat and prevents edits while saving or witho
   const source = app.match(/function updateModelSelect\([^)]*\) \{[\s\S]*?\n\}/)[0];
   const select = { classList: { toggle() {} } };
   const state = { selectedChat: null, inputQueues: new Map() };
-  const other = { classList: { toggle() {} }, closest() { return this; } };
+  const other = { setAttribute() {}, classList: { toggle() {} }, closest() { return this; } };
   const update = Function('state', '$', 'selectedChatRunning', 'updateConcurrencyIndicator', `${source}; return updateModelSelect;`)(state,
     selector => selector === '#model-select' ? select : other, () => false, () => {});
   update(); assert.equal(select.disabled, true); assert.equal(select.value, '');
@@ -200,6 +200,8 @@ test('model selector restores each chat and prevents edits while saving or witho
   update(); assert.equal(select.disabled, true);
   state.modelSaving = false; state.selectedChat = { preferredModel: null };
   update(); assert.equal(select.value, '');
+  state.selectedChat.fastMode = true;
+  update(); assert.equal(select.disabled, true);
   assert.match(html, /id="model-select"[^>]+aria-label="对话模型"/);
 });
 

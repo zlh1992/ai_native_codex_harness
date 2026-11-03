@@ -60,7 +60,7 @@ test('real isolated Chrome: Portal display/input/takeover, roles, ACL, recovery 
     const me = await json(session, '/api/me'); session.csrf = me.csrfToken; return session;
   };
   const boss = await login('browserboss', 'BrowserTestPassword!123');
-  const employeeData = await json(boss, '/api/admin/users', 'POST', { username: 'browserstaff', displayName: 'Browser Staff', password: 'BrowserStaffPassword!123', networkAccess: true }, 201);
+  const employeeData = await json(boss, '/api/admin/users', 'POST', { username: 'browserstaff', displayName: 'Browser Staff', password: 'BrowserStaffPassword!123', passwordConfirmation: 'BrowserStaffPassword!123', networkAccess: true }, 201);
   // Boss network is explicit too.
   const me = await json(boss, '/api/me');
   if (!me.user.networkAccess) await json(boss, '/api/admin/users/' + me.user.id, 'PATCH', { networkAccess: true });
@@ -177,7 +177,7 @@ test('real isolated Chrome: Portal display/input/takeover, roles, ACL, recovery 
   assert.doesNotMatch(JSON.stringify(details), /human-private-marker|Verified article body/);
   assert.equal(fs.readdirSync(sessionsRoot).length, 0);
   assert.equal(spawnSync('/bin/ps', ['-axo', 'command='], { encoding: 'utf8' }).stdout.includes(sessionsRoot), false, 'Chrome helpers must exit');
-  const restricted = (await json(boss, '/api/admin/users', 'POST', { username: 'browserrestricted', password: 'BrowserRestricted!123', networkAccess: false }, 201)).user;
+  const restricted = (await json(boss, '/api/admin/users', 'POST', { username: 'browserrestricted', password: 'BrowserRestricted!123', passwordConfirmation: 'BrowserRestricted!123', networkAccess: false }, 201)).user;
   const management = await ui.newPage(); await management.goto(origin + '/boss');
   await management.locator('#new-user').click();
   assert.equal(await management.locator('[name=networkAccess]').isChecked(), true);
