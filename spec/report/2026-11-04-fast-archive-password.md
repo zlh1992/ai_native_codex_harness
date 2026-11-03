@@ -2,7 +2,7 @@
 
 | 字段 | 内容 |
 | --- | --- |
-| 状态 | 公网部署验证中 |
+| 状态 | 已部署并通过公网验证 |
 | 日期 | 2026-11-04 |
 | 负责人 | Codex |
 | 关联目标 | 双角色 Fast、项目归档、老板自有项目释放空间、员工自助改密 |
@@ -76,3 +76,19 @@
 
 ### 部署前门禁
 `npm run gate > /tmp/portal-production-gate.log 2>&1` exit 0：252 单元/集成、24 E2E，0 失败、0 跳过，含真实 Chrome、Seatbelt、微信和工作图回归。`git diff --cached --check` 通过；相对 Markdown 链接 93 个通过；skill validator 通过。
+
+## 公网部署结果（2026-11-04）
+- 实际生产目录：`/Users/zlh1992_home/.codex/worktrees/portal-browser-runtime/codex-harness-remote`；部署代码提交 `c5bec0a`，此前 `b152171`。原开发目录是旧基线，不能覆盖生产树。
+- 用户本轮明确授权上线；保留原 launchd 服务和 Cloudflare tunnel，通过 `./bin/stop-local.sh && ./bin/start-local.sh` 重启 Portal。重启前没有非终态 run、待发输入或工作图 job；既有待处理业务状态保持。
+- [老板入口](https://workbench1.winy.cc/boss/login) 和 [员工入口](https://workbench2.winy.cc/employee) 均完成验收；两个域名 health 均 ready，原生记忆关闭，Portal 记忆索引 ready。未改 DNS、隧道配置或微信绑定。
+- `node /tmp/portal-live-release.mjs` exit 0；通过两个域名的角色 API 和独立真实 Chrome 页面验证。老板使用临时随机会话，未更改原密码；一次性员工由 API 创建并用约定初始口令实际网页登录。
+- 两角色 Fast 设置、项目归档及老板状态展示验证通过；公网浏览器显示已开启，改密双输入均为 text；实际两次模型请求均 completed，用量账本 model=gpt-6-luna、effort=high，代码与门禁确认 serviceTier=fast。没有宣称速度提升幅度。
+- 一次性员工自助改密成功、旧会话 401、新密码重新登录成功。老板临时项目通过永久删除接口清理，员工临时项目通过普通删除后定向清理本次 trash；临时账号停用，所有验证会话撤销。用量与脱敏审计保留。
+- 收尾 quick_check=ok、foreign_key_check=0、非终态 run=0；原 users/projects/chats/submissions ID 无缺失，原密码哈希变更数 0；临时项目与活动临时账号均为 0。既有微信 uncertain 发件保持 12 条，未重发。
+- Python urllib 经宿主代理的初始域名探测失败，独立 curl/Chrome 经公网隧道成功；未因此更改健康隧道。
+
+### 备份与回滚
+一致性 SQLite、旧代码归档及私有环境备份位于生产 DATA_DIR/backups 的本次 release-fast 目录（目录 0700，DB/配置 0600），不进入仓库。需要回滚时先排空并停服，回退本次代码到此前已验证基线并使用原环境启动；保留上线后的数据库和业务文件，附加字段可保留，不能拿备份库覆盖上线新业务。此次未永久删除任何既有用户项目。
+
+### 最终结论
+三项功能已部署到原公网服务，老板 workbench1、员工 workbench2 的真实验收完成。原首轮尚未部署、未验证上游的限制已由本节覆盖。微信端提供 skill/tool 与认证 API，本次没有额外发送微信消息或新增微信菜单。
