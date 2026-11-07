@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { panelizeEligible, panelizeRequested } from './panelize.mjs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import QRCode from 'qrcode';
@@ -220,7 +221,11 @@ export class WeixinService {
       else {
         this.check(row);
         if (chat.taskId) this.graphs.taskFor(chat.taskId, user.id);
-        const result = await this.codex.runTurn({ chat, project, user, prompt: text, mode: 'execute', effort: chat.preferredEffort || undefined, emit: (_event, data) => {
+        const result = await this.codex.runTurn({ chat, project, user, prompt: text, mode: 'execute', effort: chat.preferredEffort || undefined, emit: (event, data) => {
+          if (event === 'browser_state' && data?.handoff && panelizeRequested(text) && panelizeEligible({ user, project, chat })) {
+            this.check(row);
+            this.queue(row, { dedupeKey: `browser-handoff:${message.id}`, inboxId: message.id });
+          }
           if (data?.turnRunId) this.sql.prepare('UPDATE weixin_inbox SET turn_run_id=? WHERE id=?').run(data.turnRunId, message.id);
         } });
         this.check(row); response = String(result?.text || '本轮结束，请打开前端查看结果。');
@@ -262,7 +267,20 @@ export class WeixinService {
       try {
         if (item.notification_id) text = this.notificationText(row, this.sql.prepare('SELECT * FROM task_notifications WHERE id=?').get(item.notification_id));
         else if (item.dispatch_id) { const receipt = this.dispatch.receipt(item.dispatch_id, row.user_id); text = `任务已发布：${receipt.title}\n项目：${receipt.projectName}\n附件：${receipt.attachmentCount} 份\n${receipt.tasks.map(t => `${t.employee} · ${t.title} · 微信：${t.weixin}`).join('\n')}`; }
-        else { const message = this.sql.prepare('SELECT * FROM weixin_inbox WHERE id=?').get(item.inbox_id); invariant(message?.generation === row.generation, 403, 'WEIXIN_STALE_REPLY', '旧连接回复已失效。'); text = message.response_text; }
+        else {
+          const message = this.sql.prepare('SELECT * FROM weixin_inbox WHERE id=?').get(item.inbox_id);
+          invariant(message?.generation === row.generation, 403, 'WEIXIN_STALE_REPLY', '旧连接回复已失效。');
+          if (item.dedupe_key === `browser-handoff:${message.id}`) {
+            const current = this.check(row), chat = this.db.getChat(message.chat_id);
+            const state = this.codex.browser?.state(message.chat_id);
+            invariant(message.status === 'processing' && current.row.chat_id === message.chat_id
+              && state?.state === 'ready' && state.handoff && state.runId && state.runId === message.turn_run_id
+              && panelizeEligible({ ...current, chat }), 409, 'WEIXIN_HANDOFF_EXPIRED', '接管请求已结束。');
+            const origin = this.config.bossPublicOrigin || this.config.publicOrigin;
+            invariant(origin, 503, 'WEIXIN_PUBLIC_URL_MISSING', '未配置老板公网地址。');
+            text = `多模型网页需要登录或验证。请打开本对话工作台，在浏览器抽屉中点击「开始接管」，完成后点击「操作完成，交还 Agent」。不要把密码或验证码发到微信。\n${origin}/boss/workbench?view=workbench&project=${encodeURIComponent(chat.projectId)}&chat=${encodeURIComponent(chat.id)}`;
+          } else text = message.response_text;
+        }
         this.check(row);
       } catch { this.sql.prepare("UPDATE weixin_outbox SET status='cancelled',error_code='AUTHORIZATION_CHANGED',updated_at=? WHERE id=?").run(now(), item.id); return; }
       const credentials = this.secret(row);

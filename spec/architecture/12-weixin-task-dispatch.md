@@ -47,3 +47,5 @@ CLI pin 不变。旧普通老板 chat 在下一次派发相关请求且已经空
 新版活动微信连接为老板和员工复用 owner_projects_list 与 owner_project_* 工具（名称兼容保留）。可列出、读取、搜索当前用户有效 owner/shared access 的普通项目；共享项目使用该用户工作副本。每次调用复验活动账号、联网、连接、策略代次、当前 access 与目标 access；禁止隐私项目、无授权项目和其他对话。查询不切换当前项目，写入仍限当前项目。旧固定老板入口保留本人 owner 普通项目边界。既有微信对话下次运行升级工具版本至 2，保留 Portal 历史和线程关联。
 
 老板普通 owner 对话可显式使用 Panelize 多模型 skill；browser_panelize 沿用浏览器 root、权限、接管和清理边界，不读取宿主账号。Codex 为当前 root，Claude Code/MiniMax 未配置，三个网页结果需实际观察。详见 [多模型会审](13-panelize.md)。
+
+显式老板 Panelize 请求的 browser handoff 使用现有 outbox 发一次固定工作台接管链接，不等 root 完成；实际发送前校验原 generation、processing 消息、当前 chat/run/handoff，过期取消，不发送页面内容或原因，uncertain 不自动重发。

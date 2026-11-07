@@ -241,3 +241,5 @@ HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake ap
 ## Panelize 多模型入口
 
 `test/panelize.test.mjs` 验证老板 owner 普通对话限制、精确供应商 host 与 Claude 空配置不执行。`test/recovery.test.mjs` 验证显式请求一次升级、技能注入、历史/lineage 保留。`test/e2e/panelize-gate.test.mjs` 用真实 Chrome/Seatbelt 和受控供应商页面验证原生适配、草稿保留、读后发送、禁止重放、三标签、人工控制、禁网及终态清理；不替代真实供应商登录和实际回答验收。
+
+`test/task-dispatch.test.mjs` 增加合成 Weixin transport 的 Panelize 上下文/幂等收件、运行等待中一次接管深链及终态后过期取消验证；不代表真实手机投递验收。

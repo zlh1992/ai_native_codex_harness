@@ -62,3 +62,8 @@ PRD-001/002/009/010、DAT-004/006、DEV-003。此功能是显式授权的额外�
 已核对生产工作树与 4310 监听归属，原服务 root runs、待发 chat_inputs、排队/租约/重试 workflow jobs 均为 0。一致性 SQLite、旧 HEAD 代码和私有环境备份位于 DATA_DIR/backups/release-panelize-*，目录 0700，文件 0600；不记录内容。一次备份快照统计的表名拼写错误发生在备份复制后，随后使用 task_submissions 正确重做完整备份；不影响生产库。回滚排空后回退到 7d59a5c，保留新数据库字段与业务记录，不还原旧库覆盖新消息。
 
 补充微信合成 transport 测试 `node --test test/task-dispatch.test.mjs`：17 通过；Panelize 消息按当前老板/owner/EXECUTE 传到同一浏览器工具边界，重复收件只执行一次，空 MiniMax 不启动浏览器。没有给真实微信联系人发送测试消息。首次 staged diff 检测到上游脚本行尾空白，仅做格式规范化，原始/规范化摘要均已记录，不豁免 diff 检查。
+
+## 微信接管补充计划
+链路审查发现 Weixin 原本只在 root 完成后发最终文字，网页 handoff 等待期间手机无法获知登录入口。仅对老板本轮显式 Panelize 请求，在 browser_state.handoff 时用既有 outbox 建立一次固定接管通知，带当前工作台 chat 深链；发送前复验连接 generation、inbox processing、当前 chat/run 和 handoff 尚有效。过期取消，不复用最终 response_text，不记录页面或原因，不重发 uncertain。增加合成 transport 的等待中通知/去重/过期验证后重跑最终 gate。
+
+微信接管补充已实现：`node --test test/task-dispatch.test.mjs > /tmp/portal-panelize-weixin-final.log 2>&1` 18 通过，涵盖等待期间深链、去重和过期取消。规范化 vendor 后第二次 `npm run gate > /tmp/portal-panelize-final-gate.log 2>&1` 的单元阶段 257 通过；其后新增 handoff 用例由上述完整文件复验，E2E 25 通过，完整 gate exit 0、0 失败、0 跳过。全变更相对 Markdown 链接 94 个通过，`git diff 7d59a5c --check` 通过。

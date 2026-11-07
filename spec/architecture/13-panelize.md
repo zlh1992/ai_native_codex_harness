@@ -16,7 +16,7 @@
 
 ## 浏览器与生命周期
 
-完全沿用 [第 11 章](11-managed-browser.md) 的 Seatbelt、容量、控制权、等待、撤权、停止、日志省略和清理。三家使用同一 chat 浏览器内独立 tab，计一个浏览器会话。专用临时 profile 不借用宿主或原 Panelize 登录态，运行结束清理，不能承诺跨轮免登录。微信用户需在对应工作台私有对话接管登录，密码/验证码不进入微信文字。没有独立后台 worker 或重启恢复/重发队列。
+完全沿用 [第 11 章](11-managed-browser.md) 的 Seatbelt、容量、控制权、等待、撤权、停止、日志省略和清理。三家使用同一 chat 浏览器内独立 tab，计一个浏览器会话。专用临时 profile 不借用宿主或原 Panelize 登录态，运行结束清理，不能承诺跨轮免登录。微信用户需在对应工作台私有对话接管登录，密码/验证码不进入微信文字。显式 Panelize root 进入 handoff 时，既有 outbox 按 inbox ID 排队一次固定接管提示和老板对话深链；发送前复验 generation、processing inbox、当前 chat/run 和仍在 handoff，过期取消、uncertain 不重发。最终回答使用独立 reply 队列项，不覆盖接管提示。没有独立后台 worker 或重启恢复/重发队列。
 
 `browser_` 前缀沿用事件和工具明细省略，无 prompt、回答、页面、Cookie 写入日志或摘要服务。
 

@@ -357,3 +357,33 @@ test('Weixin Panelize request reaches the same boss-owned EXECUTE tool boundary 
   const inbox = f.db.db.prepare('SELECT status,response_text FROM weixin_inbox').get();
   assert.equal(inbox.status, 'completed'); assert.match(inbox.response_text, /not_configured/);
 });
+
+test('Weixin Panelize handoff sends one deep link during the run and cancels stale notices', async t => {
+  const f = weixinFixture(t), row = await f.bind();
+  f.config.bossPublicOrigin = 'https://boss.example.test';
+  let waiting = true, activeChat;
+  f.codex.browser = { state: () => ({ state: 'ready', handoff: waiting, runId: 'handoff-run' }) };
+  f.codex.runTurn = async ({ emit, chat }) => {
+    activeChat = chat;
+    emit('turn_started', { turnRunId: 'handoff-run' });
+    emit('browser_state', { handoff: true }); emit('browser_state', { handoff: true });
+    assert.equal(f.db.db.prepare("SELECT COUNT(*) n FROM weixin_outbox WHERE dedupe_key LIKE 'browser-handoff:%'").get().n, 1);
+    await f.wx.deliver(f.wx.connection(row.id));
+    const sent = f.calls.filter(c => c.op === 'send');
+    assert.equal(sent.length, 1); assert.match(sent[0].input.text, /https:\/\/boss.example.test\/boss\/workbench\?view=workbench/);
+    assert.ok(sent[0].input.text.includes(chat.id)); assert.match(sent[0].input.text, /不要把密码/);
+    waiting = false;
+    return { text: 'comparison ended' };
+  };
+  f.setMessages([f.message('handoff', [{ type: 1, text_item: { text: '$panelize-multi-agent compare' } }])]);
+  await f.wx.poll(row); await f.wx.process(f.wx.connection(row.id));
+  await f.wx.deliver(f.wx.connection(row.id)); // ordinary final reply remains separate
+  assert.equal(f.calls.filter(c => c.op === 'send').length, 2);
+  assert.equal(f.db.db.prepare('SELECT status FROM weixin_inbox').get().status, 'completed');
+  // A queued hint cannot be sent after handoff/run completion or on restart.
+  f.db.db.prepare("UPDATE weixin_outbox SET status='queued' WHERE dedupe_key LIKE 'browser-handoff:%'").run();
+  await f.wx.deliver(f.wx.connection(row.id));
+  assert.equal(f.calls.filter(c => c.op === 'send').length, 2);
+  assert.equal(f.db.db.prepare("SELECT status FROM weixin_outbox WHERE dedupe_key LIKE 'browser-handoff:%'").get().status, 'cancelled');
+  assert.ok(activeChat);
+});
