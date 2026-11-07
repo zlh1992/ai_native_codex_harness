@@ -50,3 +50,5 @@ system 浏览器不固定启动代理，沿用 Chrome 对 SystemConfiguration �
 账号权限优先于代理。默认值只用于新账号，员工显式 false 和既有禁网保持；管理看板返回 defaults.networkAccess 供创建表单使用，编辑表单始终显示账号实际值。权限切换排空旧运行，现有 Web session 和 chat 的下一轮读取新权限，无需重登或重启。
 
 操作步骤见 [执行与浏览器指南](../../docs/EXECUTION_BROWSER.md)，发布验收见 [发布契约](07-e2e-release-contracts.md)。
+
+老板普通 owner 对话可显式使用 Panelize 多模型 skill；browser_panelize 沿用浏览器 root、权限、接管和清理边界，不读取宿主账号。Codex 为当前 root，Claude Code/MiniMax 未配置，三个网页结果需实际观察。详见 [多模型会审](13-panelize.md)。

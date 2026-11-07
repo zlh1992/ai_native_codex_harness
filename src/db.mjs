@@ -356,6 +356,7 @@ export class HarnessDatabase {
     this.#ensureColumn('projects', 'archived', 'INTEGER NOT NULL DEFAULT 0');
     this.#ensureColumn('chats', 'preferred_mode', "TEXT NOT NULL DEFAULT 'execute' CHECK(preferred_mode IN ('edit','execute'))");
     this.#ensureColumn('chats', 'channel_tools_version', 'INTEGER NOT NULL DEFAULT 0');
+    this.#ensureColumn('chats', 'panelize_tools_version', 'INTEGER NOT NULL DEFAULT 0');
     this.#ensureColumn('project_access', 'base_sha', 'TEXT');
     this.#ensureColumn('task_submissions', 'project_access_id', 'TEXT REFERENCES project_access(id) ON DELETE SET NULL');
     this.#ensureColumn('task_submissions', 'snapshot_commit_sha', 'TEXT');
@@ -823,7 +824,7 @@ export class HarnessDatabase {
       useMemory: row.use_memory === undefined ? true : Boolean(row.use_memory),
       saveMemory: row.save_memory === undefined ? true : Boolean(row.save_memory),
       memoryContextResetAt: row.memory_context_reset_at || null,
-      channelToolsVersion: Number(row.channel_tools_version || 0), dispatchToolsVersion: Number(row.dispatch_tools_version || 0),
+      panelizeToolsVersion: Number(row.panelize_tools_version || 0), channelToolsVersion: Number(row.channel_tools_version || 0), dispatchToolsVersion: Number(row.dispatch_tools_version || 0),
       sourceChatId: row.source_chat_id || null, sharedAt: row.shared_at || null,
       threadState: row.thread_state || 'ready', threadError: row.thread_error || null,
       projectAccessId: row.project_access_id, treePath: row.tree_path,
@@ -860,7 +861,7 @@ export class HarnessDatabase {
       ['threadError', 'thread_error'], ['preferredMode', 'preferred_mode'], ['preferredModel', 'preferred_model'], ['preferredEffort', 'preferred_effort'],
       ['controlMode', 'control_mode'], ['localSessionId', 'local_session_id'],
       ['useMemory', 'use_memory'], ['saveMemory', 'save_memory'],
-      ['channelToolsVersion', 'channel_tools_version'], ['dispatchToolsVersion', 'dispatch_tools_version'],
+      ['panelizeToolsVersion', 'panelize_tools_version'], ['channelToolsVersion', 'channel_tools_version'], ['dispatchToolsVersion', 'dispatch_tools_version'],
     ]) {
       if (key in patch) {
         fields.push(`${column}=?`);

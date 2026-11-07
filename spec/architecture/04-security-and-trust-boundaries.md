@@ -156,3 +156,5 @@ reviewer root 必须在当前 turn 读取固定上下文，方可提交审核意
 项目归档 POST /api/projects/:id/archive 校验有效 project access 和 CSRF/Origin。永久删除 DELETE /api/projects/:id?permanent=1 除 owner/admin、全部既有生命周期屏障外，要求 x-confirm-project-id 与当前项目一致；仅清除本次移动到受控 trash 的目录，不遍历其他回收站。
 
 portal_fast_mode dynamic tool 绑定 active 用户、access 与 chat，只可更新后续偏好，不能指定任意模型/thread/cwd。HTTP PATCH fastMode 通过相同私有 chat ACL。
+
+老板普通 owner 对话可显式使用 Panelize 多模型 skill；browser_panelize 沿用浏览器 root、权限、接管和清理边界，不读取宿主账号。Codex 为当前 root，Claude Code/MiniMax 未配置，三个网页结果需实际观察。详见 [多模型会审](13-panelize.md)。

@@ -162,7 +162,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   }, origins: {}, layers: null });
   if (method === 'skills/extraRoots/set' || method === 'thread/name/set' || method === 'thread/goal/set') return respond(id, {});
   if (method === 'skills/list') return respond(id, { data: (params.cwds || []).map((cwd) => ({
-    cwd, skills: ['task-execution', 'work-graph-planning', 'work-graph-review', 'task-dispatch'].map((name) => ({ name,
+    cwd, skills: ['task-execution', 'work-graph-planning', 'work-graph-review', 'task-dispatch', 'panelize-multi-agent'].map((name) => ({ name,
       path: path.resolve(process.cwd(), `portal-skills/${name}/SKILL.md`), enabled: true })),
   })) });
   if (method === 'thread/start') {

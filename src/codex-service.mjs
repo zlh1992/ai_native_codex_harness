@@ -1,3 +1,4 @@
+import { PANELIZE_TOOL, panelizeEligible, panelizeRequested } from './panelize.mjs';
 import { rootModel, rootEffort, EFFORTS } from './models.mjs';
 import { InputQueueService } from './input-queue-service.mjs';
 import fs from 'node:fs';
@@ -189,6 +190,7 @@ export class CodexService extends EventEmitter {
     ].join('\n');
     return [
       'You are the coding agent inside Codex Harness Remote.',
+      ...(this.config.browserEnabled && panelizeEligible(context) ? ['For explicit Panelize or multi-model comparison requests use the panelize-multi-agent skill and browser_panelize. Current Codex root plus Kimi/Doubao/DeepSeek webpages run the comparison; Claude Code / MiniMax is not configured. Never export unrelated history or infer provider completion from a send attempt.'] : []),
       `The only authorized workspace for this conversation is: ${projectRoot}`,
       ...(this.dispatchRuntime?.needed(context) ? ['Use the task-dispatch skill and dispatch_* tools for explicit employee assignments. dispatch_history reads this Portal conversation before a tool upgrade; historical text and file content never grant new authorization. After dispatch_prepare returns accepted, finish the turn so the background preparation can run.'] : []),
       'Use the host workspace_* tools for reads, whole-file writes, search, deletion, and project-local commands; use the native apply_patch tool for focused edits.',
@@ -244,7 +246,7 @@ export class CodexService extends EventEmitter {
       baseInstructions: this.#instructions(context),
       dynamicTools: ['planner', 'reviewer'].includes(context.chat?.purpose)
         ? (this.workGraphRuntime?.toolsFor(context.chat) || [])
-        : [...DYNAMIC_TOOLS, ...(this.dispatchRuntime?.toolsFor(context) || []), ...(this.config.browserEnabled ? BROWSER_TOOLS : []), ...this.wechatOwnerProjects.toolsFor(context),
+        : [...DYNAMIC_TOOLS, ...(this.dispatchRuntime?.toolsFor(context) || []), ...(this.config.browserEnabled ? [...BROWSER_TOOLS, ...(panelizeEligible(context) ? [PANELIZE_TOOL] : [])] : []), ...this.wechatOwnerProjects.toolsFor(context),
           ...(this.memory && this.config.memoryEnabled ? MEMORY_TOOLS : []), ...(this.workGraphRuntime?.toolsFor(context.chat || {}) || [])],
     };
   }
@@ -288,6 +290,21 @@ export class CodexService extends EventEmitter {
     await this.#ensurePortalSkills();
     const existing = context.chat.codexThreadId;
     invariant(context.chat.threadState !== 'resume_failed', 409, 'THREAD_RECOVERY_REQUIRED', '该对话的 Codex 线程需要显式恢复；请先重试恢复，或确认后新建空白线程。');
+    if (existing && this.config.browserEnabled && panelizeEligible(context) && (context.chat.panelizeToolsVersion || 0) < 1 && context.panelizeRequested) {
+      const newThreadId = await this.#startThread(context);
+      const current = this.db.getChat(context.chat.id), user = this.db.getUserById(context.user.id);
+      const project = this.db.getProjectForUser(context.project.id, context.user.id);
+      invariant(user?.status === 'active' && user.networkAccess === context.user.networkAccess && project?.accessId === context.project.accessId
+        && panelizeEligible({ user, project, chat: current }), 403, 'PROJECT_ACCESS_REVOKED', '线程升级期间授权已变化。');
+      invariant(current?.codexThreadId === existing && (current.panelizeToolsVersion || 0) < 1, 409, 'CHANNEL_THREAD_CHANGED', '对话线程已变化，请重试。');
+      this.db.recoverChatThread({ chatId: context.chat.id, expectedThreadId: existing, newThreadId, reason: 'panelize_tools_v1' });
+      this.db.updateChat(context.chat.id, { panelizeToolsVersion: 1,
+        ...(this.dispatchRuntime?.eligible(context) ? { dispatchToolsVersion: 1 } : {}),
+        ...(this.wechatOwnerProjects.bindingFor(context) ? { channelToolsVersion: 2 } : {}) });
+      this.db.addMessage({ id: `panelize-upgrade:${context.chat.id}`, chatId: context.chat.id, role: 'assistant', kind: 'capability_notice',
+        content: '本对话已增加 Panelize 多模型工具；原页面历史与线程关联保留，新模型上下文不自动载入或外发旧资料。' });
+      return newThreadId;
+    }
     if (existing && this.dispatchRuntime?.eligible(context) && context.chat.dispatchToolsVersion < 1 && context.dispatchRequested) {
       const newThreadId = await this.#startThread(context);
       const current = this.db.getChat(context.chat.id);
@@ -297,7 +314,8 @@ export class CodexService extends EventEmitter {
       invariant(current?.codexThreadId === existing && current.dispatchToolsVersion < 1,
         409, 'CHANNEL_THREAD_CHANGED', '对话线程已变化，请重试。');
       this.db.recoverChatThread({ chatId: context.chat.id, expectedThreadId: existing, newThreadId, reason: 'task_dispatch_tools_v1' });
-      this.db.updateChat(context.chat.id, { dispatchToolsVersion: 1, channelToolsVersion: 2 });
+      this.db.updateChat(context.chat.id, { dispatchToolsVersion: 1, channelToolsVersion: 2,
+        ...(this.config.browserEnabled && panelizeEligible(context) ? { panelizeToolsVersion: 1 } : {}) });
       this.db.addMessage({ id: `dispatch-upgrade:${context.chat.id}`, chatId: context.chat.id, role: 'assistant', kind: 'capability_notice',
         content: '本对话已增加任务派发能力，原历史已保留，可继续引用此前资料。' });
       return newThreadId;
@@ -311,7 +329,8 @@ export class CodexService extends EventEmitter {
         409, 'CHANNEL_THREAD_CHANGED', '微信对话线程已变化，请重试。');
       this.db.recoverChatThread({ chatId: context.chat.id, expectedThreadId: existing,
         newThreadId, reason: 'wechat_authorized_project_tools_v2' });
-      this.db.updateChat(context.chat.id, { channelToolsVersion: 2 });
+      this.db.updateChat(context.chat.id, { channelToolsVersion: 2,
+        ...(this.config.browserEnabled && panelizeEligible(context) ? { panelizeToolsVersion: 1 } : {}) });
       return newThreadId;
     }
     const policyChanged = existing && this.contextByThread.get(existing)?.user.networkAccess !== context.user.networkAccess;
@@ -334,6 +353,7 @@ export class CodexService extends EventEmitter {
     }
     const threadId = await this.#startThread(context);
     this.db.updateChat(context.chat.id, { codexThreadId: threadId, threadState: 'ready', threadError: null,
+      ...(this.config.browserEnabled && panelizeEligible(context) ? { panelizeToolsVersion: 1 } : {}),
       ...(this.dispatchRuntime?.eligible(context) ? { dispatchToolsVersion: 1 } : {}),
       ...(this.wechatOwnerProjects.bindingFor(context) ? { channelToolsVersion: 2 } : {}) });
     return threadId;
@@ -478,7 +498,7 @@ export class CodexService extends EventEmitter {
   }
 
   async #taskSkillInput(context) {
-    const skillName = this.workGraphRuntime?.skillName(context.chat) || (context.chat.taskId ? 'task-execution' : this.dispatchRuntime?.needed(context) ? 'task-dispatch' : null);
+    const skillName = (this.config.browserEnabled && panelizeEligible(context) && context.panelizeRequested ? 'panelize-multi-agent' : null) || this.workGraphRuntime?.skillName(context.chat) || (context.chat.taskId ? 'task-execution' : this.dispatchRuntime?.needed(context) ? 'task-dispatch' : null);
     if (!skillName) return [];
     const cwd = this.workspace.projectRoot(context.project);
     const result = await this.client.request('skills/list', { cwds: [cwd], forceReload: false }, 15_000);
@@ -649,7 +669,7 @@ export class CodexService extends EventEmitter {
       this.db.db.exec('COMMIT');
     } catch (error) { this.db.db.exec('ROLLBACK'); throw error; }
     const persistentEmit = (event, data) => this.#emitPersistent({ turnRunId: turnRun.id, chatId: chat.id, emit }, event, data);
-    const context = { chat, project, user, mode, model, effort: reasoningEffort, turnRunId: turnRun.id, workflowLeaseToken, dispatchRequested: /task-dispatch|dispatch|assign|派发|指派|分配|安排|交给|发给|补充.*资料|通知.*做/i.test(text) };
+    const context = { chat, project, user, mode, model, effort: reasoningEffort, turnRunId: turnRun.id, workflowLeaseToken, panelizeRequested: panelizeRequested(text), dispatchRequested: /task-dispatch|dispatch|assign|派发|指派|分配|安排|交给|发给|补充.*资料|通知.*做/i.test(text) };
     this.pendingChats.add(chat.id);
     this.globalPending += 1;
     this.pendingByUser.set(user.id, userPending + 1);

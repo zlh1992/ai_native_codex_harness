@@ -108,3 +108,5 @@
 - [2026-10-27 微信项目授权查询与语音转写](2026-10-27-weixin-project-voice.md)
 
 - [Fast、归档、密码与公网部署](2026-11-04-fast-archive-password.md)
+
+- [2026-11-07 老板 Panelize 多模型接入](2026-11-07-panelize-boss-integration.md)

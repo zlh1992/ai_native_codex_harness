@@ -334,3 +334,26 @@ test('multi-user Weixin project tools use current user access and reject revocat
   f.db.db.prepare("UPDATE weixin_connections SET status='revoked' WHERE id=?").run(row.id);
   assert.equal(tools.toolsFor(active).length, 0);
 });
+
+test('Weixin Panelize request reaches the same boss-owned EXECUTE tool boundary exactly once', async t => {
+  const { BrowserService } = await import('../src/browser-service.mjs');
+  const { panelizeEligible, panelizeRequested } = await import('../src/panelize.mjs');
+  const f = weixinFixture(t), row = await f.bind();
+  const browser = new BrowserService({ config: { browserEnabled: true }, db: f.db });
+  t.after(() => browser.stop());
+  let turns = 0;
+  f.codex.runTurn = async context => {
+    turns++;
+    assert.equal(context.mode, 'execute'); assert.equal(context.user.id, f.boss.id);
+    assert.equal(panelizeEligible(context), true); assert.equal(panelizeRequested(context.prompt), true);
+    const result = await browser.call({ ...context, turnRunId: 'synthetic-panelize-run' }, 'browser_panelize', { action: 'open', provider: 'claude' });
+    assert.equal(result.status, 'not_configured'); assert.equal(browser.sessions.size, 0);
+    return { text: 'Claude Code / MiniMax: not_configured' };
+  };
+  f.setMessages([f.message('panelize-message', [{ type: 1, text_item: { text: '$panelize-multi-agent 多模型会审' } }])]);
+  await f.wx.poll(row); await f.wx.process(f.wx.connection(row.id));
+  await f.wx.poll(row); await f.wx.process(f.wx.connection(row.id));
+  assert.equal(turns, 1);
+  const inbox = f.db.db.prepare('SELECT status,response_text FROM weixin_inbox').get();
+  assert.equal(inbox.status, 'completed'); assert.match(inbox.response_text, /not_configured/);
+});

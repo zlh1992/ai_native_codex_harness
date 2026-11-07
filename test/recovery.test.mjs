@@ -631,3 +631,34 @@ test('Fast persists idempotently and sends Luna high fast for both roles, then r
     assert.equal(params.serviceTier, null);
   } finally { db.close(); fs.rmSync(base, { recursive: true, force: true }); }
 });
+
+test('boss Panelize tools upgrade once for workbench and WeChat-style prompts while preserving lineage and history', async () => {
+  const { base, db, workspace, config, user, project, chat } = fixture();
+  config.browserEnabled = true;
+  db.db.prepare("UPDATE users SET role='admin',network_access=1 WHERE id=?").run(user.id);
+  db.addMessage({ id: 'prior-panelize-message', chatId: chat.id, role: 'user', kind: 'text', content: 'prior private context' });
+  const service = new CodexService({ config, db, workspace });
+  const calls = [];
+  service.client.start = async () => { service.client.started = true; };
+  service.client.request = async (method, params) => {
+    calls.push({ method, params });
+    if (method === 'thread/start') return { thread: { id: 'panelize-thread' } };
+    if (method === 'skills/list') return { data: [{ skills: [{ name: 'panelize-multi-agent', path: path.join(config.portalSkillsRoot, 'panelize-multi-agent/SKILL.md'), enabled: true }] }] };
+    if (method === 'turn/start') throw new Error('intentional test stop');
+    return {};
+  };
+  try {
+    for (const prompt of ['$panelize-multi-agent compare the approaches', '微信里用多模型会审这道题']) {
+      await assert.rejects(service.runTurn({ chat: db.getChat(chat.id), project, user: db.getUserById(user.id), prompt, mode: 'execute', effort: 'low', emit() {} }), /intentional test stop/);
+      assert.equal(db.getChat(chat.id).panelizeToolsVersion, 1);
+      assert.equal(calls.filter(c => c.method === 'thread/start').length, 1);
+      const input = calls.filter(c => c.method === 'turn/start').at(-1).params.input;
+      assert.ok(input.some(item => item.type === 'skill' && item.name === 'panelize-multi-agent'));
+    }
+    const start = calls.find(c => c.method === 'thread/start').params;
+    assert.ok(start.dynamicTools.some(tool => tool.name === 'browser_panelize'));
+    assert.equal(db.listChatThreadRecoveries(chat.id)[0].oldThreadId, 'old-thread');
+    assert.ok(db.listMessages(chat.id, null).some(m => m.id === 'prior-panelize-message'));
+    const reopened = new HarnessDatabase(config); assert.equal(reopened.getChat(chat.id).panelizeToolsVersion, 1); reopened.close();
+  } finally { await service.browser.stop(); db.close(); fs.rmSync(base, { recursive: true, force: true }); }
+});

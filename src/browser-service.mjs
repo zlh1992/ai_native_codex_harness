@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { callPanelize } from './panelize.mjs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { chromium } from 'playwright-core';
@@ -267,6 +268,7 @@ export class BrowserService {
       if (name === 'browser_snapshot' || name === 'browser_handoff') return page;
       return { ok: false, errorCode: 'BROWSER_PAGE_CHANGED', retryable: false, page };
     }
+    if (name === 'browser_panelize') return callPanelize(this, active, args);
     if (name === 'browser_open') return this.open(active, args.url);
     if (name === 'browser_snapshot') return this.snapshot(active);
     if (name === 'browser_action') return this.action(active, args);
