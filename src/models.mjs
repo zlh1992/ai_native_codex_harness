@@ -2,6 +2,7 @@ import { invariant } from './errors.mjs';
 
 // Portal-approved root models; upstream account availability is checked by Codex.
 export const ROOT_MODELS = Object.freeze([
+  { id: 'gpt-6-luna', label: 'GPT-6 Luna' },
   { id: 'gpt-6-astra', label: 'GPT-6 Astra' },
   { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
   { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
@@ -17,6 +18,7 @@ export function validateModel(model) {
 }
 
 export function rootModel(config, chat, user) {
+  if (chat?.fastMode) return 'gpt-6-luna';
   return user.role === 'admin' && chat?.preferredModel
     ? validateModel(chat.preferredModel) : config.codexModel;
 }

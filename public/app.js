@@ -264,7 +264,14 @@ function renderProjects() {
   const root = $('#project-list');
   if (!state.projects.length) { root.className = 'project-list empty-state'; root.textContent = '还没有项目，点击 ＋ 创建'; return; }
   root.className = 'project-list';
-  root.innerHTML = state.projects.map((project) => `<button class="project-item ${state.selectedProject?.id === project.id ? 'active' : ''}" data-id="${project.id}"><b><i class="project-dot"></i>${escapeHtml(project.name)}</b><span>${project.accessKind === 'shared' ? '共享给我 · ' : ''}${escapeHtml(project.description || project.slug)}</span></button>`).join('');
+  root.innerHTML = state.projects.filter((project) => !project.archived || $('#show-archived').checked).map((project) => `<button class="project-item ${state.selectedProject?.id === project.id ? 'active' : ''}" data-id="${project.id}"><b><i class="project-dot"></i>${escapeHtml(project.name)}${project.archived ? " · 已归档" : ""}</b><span>${project.accessKind === 'shared' ? '共享给我 · ' : ''}${escapeHtml(project.description || project.slug)}</span></button><button class="secondary" data-archive="${project.id}">${project.archived ? '恢复项目' : '归档项目'}</button>`).join('');
+  $$('[data-archive]', root).forEach((button) => button.addEventListener('click', async () => {
+    const project = state.projects.find((item) => item.id === button.dataset.archive);
+    try {
+      await api(`/api/projects/${project.id}/archive`, { method: 'POST', body: { archived: !project.archived } });
+      await loadProjects();
+    } catch (error) { toast(error.message, 'error'); }
+  }));
   $$('.project-item', root).forEach((button) => button.addEventListener('click', () => selectProject(state.projects.find((item) => item.id === button.dataset.id))));
 }
 
@@ -1276,9 +1283,15 @@ setInterval(() => {
 setupResizers(); health(); bootstrap();
 
 function updateModelSelect() {
+  const fast = Boolean(state.selectedChat?.fastMode);
+  $('#fast-mode').disabled = !state.selectedChat || Boolean(state.modelSaving);
+  $('#fast-mode').textContent = fast ? 'Fast：Luna · high · 开启' : 'Fast：关闭';
+  $('#fast-mode').setAttribute('aria-pressed', String(fast));
+  $('#effort-select').disabled = fast;
+  if (fast) $('#effort-select').value = 'high';
   const select = $('#model-select');
   select.value = state.selectedChat?.preferredModel || '';
-  select.disabled = !state.selectedChat || Boolean(state.modelSaving);
+  select.disabled = !state.selectedChat || Boolean(state.modelSaving) || fast;
 }
 
 $('#model-select').addEventListener('change', async (event) => {
@@ -1295,4 +1308,31 @@ $('#model-select').addEventListener('change', async (event) => {
     toast('对话模型已保存，下次发送时生效。');
   } catch (error) { toast(error.message, 'error'); }
   finally { state.modelSaving = false; updateModelSelect(); }
+});
+
+$('#show-archived').addEventListener('change', renderProjects);
+$('#fast-mode').addEventListener('click', async () => {
+  const chat = state.selectedChat;
+  if (!chat) return;
+  state.modelSaving = true; updateModelSelect();
+  try {
+    const data = await api(`/api/chats/${chat.id}`, { method: 'PATCH', body: { fastMode: !chat.fastMode } });
+    Object.assign(chat, data.chat);
+    toast('Fast 设置已保存，下一轮生效。');
+  } catch (error) { toast(error.message, 'error'); }
+  finally { state.modelSaving = false; updateModelSelect(); }
+});
+$('#change-password').addEventListener('click', () => {
+  $('#password-form').reset();
+  $('#password-error').textContent = '';
+  $('#password-dialog').showModal();
+});
+$('#password-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (event.submitter?.value === 'cancel') return $('#password-dialog').close();
+  const form = new FormData(event.currentTarget);
+  try {
+    await api('/api/me/password', { method: 'POST', body: { password: form.get('password'), passwordConfirmation: form.get('passwordConfirmation') } });
+    location.href = state.me?.role === 'admin' ? '/boss/login' : '/employee';
+  } catch (error) { $('#password-error').textContent = error.message; }
 });

@@ -121,7 +121,7 @@ queued -> starting -> running -> completed
 
 ## 老板对话模型偏好
 
-`chats.preferred_model` 为 nullable、按对话持久化的 root 模型偏好；新建和迁移后的旧对话为 null，使用 `CODEX_MODEL`。老板只能修改自己的有效 access 下的 chat，选择 Portal 白名单中的 Astra、Sol、Terra、Luna、GPT-5.5、Mini 或 Spark，或恢复默认。员工继续使用服务默认模型；分享副本不继承老板模型偏好。
+`chats.preferred_model` 为 nullable、按对话持久化的 root 模型偏好；新建和迁移后的旧对话为 null，使用 `CODEX_MODEL`。老板只能修改自己的有效 access 下的 chat，选择 Portal 白名单中的 Astra、Sol、Terra、Luna、GPT-5.5、Mini 或 Spark，或恢复默认。员工普通模式继续使用服务默认模型；分享副本不继承老板模型偏好。
 
 ## 私有输入队列
 
@@ -137,3 +137,10 @@ steering -> paused (delivery uncertain; never automatically resend)
 ```
 
 编辑、取消、继续和 steer 必须携带当前 revision。消息开始发送或版本变化后旧操作返回 `INPUT_CHANGED`，不能覆盖已经提交给模型的内容。成功/取消后清空队列正文，保留幂等标识；正常发送的正文转入 `user:<run>`，steer 使用 `steer:<inputId>`。队列内容不复制到 share 的新 chat；只有已送入对话的历史参加既有 fork。
+
+
+## Fast、归档与自助密码
+- chats.fast_mode 默认为 false，独立于原模型偏好。所有角色都可修改自己的 chat；true 时后续 root turn 固定 gpt-6-luna/high/fast，false 恢复原模型/请求推理强度。分享副本不复制 Fast 偏好。
+- projects.archived 是项目全局展示状态，有效 owner/shared access 可归档或恢复；老板全局元数据可见已归档。归档不撤权、不删除、不暂停任务；工作台默认隐藏且可显示恢复。
+- 老板可显式永久删除自己的项目；普通 DELETE 继续可恢复。永久删除同样拒绝 active share、busy runtime 和 retained worktree，不授予老板员工项目删除权。
+- 员工可自行改密，双输入一致且满足既有长度约束；成功更新撤销全部会话并排空任务。新员工可使用产品约定初始口令，现有账号不迁移密码。

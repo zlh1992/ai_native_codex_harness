@@ -257,6 +257,8 @@ export class HarnessDatabase {
     this.#ensureColumn('chats', 'thread_state', "TEXT NOT NULL DEFAULT 'ready'");
     this.#ensureColumn('chats', 'thread_error', 'TEXT');
     this.#ensureColumn('chats', 'preferred_model', 'TEXT');
+    this.#ensureColumn('chats', 'fast_mode', 'INTEGER NOT NULL DEFAULT 0');
+    this.#ensureColumn('projects', 'archived', 'INTEGER NOT NULL DEFAULT 0');
     this.#ensureColumn('chats', 'preferred_mode', "TEXT NOT NULL DEFAULT 'execute' CHECK(preferred_mode IN ('edit','execute'))");
     this.#ensureColumn('project_access', 'base_sha', 'TEXT');
     this.#ensureColumn('task_submissions', 'project_access_id', 'TEXT REFERENCES project_access(id) ON DELETE SET NULL');
@@ -510,7 +512,7 @@ export class HarnessDatabase {
   mapProject(row) {
     return row ? {
       id: row.id, userId: row.user_id, slug: row.slug, name: row.name,
-      description: row.description, createdAt: row.created_at, updatedAt: row.updated_at,
+      archived: Boolean(row.archived), description: row.description, createdAt: row.created_at, updatedAt: row.updated_at,
       username: row.username, displayName: row.display_name,
       repoKind: row.repo_kind || 'directory', accessId: row.access_id,
       accessUserId: row.access_user_id, accessKind: row.access_kind,
@@ -643,6 +645,11 @@ export class HarnessDatabase {
     return this.getProject(id);
   }
 
+  setProjectArchived(id, archived) {
+    this.db.prepare('UPDATE projects SET archived=?,updated_at=? WHERE id=?').run(archived ? 1 : 0, now(), id);
+    return this.getProject(id);
+  }
+
   touchProject(id) { this.db.prepare('UPDATE projects SET updated_at=? WHERE id=?').run(now(), id); }
   deleteProject(id) { this.db.prepare('DELETE FROM projects WHERE id=?').run(id); }
 
@@ -683,7 +690,7 @@ export class HarnessDatabase {
       id: row.id, projectId: row.project_id, userId: row.user_id, title: row.title,
       codexThreadId: row.codex_thread_id, status: row.status,
       preferredMode: row.preferred_mode || 'execute',
-      preferredModel: row.preferred_model || null,
+      preferredModel: row.preferred_model || null, fastMode: Boolean(row.fast_mode),
       sourceChatId: row.source_chat_id || null, sharedAt: row.shared_at || null,
       threadState: row.thread_state || 'ready', threadError: row.thread_error || null,
       projectAccessId: row.project_access_id, treePath: row.tree_path,
@@ -716,7 +723,7 @@ export class HarnessDatabase {
     for (const [key, column] of [
       ['title', 'title'], ['codexThreadId', 'codex_thread_id'], ['status', 'status'],
       ['taskId', 'task_id'], ['taskVersion', 'task_version'], ['threadState', 'thread_state'],
-      ['threadError', 'thread_error'], ['preferredMode', 'preferred_mode'], ['preferredModel', 'preferred_model'],
+      ['threadError', 'thread_error'], ['preferredMode', 'preferred_mode'], ['preferredModel', 'preferred_model'], ['fastMode', 'fast_mode'],
     ]) {
       if (key in patch) { fields.push(`${column}=?`); values.push(patch[key]); }
     }

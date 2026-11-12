@@ -533,3 +533,37 @@ test('boss model preference reaches resumed thread and each native turn; employe
     assert.equal(calls.filter((call) => call.method === 'turn/start').at(-1).params.model, config.codexModel);
   } finally { db.close(); fs.rmSync(base, { recursive: true, force: true }); }
 });
+
+test('Fast persists idempotently and sends Luna high fast for both roles, then restores defaults', async () => {
+  const { base, db, workspace, config, user, project, chat } = fixture();
+  const service = new CodexService({ config, db, workspace });
+  const calls = [];
+  service.client.start = async () => { service.client.started = true; };
+  service.client.request = async (method, params) => {
+    calls.push({ method, params });
+    if (method === 'thread/resume') return { thread: { id: chat.codexThreadId, modelProvider: config.codexModelProvider } };
+    if (method === 'turn/start') throw new Error('intentional test stop');
+    return {};
+  };
+  try {
+    for (const role of ['user', 'admin']) {
+      db.db.prepare('UPDATE users SET role=? WHERE id=?').run(role, user.id);
+      db.updateChat(chat.id, { fastMode: 1 });
+      const reopened = new HarnessDatabase(config);
+      assert.equal(reopened.getChat(chat.id).fastMode, true);
+      reopened.close();
+      await assert.rejects(service.runTurn({ chat: db.getChat(chat.id), project, user: db.getUserById(user.id), prompt: 'Fast', mode: 'edit', effort: 'low', emit() {} }), /intentional test stop/);
+      const params = calls.filter((c) => c.method === 'turn/start').at(-1).params;
+      assert.equal(params.model, 'gpt-6-luna');
+      assert.equal(params.effort, 'high');
+      assert.equal(params.serviceTier, 'fast');
+      assert.equal(params.threadId, chat.codexThreadId);
+    }
+    db.updateChat(chat.id, { fastMode: 0 });
+    await assert.rejects(service.runTurn({ chat: db.getChat(chat.id), project, user: db.getUserById(user.id), prompt: 'Normal', mode: 'edit', effort: 'low', emit() {} }), /intentional test stop/);
+    const params = calls.filter((c) => c.method === 'turn/start').at(-1).params;
+    assert.equal(params.model, config.codexModel);
+    assert.equal(params.effort, 'low');
+    assert.equal(params.serviceTier, null);
+  } finally { db.close(); fs.rmSync(base, { recursive: true, force: true }); }
+});

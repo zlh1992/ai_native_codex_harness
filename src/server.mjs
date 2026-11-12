@@ -321,6 +321,28 @@ async function route(req, res) {
     return;
   }
 
+  if (req.method === 'POST' && pathname === '/api/me/password') {
+    requireMutation(req, session);
+    const body = await readJson(req, 64 * 1024);
+    session = refreshSession(session);
+    const password = String(body.password || '');
+    invariant(password === body.passwordConfirmation, 400, 'PASSWORD_MISMATCH', '两次输入的密码不一致。');
+    invariant(password.length >= 12 && password.length <= 256, 400, 'INVALID_PASSWORD', '密码长度必须为 12–256 个字符。');
+    const passwordHash = await hashPassword(password);
+    session = refreshSession(session);
+    db.updateUser(session.user.id, { passwordHash });
+    db.deleteUserSessions(session.user.id);
+    try {
+      await codex.interruptUserAndWait(session.user.id);
+    } catch (error) {
+      audit(req, session, 'password.self_change', 'user', session.user.id, { drainComplete: false });
+      throw error;
+    }
+    audit(req, session, 'password.self_change', 'user', session.user.id, { drainComplete: true });
+    sendJson(res, 200, { ok: true, loginRequired: true }, config, { 'set-cookie': cookie(req, '', 0) });
+    return;
+  }
+
   if (req.method === 'GET' && pathname === '/api/projects') {
     sendJson(res, 200, { projects: db.listProjectsForUser(session.user.id).map(projectPayload) }, config);
     return;
@@ -351,7 +373,20 @@ async function route(req, res) {
     return;
   }
 
-  let match = pathname.match(/^\/api\/projects\/([^/]+)$/);
+  let match = pathname.match(/^\/api\/projects\/([^/]+)\/archive$/);
+  if (match && req.method === 'POST') {
+    requireMutation(req, session);
+    const body = await readJson(req);
+    session = refreshSession(session);
+    const project = projectFor(session, match[1]);
+    invariant(typeof body.archived === 'boolean', 400, 'INVALID_ARCHIVED', 'archived 必须是布尔值。');
+    db.setProjectArchived(project.id, body.archived);
+    audit(req, session, 'project.archive', 'project', project.id, { archived: body.archived });
+    sendJson(res, 200, { project: projectPayload(db.getProjectForUser(project.id, session.user.id)) }, config);
+    return;
+  }
+
+  match = pathname.match(/^\/api\/projects\/([^/]+)$/);
   if (match && req.method === 'GET') {
     const project = projectFor(session, match[1]);
     const usage = userUsage(session.user.id);
@@ -383,7 +418,14 @@ async function route(req, res) {
     const retained = db.listProjectAccess(project.id).filter((access) => access.accessKind === 'shared'
       && access.status === 'revoked' && worktrees.isReusableShare({ treePath: access.treePath }));
     invariant(retained.length === 0, 409, 'RETAINED_WORKTREES', '项目仍有撤权后保留的工作树；请先恢复授权并处理其中的修改。');
+    const permanent = url.searchParams.get('permanent') === '1';
+    if (permanent) {
+      requireAdmin(session);
+      invariant(req.headers['x-confirm-project-id'] === project.id, 400, 'DELETE_CONFIRMATION_REQUIRED', '请确认永久删除项目。');
+    }
     const trashed = workspace.trashProject(project);
+    if (permanent && trashed.destination) fs.rmSync(trashed.destination, { recursive: true, force: true });
+    if (permanent) trashed.recoverable = false;
     db.deleteProject(project.id);
     audit(req, session, 'project.trash', 'project', project.id, { name: project.name, recoverable: trashed.recoverable });
     sendJson(res, 200, { ok: true, recoverable: trashed.recoverable }, config);
@@ -567,6 +609,10 @@ async function route(req, res) {
     const patch = {};
     if (body.title !== undefined) patch.title = shortText(body.title, '对话标题', 120);
     if (body.preferredMode !== undefined) patch.preferredMode = turnMode(body.preferredMode);
+    if (body.fastMode !== undefined) {
+      invariant(typeof body.fastMode === 'boolean', 400, 'INVALID_FAST_MODE', 'fastMode 必须是布尔值。');
+      patch.fastMode = body.fastMode ? 1 : 0;
+    }
     if (body.preferredModel !== undefined) {
       invariant(session.user.role === 'admin', 403, 'ADMIN_REQUIRED', '只有老板可以选择模型。');
       invariant(!codex.chatBusy(chat.id) && !db.listChatInputs(chat.id).length, 409, 'CHAT_RUNNING', '请等待当前任务和消息队列结束后切换模型。');
@@ -1090,7 +1136,8 @@ async function route(req, res) {
     const username = validateUsername(body.username);
     invariant(!db.getUserAuthByUsername(username), 409, 'USERNAME_EXISTS', '用户名已存在。');
     const displayName = shortText(body.displayName || username, '显示名称', 64);
-    const password = String(body.password || '');
+    const password = String(body.password || '123321123321');
+    if (body.password) invariant(password === body.passwordConfirmation, 400, 'PASSWORD_MISMATCH', '两次输入的密码不一致。');
     invariant(password.length >= 12 && password.length <= 256, 400, 'INVALID_PASSWORD', '密码长度必须为 12–256 个字符。');
     const passwordHash = await hashPassword(password);
     session = refreshSession(session);
@@ -1128,6 +1175,7 @@ async function route(req, res) {
     if (body.maxConcurrentTurns !== undefined) patch.maxConcurrentTurns = boundedInteger(body.maxConcurrentTurns, '并发上限', 1, config.codexMaxConcurrentTurns);
     if (body.password !== undefined && String(body.password).length) {
       const password = String(body.password);
+      invariant(password === body.passwordConfirmation, 400, 'PASSWORD_MISMATCH', '两次输入的密码不一致。');
       invariant(password.length >= 12 && password.length <= 256, 400, 'INVALID_PASSWORD', '密码长度必须为 12–256 个字符。');
       patch.passwordHash = await hashPassword(password);
       session = refreshSession(session);

@@ -157,3 +157,29 @@ test('EXECUTE runs a project-local command without creating a pending confirmati
   assert.equal(db.db.prepare("SELECT COUNT(*) AS count FROM turn_approvals WHERE turn_run_id=? AND kind='command'").get(active.turnRunId).count, 1);
   db.close();
 });
+
+test('Fast skill tool updates only its current private chat and fails after access revocation', async () => {
+  const { db, codex, active } = fixture();
+  const responses = new Map();
+  codex.client.respond = (id, response) => responses.set(id, response);
+  codex.client.respondError = (id, code, message) => responses.set(id, { success: false, code, message });
+  try {
+    const other = db.createChat({ projectId: active.project.id, userId: active.user.id,
+      projectAccessId: active.project.accessId, treePath: active.project.treePath, title: 'Other' });
+    const call = async (id, enabled) => {
+      codex.client.emit('serverRequest', { method: 'item/tool/call', id,
+        params: { threadId: active.threadId, turnId: active.turnId, callId: String(id),
+          tool: 'portal_fast_mode', arguments: { enabled } } });
+      return waitFor(() => responses.get(id));
+    };
+    assert.equal((await call(100, true)).success, true);
+    assert.equal(db.getChat(active.chat.id).fastMode, true);
+    assert.equal(db.getChat(other.id).fastMode, false);
+    assert.equal(active.chat.fastMode, false);
+    assert.equal((await call(101, false)).success, true);
+    assert.equal(db.getChat(active.chat.id).fastMode, false);
+    db.db.prepare("UPDATE project_access SET status='revoked' WHERE id=?").run(active.project.accessId);
+    assert.equal((await call(102, true)).success, false);
+    assert.equal(db.getChat(active.chat.id).fastMode, false);
+  } finally { db.close(); }
+});

@@ -57,3 +57,29 @@ test('model preference migrates nullable, persists across reopen and stays indep
     assert.equal(db.getChat(second.id).preferredModel, null);
   } finally { db.close(); fs.rmSync(base, { recursive: true, force: true }); }
 });
+
+test('legacy Fast and archive columns migrate safely and survive reopen without affecting other chats', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-harness-preferences-'));
+  const config = { databasePath: path.join(base, 'db.sqlite'), workspacesRoot: path.join(base, 'workspaces') };
+  let db = new HarnessDatabase(config);
+  try {
+    const user = createUser(db);
+    const project = db.createProject({ userId: user.id, slug: 'preferences', name: 'Preserved project' });
+    const args = { projectId: project.id, userId: user.id, projectAccessId: project.accessId, treePath: project.treePath, title: 'Preserved chat' };
+    const first = db.createChat(args);
+    const second = db.createChat(args);
+    db.db.exec('ALTER TABLE chats DROP COLUMN fast_mode; ALTER TABLE projects DROP COLUMN archived;');
+    db.close(); db = new HarnessDatabase(config);
+    assert.equal(db.getChat(first.id).fastMode, false);
+    assert.equal(db.getProject(project.id).archived, false);
+    db.updateChat(first.id, { fastMode: 1 });
+    db.setProjectArchived(project.id, true);
+    db.close(); db = new HarnessDatabase(config);
+    assert.equal(db.getChat(first.id).fastMode, true);
+    assert.equal(db.getChat(second.id).fastMode, false);
+    assert.equal(db.getProject(project.id).archived, true);
+    assert.equal(db.getProject(project.id).name, 'Preserved project');
+    assert.equal(db.getChat(first.id).title, 'Preserved chat');
+    assert.deepEqual(db.db.prepare('PRAGMA foreign_key_check').all(), []);
+  } finally { db.close(); fs.rmSync(base, { recursive: true, force: true }); }
+});

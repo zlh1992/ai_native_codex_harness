@@ -95,3 +95,5 @@ submission 的 chat/run 外键使用 `ON DELETE SET NULL`，同时保存不可�
 队列 HTTP GET 返回正文，只允许当前 chat owner 在有效 access 内读取；列表和状态由前端定期恢复。待发队列发生变化和新 run 出现后，前端继续复用 run SSE/journal 和消息历史恢复，停止后保留暂停卡片。POST 确认丢失时保留输入框草稿并复用客户端 id 重试。
 
 `input_steered` journal 仅含 input/run 标识，不含正文。GET run SSE 还可向已授权在线订阅者传递不持久化的 assistant/reasoning/command delta 与实时 diff；实时帧不推进 journal cursor，重放仍只返回脱敏语义事件。每次投递继续复验用户状态与 access，断线后正文由受 ACL 的消息/run 快照补齐。
+
+Fast 和项目归档分别通过幂等 ADD COLUMN 增加 chats.fast_mode 与 projects.archived，旧行均默认为 0；迁移不改变旧模型偏好、历史、ACL 或密码。回退旧代码可以保留这两个附加字段，但旧界面不会展示归档或启用 Fast；永久删除的数据无法通过代码回退恢复，必须依赖删除前备份。

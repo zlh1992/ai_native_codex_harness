@@ -106,7 +106,7 @@ test('running turn recovery never synthesizes an empty user message', () => {
 
 test('model selector restores each chat and prevents edits while saving or without a chat', () => {
   const source = app.match(/function updateModelSelect\([^)]*\) \{[\s\S]*?\n\}/)[0];
-  const select = {};
+  const select = { setAttribute() {} };
   const state = { selectedChat: null };
   const update = Function('state', '$', `${source}; return updateModelSelect;`)(state, () => select);
   update(); assert.equal(select.disabled, true); assert.equal(select.value, '');
@@ -118,6 +118,8 @@ test('model selector restores each chat and prevents edits while saving or witho
   update(); assert.equal(select.disabled, true);
   state.modelSaving = false; state.selectedChat = { preferredModel: null };
   update(); assert.equal(select.value, '');
+  state.selectedChat.fastMode = true;
+  update(); assert.equal(select.disabled, true);
   assert.match(html, /id="model-select"[^>]+aria-label="对话模型"/);
 });
 

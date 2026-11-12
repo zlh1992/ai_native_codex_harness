@@ -107,4 +107,11 @@ Seatbelt 不是容器。完全不可信用户需要独立 OS 用户、VM/容器�
 
 角色专用登录 API 必须在创建 session 前检查账号角色；旧通用登录 API 保留兼容。角色入口分离不替代 API 的角色与内容 ACL。显式 owner share 允许把授权时已有完整对话复制给接收员工；副本仍严格属于接收者，不开放原 owner chat、run、SSE 或任务提交权限。
 
-老板可经既有 chat PATCH 接口修改 `preferredModel`（白名单 id 或 null）；此操作要求 admin、原 chat ACL、CSRF/Origin 且 chat 无运行/恢复/排队输入。员工无该权限，运行服务也强制员工使用默认模型。`/api/me` 的 `models` 仅向老板返回受控目录，目录不表示上游账号保证可用。
+老板可经既有 chat PATCH 接口修改 `preferredModel`（白名单 id 或 null）；此操作要求 admin、原 chat ACL、CSRF/Origin 且 chat 无运行/恢复/排队输入。员工无任意选模权限，普通模式使用默认模型；Fast 允许所有角色选择固定的 Luna high fast 组合。`/api/me` 的 `models` 仅向老板返回受控目录，目录不表示上游账号保证可用。
+
+
+自助改密 POST /api/me/password 和管理员密码 PATCH 必须校验 passwordConfirmation，确认字段与口令都不进入审计。网页新密码双输入按产品要求显示明文，登录输入仍隐藏。自助路径在解析请求和哈希 await 后复验 session；策略生效后撤销全部会话并按已有生命周期排空。
+
+项目归档 POST /api/projects/:id/archive 校验有效 project access 和 CSRF/Origin。永久删除 DELETE /api/projects/:id?permanent=1 除 owner/admin、全部既有生命周期屏障外，要求 x-confirm-project-id 与当前项目一致；仅清除本次移动到受控 trash 的目录，不遍历其他回收站。
+
+portal_fast_mode dynamic tool 绑定 active 用户、access 与 chat，只可更新后续偏好，不能指定任意模型/thread/cwd。HTTP PATCH fastMode 通过相同私有 chat ACL。

@@ -115,3 +115,6 @@ completed task turn
 queued/steering 输入加入 chat/access/project 的持久生命周期与文件写入屏障；paused 是未执行草稿，不占运行资源。停止会暂停待发消息并中断当前 turn；失败、中断、停用、改密、撤权与 app-server 退出同样阻止队列继续自动执行。继续排队需重新通过执行策略校验。启动错误或运行异常不能自动反复重试同一消息。
 
 “打断插队”通过固定版本原生 `turn/steer` 把选定消息送入当前 turn，不创建第二个 root。Portal 同时校验客户端看到的 Portal run id，以及服务端持有的 native `expectedTurnId`，并把 queue id 作为 `clientUserMessageId`；不接受客户端 thread/cwd。只允许同一运行模式，当前模型、模式、沙箱、lease 和其余待发顺序均保持原执行语义。starting、已经结束、停止中或另一次 steer 尚未确认时返回冲突，不能误投下一轮。steer RPC 期间即使原 turn 完成，也须等待 RPC 确认后才允许下个输入启动。
+
+
+Fast 模式在每个 run 创建时冻结；HTTP 或 portal_fast_mode 在运行中修改只作用于后续 root turn，包括后续队列输入，不改变已运行 context。Fast 开启时覆盖 effort 为 high、model 为 gpt-6-luna，turn/start 显式发送 serviceTier=fast，关闭时发送 null 清除上一轮服务等级。不会重建 thread 或更改子代理策略。上游失败沿用既有错误处理，不静默换模型。
