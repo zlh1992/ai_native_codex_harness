@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>确认桌面任务指令 · 老板工作台</title>
+  <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/wechat-instruction.css">
+</head>
+<body>
+  <main class="instruction">
+    <a href="/boss">老板工作台</a>
+    <h1>发送桌面任务指令</h1>
+    <p id="status" role="status">正在核对老板账号和目标任务…</p>
+    <section id="review" hidden>
+      <h2 id="target"></h2>
+      <p><code id="thread"></code></p>
+      <pre id="prompt"></pre>
+      <p>这条指令将使用该任务已有的文件权限和审批设置。</p>
+      <button type="button" id="send" class="primary">确认发送到这个任务</button>
+    </section>
+  </main>
+  <script type="module" src="/wechat-instruction.js"></script>
+</body>
+</html>

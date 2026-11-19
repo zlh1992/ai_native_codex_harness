@@ -65,3 +65,7 @@ Portal 保留同一 HTTP/SSE、文件工作台和队列。`AgentRuntimeService` 
 ## 部署模型身份与校验
 
 本机 2026-11-13 部署模型 ID 为 `Qwen3.8-Flash-Next-Uncensored-oQ5e-mtp`，使用 MLX affine oQ5e 与原有 oMLX/DSH 路径。模型 ID 由运维配置，health 和 usage 显示实际值。模型切换要求固定 revision、校验权重 SHA-256 与元数据 Git blob、保留回退配置，并在业务空闲时执行。验收包括回环真实推理、隐私项目文件工具、local_session_id 绑定和员工 ACL 拒绝。量化档位表达数值存储配置，回答质量由模型权重和实际测试共同决定。
+
+老板可在已绑定微信私聊用显式只读命令将本人隐私项目名、文件和本人对话文本直接取回微信。此操作涉及微信传输，由本机处理且不创建模型 turn；回复正文不写入普通项目或云端模型上下文。隐私项目推理、记忆与显式搜索策略独立执行。
+
+指向本人隐私项目原 chat 的 /tell 文本经固定私聊认证后进入该 chat 的输入队列，沿用同一 AgentRuntimeService、本地引擎、EDIT/EXECUTE 模式和人工/自动确认策略。收件项目及云端模型均不接收指令正文。

@@ -1,5 +1,11 @@
 # 实施报告索引
 
+- [2026-11-19 老板微信任务控制分支提交](2026-11-19-wechat-branch-publication.md)
+
+- [2026-11-19 老板微信向已有任务下达指令](2026-11-19-wechat-task-instructions.md)
+
+- [2026-11-19 老板微信重新绑定与只读项目范围](2026-11-19-wechat-owner-visibility.md)
+
 - [2026-10-17 Portal 模型目录对齐与公网角色任务验证](2026-10-17-model-catalog-public-smoke.md)：阻塞；目录对齐、门控、重启和老板 GPT-6 high 推理通过；员工登录、网页浏览、GitHub clone 仍受阻。
 
 - [2026-10-11 Codex HOME 隔离：修复共享 models_cache 被旧版 pin 覆写](2026-10-11-codex-home-isolation.md)：完成；app-server 改用项目私有 `CODEX_HOME`，共用桌面家目录在 shell 与进程两侧 fail closed，桌面模型清单恢复 10 项且 `Unknown model` 归零，配套常驻流量监控与投毒自愈告警已挂 launchd。

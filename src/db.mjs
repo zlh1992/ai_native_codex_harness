@@ -252,6 +252,14 @@ export class HarnessDatabase {
         completed_at TEXT,
         UNIQUE(channel, external_event_id)
       );
+      CREATE TABLE IF NOT EXISTS wechat_desktop_instructions (
+        event_id TEXT PRIMARY KEY REFERENCES channel_events(id) ON DELETE CASCADE,
+        owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        binding_id TEXT NOT NULL REFERENCES channel_bindings(id) ON DELETE CASCADE,
+        thread_id TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','uncertain','queued','queued_waiting'))
+      );
       CREATE INDEX IF NOT EXISTS channel_events_scope_idx ON channel_events(channel, external_scope_id, created_at DESC);
       CREATE TABLE IF NOT EXISTS schema_migrations (
         name TEXT PRIMARY KEY,

@@ -201,3 +201,7 @@ HTTP E2E 使用隔离临时数据库、临时项目目录和协议兼容 fake ap
 ## 运维进程控制回归
 
 `test/background-process.test.mjs` 验证重复启动复用同一进程、停止后不再运行、PID 指向另一进程时拒绝操作；真实整套 stop/start/restart、双域名与角色登录验证记录在实施报告。此测试不替代既有 HTTP/Seatbelt E2E。
+
+固定老板微信的直接只读查询独立于模型工具。发布门控包含 `test/wechat-owner-library.test.mjs`，覆盖隐私正文直回、事件去重与撤权、员工项目/原对话拒绝、桌面双身份和运行目录隔离，以及对隐藏路径、目录逃逸和符号链接的拒绝。原模型工具仍须通过既有的 standard-only 断言。
+
+老板 /tell 回归固定私聊授权、普通及本地任务原队列、非本人拒绝、重复与冲突事件、桌面归属和只读手机预览、并发重复确认及不确定发送不重放。签名生产冒烟与真实手机扫码仍分别记录。回归入口为 test/wechat-owner-library.test.mjs。

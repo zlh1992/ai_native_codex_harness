@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { acceptInstruction, reviewDesktopInstruction } from './wechat-task-instructions.mjs';
+import { answerLibrary, parseLibraryCommand } from './wechat-owner-library.mjs';
 import { ROOT_MODELS, validateModel, validateEffort, defaultEffort, rootEffort, rootModel } from './models.mjs';
 import { formatWechatModelCatalog, parseWechatCommand, resolveWechatModel } from './wechat-channel-commands.mjs';
 import { DEFAULT_SESSION_COOKIE, validSessionSelector, selectedCookieName, requestSessionCookieName } from './session-selection.mjs';
@@ -329,8 +331,11 @@ async function route(req, res) {
     invariant(!config.wechatChannelSenderId || senderId === config.wechatChannelSenderId,
       403, 'CHANNEL_SENDER_FORBIDDEN', '微信发送者未绑定。');
     invariant(text.length >= 1 && text.length <= 100_000, 400, 'CHANNEL_EVENT_INVALID', '微信消息内容无效。');
+    const library = parseLibraryCommand(text);
     const existing = db.getChannelEvent(WECHAT_CHANNEL, eventId);
-    if (existing) {
+    if (existing && !library) {
+      invariant(existing.externalScopeId === externalScopeId && !/^owner-(?:read|task)\//u.test(existing.responseText || ''),
+        409, 'CHANNEL_EVENT_CONFLICT', '微信事件不匹配。');
       if (existing.status === 'completed' || existing.status === 'failed') {
         sendJson(res, 200, { ok: existing.status === 'completed', duplicate: true, status: existing.status, text: existing.responseText || '该消息已处理。' }, config);
         return;
@@ -359,6 +364,21 @@ async function route(req, res) {
       binding = db.createChannelBinding({ channel: WECHAT_CHANNEL, externalScopeId, userId: owner.id, projectId: project.id, chatId: chat.id });
       if (binding.chatId !== chat.id) db.deleteChat(chat.id);
       bindingCreated = true;
+    }
+    if (library) {
+      const context = { config, db, workspace, owner, project, binding, senderId, externalScopeId, eventId, text, secret, inputQueue: codex.inputQueue };
+      let reply;
+      if (library.action === 'tell') {
+        try { reply = await acceptInstruction(context, library); }
+        catch (error) {
+          if (!(error instanceof HttpError) || error.status >= 500) throw error;
+          reply = { ok: false, status: 'failed', text: '指令未提交。' + error.message };
+        }
+      } else {
+        reply = await answerLibrary(context, library);
+      }
+      sendJson(res, 200, reply, config);
+      return;
     }
     if (command?.type === 'new' && !bindingCreated) {
       const currentChat = db.getChat(binding.chatId);
@@ -478,6 +498,20 @@ async function route(req, res) {
   }
 
   let session = requireSession(req);
+  const instruction = /^\/api\/boss\/wechat-instructions\/([0-9a-f-]{36})$/u.exec(pathname);
+  if (instruction && ['GET', 'POST'].includes(req.method)) {
+    requireAdmin(session);
+    if (req.method === 'POST') requireMutation(req, session);
+    const result = await reviewDesktopInstruction({ config, db, id: instruction[1], send: req.method === 'POST',
+      authorize() {
+        const current = refreshSession(session);
+        requireAdmin(current);
+        return activeUserFor(current);
+      },
+    });
+    sendJson(res, 200, result, config);
+    return;
+  }
   if (await workGraphRoutes(req, res, url, session)) return;
   if (req.method === 'POST' && pathname === '/api/logout') {
     requireMutation(req, session);

@@ -130,3 +130,7 @@ Codex initialize/ready 不证明上游模型认证可用。使用本机 ChatGPT 
 ## 独立部署目录的固定入口
 
 主目录 `bin/services.sh` 可读取私有 `.tools/active-runtime`，将原 `.command` 操作转发到本仓库 `.tools/releases/` 下的活动部署。目录必须为绝对路径并包含服务脚本，配置无效时拒绝操作。部署目录与旧工作树应保留至数据兼容性和回滚窗口结束。
+
+已固定 sender 的老板私聊可用 `/library` 查询本人 Portal 和核准桌面资源。停用只读扩展、目录身份与手机收发验收见[服务控制指南](../../docs/SERVICE_CONTROL.md)。
+
+老板任务指令使用已配置的老板公网域名和本机桌面 daemon。核对页、受理与队列回执、失败后的恢复步骤见[服务控制指南](../../docs/SERVICE_CONTROL.md)。

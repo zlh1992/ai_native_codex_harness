@@ -8,6 +8,10 @@ export function safeReturnTo(value, role) {
   const fallback = defaultPage(role);
   if (typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//') || /[\\\u0000-\u001f]/.test(value)) return fallback;
   const url = new URL(value, 'https://portal.invalid');
+  if (role === 'admin' && url.origin === 'https://portal.invalid' && url.pathname === '/boss/wechat-instruction') {
+    const id = url.searchParams.get('id') || '';
+    return /^[0-9a-f-]{36}$/u.test(id) ? url.pathname + '?id=' + id : fallback;
+  }
   const allowed = role === 'admin' ? ['/boss', '/boss/workbench'] : ['/employee'];
   if (url.origin !== 'https://portal.invalid' || !allowed.includes(url.pathname)) return fallback;
   const params = new URLSearchParams();

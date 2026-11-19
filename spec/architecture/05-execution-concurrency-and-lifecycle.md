@@ -127,3 +127,5 @@ queued/steering 输入加入 chat/access/project 的持久生命周期与文件�
 Codex 主客户端在 active-root 过滤之前计量 root/子代理和迟到通知，使用 native thread/turn 绑定归属。新线程基线为零，resume/fork 先接收已有累计基线；若首个调用没有已知基线，只计 last 的可证明下限并标记 incomplete。重复累计值不重复加；倒退/乱序累计值不降低水位，不确定调用标记 incomplete。搜索和摘要的独立客户端携带父运行计量归属；固定 Luna-low，隐私搜索仍只把 query 发给模型。
 
 本地 DSH 在 llm/stream 作用域识别 compaction，逐个实际 /chat/completions HTTP 请求生成独立标识，从经过的原始 SSE usage 提取数值（不存正文）；每个请求的样本替换更新，缺失 usage 不采用框架零值或上下文估算。异常/取消也保留已上报计量，Worker 退出关闭未完成记录并标为不确定。
+
+固定老板微信 /tell 作为原任务的一条新输入。Portal 目标复用 InputQueueService，忙碌时遵循原任务排队与调度策略。桌面目标经老板逐条确认后使用 thread/queue/add；已确认入队的未加载任务可以按原设置 thread/resume。回执区分入队、入队待恢复、投递状态不确定及目标不可用，不能仅凭入队断言执行成功。

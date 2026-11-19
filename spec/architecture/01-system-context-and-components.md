@@ -85,3 +85,5 @@ Browser request
 ## 工作图组件
 
 WorkGraphStore 管理持久状态；ProjectContextService 固定输入；ProjectShareService 批量准备授权；WorkGraphService 管理清单/交付/依赖；TaskReviewService 管理验收；WorkflowScheduler 和 WorkGraphRuntime 复用 Codex 运行；静态 WorkGraphUI 复用任务首页。 详细契约见 [多人 Work Graph](09-human-work-graph.md)，操作见 [工作图指南](../../docs/WORK_GRAPH.md)。
+
+固定老板入口的直接查询先于模型路由执行。Portal 复验本人身份与有效绑定；Portal 项目沿用 ACL 与文件 helper，桌面数据由只读 Seatbelt 子进程读取。两条路径均直接回复微信。

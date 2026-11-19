@@ -176,3 +176,5 @@ steering -> paused (delivery uncertain; never automatically resend)
 ## 多人图扩展
 
 `kind=dag` 的计划、人工提交、清单、审核及 handoff 遵循 [多人 Work Graph](09-human-work-graph.md)。manual 原生身份为空；不能套用 linear 的下一步推进逻辑。包含 workflow 历史的项目暂不提供普通删除，须保留提交与恢复证据。
+
+老板私聊的 `/library` 命令组绑定既有 ChannelBinding、固定 sender 和 owner。桌面项目 ID 同时绑定核准根目录；桌面对话 ID 需经双身份及来源复验。直接查询的 ChannelEvent 只保存请求的带钥摘要，重试只在权限仍有效时重新读取。

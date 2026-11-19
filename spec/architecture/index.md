@@ -43,3 +43,7 @@
 - 改变任何“必须”不变量时，必须同时更新架构文件、报告和对应门控测试；不得只改文档或只删测试。
 - `07-e2e-release-contracts.md` 中标为自动 E2E 的行为是发布契约。删除、跳过或弱化用例等同于架构变更。
 - point-in-time 事实写进 report；长期有效的约束写进 architecture。不要把临时 PID、公网 quick URL 或一次运行日志写成长期架构事实。
+
+老板固定微信入口另有由本人主动调用的本机只读命令。它可直接回传老板拥有的普通/隐私项目和获准的桌面 Codex 内容，详见 [项目约束](02-project-constraints.md) 与[信任边界](04-security-and-trust-boundaries.md)。
+
+固定老板私聊另支持把显式指令送入本人选中的原任务。Portal 按目标输入队列处理；桌面由老板 Portal 核对后提交原生文本队列。详见[执行生命周期](05-execution-concurrency-and-lifecycle.md)。
