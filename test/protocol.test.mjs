@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import path from 'node:path';
 import { loadConfig } from '../src/config.mjs';
 
 const read = (file) => fs.readFileSync(new URL(file, import.meta.url), 'utf8');
@@ -40,6 +41,23 @@ test('local launcher surfaces Codex startup failure instead of appearing hung', 
   assert.ok(status.includes('Codex app-server 启动失败'));
   assert.ok(start.indexOf('touch "$SERVER_LOG"') < start.indexOf('wc -l < "$SERVER_LOG"'));
   assert.ok(read('../bin/install-mac.sh').includes('npm ci --omit=dev --ignore-scripts'));
+});
+
+test('app-server keeps a project private CODEX_HOME instead of the desktop one', () => {
+  const config = loadConfig({});
+  assert.equal(config.codexHome, path.join(config.dataDir, 'codex-home'));
+  assert.ok(!config.codexHome.endsWith(`${path.sep}.codex`));
+  const common = read('../bin/_common.sh');
+  const start = read('../bin/start-local.sh');
+  assert.ok(common.includes('$DATA_DIR_ABS/codex-home'));
+  assert.ok(!common.includes('CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"'));
+  const source = read('../src/codex-client.mjs');
+  assert.ok(source.includes('childEnv.CODEX_HOME ||= this.config.codexHome'));
+  assert.ok(source.includes("if (!this.config.searchOnly) bootstrapPrivateCodexHome"));
+  // 共用家目录必须在启动前 fail closed：shell 侧与进程侧各有一道。
+  assert.ok(common.includes('validate_codex_home()'));
+  assert.ok(start.includes('validate_codex_home'));
+  assert.ok(source.includes("error.code = 'CODEX_HOME_SHARED_WITH_DESKTOP'"));
 });
 
 test('app-server launch policy fixes the native subagent limit and Luna model', () => {

@@ -83,4 +83,4 @@ Codex 原生长期记忆在 app-server 进程参数、每个 thread config 和 r
 
 ## 9. 信任与账号边界
 
-所有用户仍共享一个 app-server 进程、一个本机 `CODEX_HOME` 与同一 Codex 登录对应的配额。原生记忆关闭消除了一个明确的跨用户串忆入口，但 Portal 对 HTTP、动态工具、cwd、sandbox 和 active root 的业务 ACL 仍不构成敌对租户级的上游身份或进程隔离；当前产品只能定位为内部互信 Pilot。若面向互不信任组织，必须拆成 per-user/per-tenant worker 与独立上游身份。公网输入会发送给该 Codex 登录对应的 OpenAI 服务，不是纯本地推理。
+所有用户仍共享一个 app-server 进程、一个项目私有 `CODEX_HOME`（`$DATA_DIR/codex-home`，与桌面 Codex 分离）与同一 Codex 登录对应的配额。原生记忆关闭消除了一个明确的跨用户串忆入口，但 Portal 对 HTTP、动态工具、cwd、sandbox 和 active root 的业务 ACL 仍不构成敌对租户级的上游身份或进程隔离；当前产品只能定位为内部互信 Pilot。若面向互不信任组织，必须拆成 per-user/per-tenant worker 与独立上游身份。公网输入会发送给该 Codex 登录对应的 OpenAI 服务，不是纯本地推理。

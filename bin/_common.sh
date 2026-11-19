@@ -26,7 +26,10 @@ TUNNEL_LABEL="com.codex-harness-remote.tunnel"
 HARNESS_PROCESS_MODE="${HARNESS_PROCESS_MODE:-launchd}"
 CODEX_MODEL_PROVIDER="${CODEX_MODEL_PROVIDER:-openai_http}"
 CHATGPT_CODEX_BASE_URL="${CHATGPT_CODEX_BASE_URL:-https://chatgpt.com/backend-api/codex}"
-CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+# 私有 CODEX_HOME：本项目的 app-server 固定在 0.150.0-alpha.8，会按自身 client_version 重写
+# models_cache.json。若与桌面 Codex 共用 ~/.codex，会抹掉桌面正在使用的模型元数据，
+# 因此默认落在项目数据目录内；上游登录凭据仍通过符号链接复用，保持单上游登录。
+CODEX_HOME="${CODEX_HOME:-$DATA_DIR_ABS/codex-home}"
 export CODEX_HOME
 NODE_BIN="${NODE_BIN:-$(command -v node 2>/dev/null || true)}"
 if [[ -z "$NODE_BIN" && -x "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node" ]]; then
@@ -45,14 +48,36 @@ validate_codex_upstream() {
   fi
 }
 
+validate_codex_home() {
+  # 拒绝与桌面 Codex 共用家目录：本项目 pin 的 CLI 会按自身 client_version 覆写
+  # models_cache.json，共用会把桌面正在使用的模型元数据抹掉（桌面退回 fallback 元数据、
+  # 上下文窗口偏小、提前自动压缩），因此这一共用必须在启动前 fail closed。
+  local mine="${CODEX_HOME%/}" shared="${HOME%/}/.codex"
+  if [[ -n "$mine" && -e "$mine" && -e "$shared" ]]; then
+    mine="$(cd "$mine" && pwd -P)"
+    shared="$(cd "$shared" && pwd -P)"
+  fi
+  if [[ -n "$mine" && "$mine" == "$shared" ]]; then
+    echo "拒绝启动：CODEX_HOME 不能与桌面 Codex 共用 ${HOME%/}/.codex，请使用项目私有目录（默认 \$DATA_DIR/codex-home）。" >&2
+    return 2
+  fi
+}
+
 codex_health() {
   curl -fsS --max-time 5 "http://127.0.0.1:$PORT/api/health" 2>/dev/null \
     | "$NODE_BIN" -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{try{const x=JSON.parse(s);process.exit(x.ok&&x.codex===true&&x.codexState==="ready"?0:1)}catch{process.exit(1)}})'
 }
 
 ensure_runtime_dirs() {
-  mkdir -p "$DATA_DIR_ABS" "$LOG_DIR" "$ROOT_DIR/.tools"
-  chmod 700 "$DATA_DIR_ABS" "$LOG_DIR" "$ROOT_DIR/.tools"
+  mkdir -p "$DATA_DIR_ABS" "$LOG_DIR" "$ROOT_DIR/.tools" "$CODEX_HOME"
+  chmod 700 "$DATA_DIR_ABS" "$LOG_DIR" "$ROOT_DIR/.tools" "$CODEX_HOME"
+  # 复用老板本机 ChatGPT 登录：符号链接而非副本，避免两份 refresh token 互相踢出。
+  local credential
+  for credential in auth.json installation_id; do
+    if [[ ! -e "$CODEX_HOME/$credential" && -e "$HOME/.codex/$credential" ]]; then
+      ln -s "$HOME/.codex/$credential" "$CODEX_HOME/$credential"
+    fi
+  done
 }
 
 read_pid() {

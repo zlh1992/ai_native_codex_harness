@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
+CONTROL_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ -f "$CONTROL_ROOT/.tools/active-runtime" ]]; then
+  IFS= read -r ACTIVE_RUNTIME < "$CONTROL_ROOT/.tools/active-runtime"
+  case "$ACTIVE_RUNTIME" in
+    "$CONTROL_ROOT"/.tools/releases/*)
+      [[ -f "$ACTIVE_RUNTIME/bin/services.sh" ]] || { echo "活动部署目录缺少服务脚本。" >&2; exit 2; }
+      exec bash "$ACTIVE_RUNTIME/bin/services.sh" "$@"
+      ;;
+    *) echo "活动部署目录配置无效。" >&2; exit 2 ;;
+  esac
+fi
 source "$(cd "$(dirname "$0")" && pwd)/_common.sh"
 cd "$ROOT_DIR"
 BRIDGE_DIR="${WECHAT_BRIDGE_DIR:-$(dirname "$ROOT_DIR")/wx_codex_self}"

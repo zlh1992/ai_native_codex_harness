@@ -74,6 +74,10 @@ export function loadConfig(env = process.env) {
     portalAgentConfig: resolved(env.PORTAL_AGENT_CONFIG, path.join(ROOT_DIR, 'portal-agents', 'luna.toml')),
     codexBin: env.CODEX_BIN || '/Applications/ChatGPT.app/Contents/Resources/codex',
     codexCliVersion: '0.150.0-alpha.8',
+    // 私有 CODEX_HOME：pin 版本的 app-server 会按自身 client_version 重写 models_cache.json，
+    // 与桌面 Codex 共用 ~/.codex 会把对方正在使用的模型元数据抹掉，因此默认落在项目数据目录内，
+    // 上游登录凭据由 codex-client 以符号链接复用，仍是单上游登录。
+    codexHome: resolved(env.CODEX_HOME, path.join(dataDir, 'codex-home')),
     codexModel: env.CODEX_MODEL || 'gpt-6-luna',
     codexModelProvider,
     chatgptCodexBaseUrl,

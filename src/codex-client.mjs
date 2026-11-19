@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { buildSeatbeltProfile } from './sandbox.mjs';
@@ -15,6 +16,42 @@ function rpcError(value) {
   error.code = value?.code;
   error.data = value?.data;
   return error;
+}
+
+// 比较两个路径是否指向同一目录（macOS 的 /var 与 /private/var 符号链接要用 realpath 归一）。
+function samePath(left, right) {
+  const real = (p) => {
+    try { return fs.realpathSync(p); } catch { return path.resolve(p); }
+  };
+  return real(left) === real(right);
+}
+
+// 私有 CODEX_HOME 只承载本项目 app-server 的 thread 历史与模型清单；上游登录凭据用符号链接
+// 复用老板本机 ChatGPT 登录，既保持“单上游登录”，也避免两份 refresh token 互相踢出。
+export function bootstrapPrivateCodexHome(codexHome, sharedHome = os.homedir()) {
+  const shared = path.join(sharedHome, '.codex');
+  if (samePath(codexHome, shared)) {
+    // 与桌面 Codex 共用家目录时，本进程 pin 的 CLI 会按自己的 client_version 覆写
+    // models_cache.json，抹掉桌面正在使用的模型元数据；这里 fail closed，不回退。
+    const error = new Error(`拒绝使用与桌面 Codex 共用的 CODEX_HOME=${codexHome}；请使用项目私有目录（默认 $DATA_DIR/codex-home）。`);
+    error.code = 'CODEX_HOME_SHARED_WITH_DESKTOP';
+    throw error;
+  }
+  fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+  fs.chmodSync(codexHome, 0o700);
+  const source = shared;
+  for (const name of ['auth.json', 'installation_id']) {
+    const target = path.join(codexHome, name);
+    if (fs.existsSync(target)) continue;
+    if (!fs.existsSync(path.join(source, name))) continue;
+    fs.symlinkSync(path.join(source, name), target);
+  }
+  if (!fs.existsSync(path.join(codexHome, 'auth.json'))) {
+    const error = new Error(`私有 CODEX_HOME ${codexHome} 缺少上游登录凭据，且 ${source}/auth.json 不存在。`);
+    error.code = 'CODEX_HOME_UNAUTHENTICATED';
+    throw error;
+  }
+  return codexHome;
 }
 
 export class CodexAppServerClient extends EventEmitter {
@@ -82,9 +119,12 @@ export class CodexAppServerClient extends EventEmitter {
       if (process.env[key] !== undefined) childEnv[key] = process.env[key];
     }
     childEnv.HOME ||= os.homedir();
-    childEnv.CODEX_HOME ||= path.join(childEnv.HOME, '.codex');
+    // 默认使用项目私有 CODEX_HOME，不回落 ~/.codex：本进程 pin 的 CLI 版本会按自己的
+    // client_version 重写 models_cache.json，共用桌面 Codex 的家目录会污染其模型元数据。
+    childEnv.CODEX_HOME ||= this.config.codexHome || path.join(childEnv.HOME, '.codex');
     let binary = this.config.codexBin;
     let spawnArgs = args;
+    if (!this.config.searchOnly) bootstrapPrivateCodexHome(childEnv.CODEX_HOME, childEnv.HOME);
     if (this.config.searchOnly) {
       // Dedicated search process sees only its disposable auth/state directory,
       // never the Portal database, workspaces, DSH sessions or user Codex home.

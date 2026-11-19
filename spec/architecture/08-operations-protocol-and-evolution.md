@@ -111,6 +111,8 @@ Codex initialize/ready 不证明上游模型认证可用。使用本机 ChatGPT 
 
 若 App 自动更新替换内置二进制，可使用独立安装的官方同版本 CLI 并通过 `CODEX_BIN` 绑定；这不改变协议 pin。重启前应核对实际二进制版本，运行中的旧进程 ready 不能证明磁盘上的新二进制兼容。
 
+`CODEX_HOME` 默认是 `$DATA_DIR/codex-home`，可用环境变量覆盖。它承载本项目 app-server 的原生 thread 历史与 `models_cache.json`，必须与其它 Codex 客户端（尤其桌面 ChatGPT.app）分开：Codex 按拉取时的 `client_version` 决定清单内容并独占覆写这份缓存，若 pin 的旧版本与桌面共用家目录，桌面会把自己的模型判为未知并退回 fallback 元数据，表现为上下文窗口偏小、更早触发自动压缩。这一共用已在两处 fail closed：`bin/_common.sh` 的 `validate_codex_home` 在启动链上拒绝 `CODEX_HOME` 等于 `~/.codex`，`bootstrapPrivateCodexHome` 在 spawn 前以 `CODEX_HOME_SHARED_WITH_DESKTOP` 拒绝，没有绕过开关。运维上判断是否再次踩坑：看 `~/.codex/models_cache.json` 的 `client_version` 是否等于桌面 `codex --version`，以及桌面日志是否出现 `Unknown model ... fallback model metadata`。本机另有常驻检测器（`~/bin/codex-traffic-watch.py`，launchd `com.starwin.codex-watch` 记录全部对外请求与返回 token、`com.starwin.codex-guard` 每 5 分钟体检）：健康时把正确清单存为 `~/Library/Application Support/CodexTraffic/models_cache.golden.json`，一旦被旧客户端覆写则自动恢复并弹通知，日志在 `~/Library/Logs/CodexTraffic/`。私有 home 的 `auth.json`、`installation_id` 是指向 `~/.codex` 的符号链接，备份 `DATA_DIR` 前必须确认目标本机已有该登录，否则恢复后 app-server 以 `CODEX_HOME_UNAUTHENTICATED` fail closed。
+
 输入队列 API：`GET/POST /api/chats/:chatId/queue`，`PATCH/DELETE /api/chats/:chatId/queue/:inputId`，`POST .../:inputId/steer|resume`。POST 新输入携带幂等 `id`、`prompt`、`mode`、`effort`；后续修改携带 `revision`，steer 额外携带 `expectedRunId`，不确定发送的 resume 额外要求 `acknowledgeUncertain=true`。既有 POST turns SSE 保持可用，但存在待处理输入时拒绝绕过 FIFO。协议升级检查增加 `turn/steer` 的 expectedTurnId、clientUserMessageId 与 response turnId；本次不改变精确 CLI pin。
 
 队列上线后，降级前应停止并排空全部运行、暂停所有输入并备份 SQLite；保留新表及未发正文，旧代码不会消费这些输入。重启不自动续发待处理消息，用户在队列中继续或取消。
@@ -124,3 +126,7 @@ Codex initialize/ready 不证明上游模型认证可用。使用本机 ChatGPT 
 /api/me 返回同一 GPT 模型目录及角色默认强度；模型目录只列 Codex 客户端标记为可见的根模型，不含隐藏/内部模型，更新目录须同步修改白名单契约；PATCH chat 支持 preferredModel/preferredEffort（null 恢复默认）。GET /api/admin/token-usage 使用 from/to（北京时间 YYYY-MM-DD，包含终止日）、userId、engine（gpt/qwen）、model 筛选，缺省近 7 天；返回 totals/days/employees/models/kinds、startedAt、updatedAt 与本地引擎状态。前端可见时每 30 秒刷新，支持手动刷新；统计为本网站调用上报量，不是共享账号账单或费用。
 
 发布先排空运行并一致性备份 SQLite；新增账本不删除既有数据。回退本次代码可以保留 nullable 列与计量表，但回退期间不会继续采集，统计完整性须注明该空窗；不能回退到不支持隐私项目的版本。本地 Qwen disabled 与未上报用量分别显示，真实本机推理未验收前不因看板上线而启用模型。
+
+## 独立部署目录的固定入口
+
+主目录 `bin/services.sh` 可读取私有 `.tools/active-runtime`，将原 `.command` 操作转发到本仓库 `.tools/releases/` 下的活动部署。目录必须为绝对路径并包含服务脚本，配置无效时拒绝操作。部署目录与旧工作树应保留至数据兼容性和回滚窗口结束。

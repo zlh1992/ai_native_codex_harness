@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | 用户、ACL、项目、task、run、approval、lease、submission、审计 | SQLite | 业务授权与状态机 |
 | 用户记忆、来源、版本、提取任务、每轮引用与分享确认 | SQLite | 长期记忆的权威正文、可见性和失效证据 |
-| 完整原生 transcript、thread/turn/item | Codex `CODEX_HOME` | 高保真对话历史与原生恢复 |
+| 完整原生 transcript、thread/turn/item | Codex `CODEX_HOME`（`$DATA_DIR/codex-home`） | 高保真对话历史与原生恢复 |
 | 项目文件与 Git 状态 | 主目录/worktree | 共享事实和交付内容 |
 | per-user Markdown/Milvus Lite/embedding | `.data/memory-index` 与模型缓存 | 可删除重建的召回加速层 |
 
@@ -109,7 +109,7 @@ submission 的 chat/run 外键使用 `ON DELETE SET NULL`，同时保存不可�
 - 停服备份必须包含 SQLite 主文件、`-wal`、`-shm`，以及 `workspaces/`、`trees/`、`trash/`。`.data/memory-index` 可选，因为能从 SQLite 重建；模型缓存无需备份。
 - 在线备份应使用 SQLite backup API，不能只复制主文件。
 - 恢复 tree 或 trash 文件前必须核对 owner、access、branch 和 ACL，不得按路径猜测归属。
-- `CODEX_HOME` 保存 native thread 与登录，不在 Portal SQLite 备份内；灾难恢复计划必须单独考虑它。
+- `CODEX_HOME`（`$DATA_DIR/codex-home`）保存 native thread 与模型清单，不在 Portal SQLite 备份内；灾难恢复计划必须单独考虑它。其中的 `auth.json` 与 `installation_id` 是指向 `~/.codex` 的符号链接，换机恢复需要先在本机完成 ChatGPT 登录，否则 app-server 以 `CODEX_HOME_UNAUTHENTICATED` fail closed。
 - 新 schema 一旦允许多员工授权，旧二进制可能重建旧单席索引，不能把降级旧代码当作无风险回滚。
 
 显式 share 复制受 ACL 保护的消息 fallback，并在 chat 保存来源 chat id 与分享时间；完整模型上下文由独立 native fork 保存。副本不引用原 run/task 权限，不在 audit/event 保存 transcript。新增字段幂等迁移，既有 chat 保持无来源字段。

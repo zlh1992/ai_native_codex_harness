@@ -2,6 +2,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/_common.sh"
 validate_codex_upstream
+validate_codex_home
 ensure_runtime_dirs
 
 if [[ "$HOST" != "127.0.0.1" && "$HOST" != "localhost" && "$HOST" != "::1" ]]; then

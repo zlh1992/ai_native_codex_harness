@@ -27,8 +27,10 @@ export class CodexSearchService {
     let client, threadId, turnId, abort, timeout, usageId, completed = false;
     const ledger = metering?.ledger;
     try {
-      const auth = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'auth.json');
-      invariant(fs.existsSync(auth), 503, 'SEARCH_AUTH_UNAVAILABLE', '专用搜索需要本机 Codex 登录凭据。');
+      // 私有 CODEX_HOME 的 auth.json 是指向本机登录的符号链接；未引导时回落到本机家目录再复制。
+      const auth = [process.env.CODEX_HOME, path.join(os.homedir(), '.codex')]
+        .filter(Boolean).map((dir) => path.join(dir, 'auth.json')).find((file) => fs.existsSync(file));
+      invariant(auth, 503, 'SEARCH_AUTH_UNAVAILABLE', '专用搜索需要本机 Codex 登录凭据。');
       fs.copyFileSync(auth, path.join(root, 'auth.json')); fs.chmodSync(path.join(root, 'auth.json'), 0o600);
       client = new CodexAppServerClient({ ...this.config, rootDir: root, searchOnly: true, summaryOnly: summary });
       this.clients.add(client);

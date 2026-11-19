@@ -39,7 +39,9 @@ Portal 应为 `codex=true`、`codexState=ready`。微信 `bound=true`、`phase=r
 
 本机使用已有 ChatGPT 登录，模型地址应为项目默认的 `https://chatgpt.com/backend-api/codex`。若消息已到达但模型报 `401 / INVALID_API_KEY`，检查 `.env` 的 `CHATGPT_CODEX_BASE_URL` 是否与认证方式匹配；重新生成微信二维码不能修复模型认证。修改模型地址后重启，并用真实消息验证，不能仅以 `ready` 判断认证成功。
 
-启动脚本会拒绝非官方 Codex provider 或地址。未显式设置 `CODEX_HOME` 时，Codex 子进程读取当前 macOS 用户的 `~/.codex` 登录目录。老板/员工普通项目和微信固定项目都走这一本机 ChatGPT 登录；老板 `local_private` 隐私项目当前通过 `LOCAL_QWEN_*` 配置接入本机 Qwen OpenAI-compatible 服务，不会自动切换到云端模型，也不会作为普通项目或微信的备用引擎。
+启动脚本会拒绝非官方 Codex provider 或地址，也会拒绝把 `CODEX_HOME` 指回桌面 Codex 的 `~/.codex`（`validate_codex_home`，报“拒绝启动：CODEX_HOME 不能与桌面 Codex 共用 …”）。未显式设置 `CODEX_HOME` 时，Codex 子进程使用项目私有的 `$DATA_DIR/codex-home`，不再读写桌面 Codex 的 `~/.codex`：本项目 pin 的 CLI 版本会按自身 `client_version` 重写 `models_cache.json`，与桌面共用家目录会抹掉桌面正在使用的模型元数据。上游登录凭据仍以符号链接复用当前 macOS 用户的 `~/.codex/auth.json`，仍是同一个 ChatGPT 登录与配额；私有 home 缺少凭据且本机也没有登录时启动失败，不会静默降级。老板/员工普通项目和微信固定项目都走这一本机 ChatGPT 登录；老板 `local_private` 隐私项目当前通过 `LOCAL_QWEN_*` 配置接入本机 Qwen OpenAI-compatible 服务，不会自动切换到云端模型，也不会作为普通项目或微信的备用引擎。
+
+桌面 Codex 的降智监控与自愈由本机 launchd 承担，与本仓库服务无关：`com.starwin.codex-watch` 常驻记录桌面每一次 `POST /responses` 与返回 token（`~/Library/Logs/CodexTraffic/watch.log`），`com.starwin.codex-guard` 每 5 分钟检查 `~/.codex/models_cache.json` 的 `client_version` 是否仍等于桌面 CLI 版本，健康就刷新金本位副本，被旧客户端覆写则自动恢复并弹 macOS 通知（`~/Library/Logs/CodexTraffic/guard.log`）。手工排查用 `~/bin/codex-traffic-watch.py guard --restore`（体检加自愈）、`audit`（降智体检报告）、`watch`（实时流量）；停止监控用 `launchctl bootout gui/$(id -u)/com.starwin.codex-watch`。
 
 ## 5. 重置老板微信二维码
 
@@ -62,3 +64,7 @@ Portal 应为 `codex=true`、`codexState=ready`。微信 `bound=true`、`phase=r
 当前 Mac 的 `.env` 显式配置 `HARNESS_PROCESS_MODE=detached`。Portal 与隧道脱离启动终端运行，进程记录保存在私有 `.data`；关闭、重启、状态脚本都会识别，不再需要手动启动 Python/Node。关掉终端窗口不会停服务；Mac 注销/重启或服务崩溃后，重新运行 `start.command`。微信由其既有 LaunchAgent 管理。
 
 其他部署默认 `launchd`，仍可使用原 `bin/start-local.sh` 等分组件命令。微信仓库默认位于同级 `wx_codex_self`，可在 `.env` 用 `WECHAT_BRIDGE_DIR` 指定；本机微信设置端口为 18767。更改设置端口须同步快捷脚本。
+
+## 当前独立部署
+
+2026-11-12 起，Fast 适配版运行于主仓库 `.tools/releases/bench34-fast-7d59a5c`，私有 `.tools/active-runtime` 记录此目录。主目录的 start/stop/restart/status/health.command 通过服务脚本转发到该部署，继续使用原入口即可。数据库和原生历史位于主仓库 `.data`，备份位于 `.tools/backups/2026-11-12-bench34-fast`。恢复旧版本前先排空运行、备份新增数据并检查数据库兼容性，再切换活动目录。

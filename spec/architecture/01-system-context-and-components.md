@@ -62,12 +62,12 @@ Browser request
 .data/trash/<actor-id>/                     可恢复删除
 .data/memory-index/users/<user-id>/         SQLite 生成的 per-user Markdown 与 Milvus Lite 派生索引
 .data/memory-model-cache/                   固定 revision 的本地 ONNX 模型缓存
-CODEX_HOME                                  原生 Codex thread/登录；由所有 Portal 用户共享
+.data/codex-home/                           私有 CODEX_HOME：原生 Codex thread/模型清单；由所有 Portal 用户共享，与桌面 Codex 分离；auth.json 与 installation_id 是指向本机登录的符号链接
 ```
 
 `tree_path`、`project_access_id` 和 `codex_thread_id` 只由服务端数据库绑定产生。对外 payload 必须移除物理 `treePath`、branch 内部细节及其他绝对路径。
 
-`CODEX_HOME` 虽共享，但 Portal 启动参数和所有 start/resume/fork 的 thread config 都固定 `features.memories=false`、`memories.generate_memories=false`、`memories.use_memories=false`；初始化后必须用 `config/read` 验证有效值，任一不为 `false` 就拒绝 ready。
+`CODEX_HOME` 虽在 Portal 用户之间共享，但 Portal 启动参数和所有 start/resume/fork 的 thread config 都固定 `features.memories=false`、`memories.generate_memories=false`、`memories.use_memories=false`；初始化后必须用 `config/read` 验证有效值，任一不为 `false` 就拒绝 ready。该 `CODEX_HOME` 默认是 `$DATA_DIR/codex-home`，不再与桌面 Codex 共用：app-server 按自身 pin 的 `client_version` 拉取并独占重写 `models_cache.json`，桌面 Codex 使用更新版本 CLI 时不会再被旧清单覆盖。
 
 普通项目和微信固定项目的 Codex app-server 使用当前 macOS 用户的本机 ChatGPT 登录，并固定 `openai_http` 与 `https://chatgpt.com/backend-api/codex`；运行配置和生命周期脚本拒绝其他 provider/endpoint。`local_private` 由独立回环 Qwen OpenAI-compatible 服务路由，不能与普通项目或微信互换。
 

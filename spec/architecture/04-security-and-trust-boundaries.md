@@ -14,7 +14,7 @@
 - 从命令环境读取 Portal、隧道或 Codex 凭据；
 - 利用 SSE cursor 或 submission 引用跨 chat、跨用户读取信息。
 
-当前不防御共享 app-server、共享 OS 账号或共享上游 Codex 实现本身对敌对租户造成的侧信道与故障域问题。因此只能用于被组织授权、具有基本互信的员工。普通项目和微信固定项目只使用本机 ChatGPT 官方 Codex 登录；第三方 provider/endpoint 在配置加载与启动脚本中 fail closed。`local_private` 才能访问本机回环 Qwen OpenAI-compatible 服务，不能 fallback 到云端或被微信渠道选用。
+当前不防御共享 app-server、共享 OS 账号或共享上游 Codex 实现本身对敌对租户造成的侧信道与故障域问题。因此只能用于被组织授权、具有基本互信的员工。普通项目和微信固定项目只使用本机 ChatGPT 官方 Codex 登录；第三方 provider/endpoint 在配置加载与启动脚本中 fail closed。`local_private` 才能访问本机回环 Qwen OpenAI-compatible 服务，不能 fallback 到云端或被微信渠道选用。私有 `CODEX_HOME` 中的 `auth.json` 与 `installation_id` 必须是指向本机登录的符号链接：上游仍是同一身份与配额，磁盘上不产生第二份凭据副本，也不允许两处独立刷新 refresh token；本机与私有 home 都没有凭据时 app-server fail closed。
 
 微信渠道是本机 transport，不是新的 Portal 用户。二维码绑定得到的微信身份只允许进入运营配置指定的老板 `weichat-project`；桥接进程不能选择项目、chat、cwd 或原生 thread。该 active binding 的老板 chat 可调用服务端跨项目只读工具，但每次目标解析必须同时满足当前 user 为活动老板、项目由该 user 拥有、active access 为 owner 且类型为 standard；员工自有/仅共享项目、local_private、本机未纳管目录、写入和命令均不在能力内。Portal 只接受回环请求，并要求基于 0600 secret 的 HMAC、时间窗和 nonce；外部事件 ID 在 SQLite 中唯一，防止轮询重试重复执行。
 

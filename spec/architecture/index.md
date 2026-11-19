@@ -30,7 +30,7 @@
 5. 浏览器只访问 Portal HTTP/SSE，禁止直接访问或选择 Codex JSON-RPC、thread、cwd、tree 或 sandbox policy。
 6. 不同 chat 的 root turn 可在同一 access/worktree 并行，默认 EXECUTE 容量与 11 个 Portal root 席一致；浏览器写入、task submission 和 owner delivery 仍要求 access 空闲。系统尚未实现每任务 worktree、自动冲突解决或 PR 工作流。
 7. EDIT 只允许项目文件读写，EXECUTE 额外允许项目内命令；chat 独立持久化模式且默认 EXECUTE。通过 ACL、路径和保留目录校验的项目内文件变更与 EXECUTE 命令由 Portal 自动接受，不要求老板或员工逐次点击。
-8. 单 App Server、单 `CODEX_HOME`、单上游 Codex 登录只适用于内部互信 Pilot，不宣称敌对租户级隔离。
+8. 单 App Server、单 `CODEX_HOME`、单上游 Codex 登录只适用于内部互信 Pilot，不宣称敌对租户级隔离。该 `CODEX_HOME` 是项目私有目录（默认 `$DATA_DIR/codex-home`），不与桌面 Codex 共用，凭据以符号链接复用同一本机登录；隔离只消除跨客户端的 `models_cache.json` 覆写，不构成 Portal 内部隔离。
 9. App Server 协议使用精确 CLI 版本 pin，并用该版本重新生成 schema；不能靠模糊版本匹配掩盖协议漂移。
 10. Portal 启动的 Codex app-server 原生长期记忆永久关闭并在 ready 前验证；普通项目记忆以 user_id 和当前 access 为边界；隐私项目使用独立 user_id + project_id 作用域，双向禁止跨域召回。
 11. 上述共享、Codex 执行及项目内自动放行默认描述普通项目。不可变 local_private 项目只走本地 DSH 适配的回环 OpenAI-compatible 模型（当前为 Qwen）、永不分享，默认人工确认；唯一云端例外为按策略提交的独立搜索词，详见第 10 章。

@@ -4,7 +4,7 @@
 
 Codex Harness Remote 把一台已登录 Codex 的 Mac 包装成受控 Web 工作台，让一个老板账号管理多个员工账号、项目授权、任务交付和资源配额，同时把浏览器与本机文件、Codex 原生协议和凭据隔开。
 
-当前产品定位是内部互信 Pilot：Portal 提供可靠的业务 ACL、文件边界、运行调度、按用户长期记忆和审计，但所有用户仍共享一个本机 Codex app-server、`CODEX_HOME`、上游身份和配额。Portal 启动的 app-server 会强制关闭并验证 Codex 原生长期记忆，避免把共享宿主状态当成业务记忆；这仍不是面向恶意、多组织租户的硬隔离平台。
+当前产品定位是内部互信 Pilot：Portal 提供可靠的业务 ACL、文件边界、运行调度、按用户长期记忆和审计，但所有用户仍共享一个本机 Codex app-server、一个项目私有 `CODEX_HOME`、上游身份和配额。该 `CODEX_HOME` 与桌面 Codex 分离，只避免 pin 版本的 `client_version` 覆写桌面模型清单，不改变“Portal 内部单一共享宿主状态”这一事实。Portal 启动的 app-server 会强制关闭并验证 Codex 原生长期记忆，避免把共享宿主状态当成业务记忆；这仍不是面向恶意、多组织租户的硬隔离平台。
 
 ## 超级管理员与内容保密边界
 
@@ -56,7 +56,7 @@ Browser
 | --- | --- | --- |
 | R1 submission 随 chat 删除 | 正确，原实现为 P0 | submission 外键改为 `SET NULL`，保留不可变快照；应用层禁止删除含提交证据的 chat；启动修复历史孤儿状态。 |
 | R2 resume 失败覆盖 thread | 正确，原实现为 P0 | 保留旧 thread id，进入 `resume_failed`；仅重试成功或用户确认上下文断裂后切换，并记录 lineage。 |
-| R3 单 App Server/共享 `CODEX_HOME` | 正确，可消除原生记忆串忆但不能消除全部共享故障域 | Portal 进程参数、每个 thread 配置和 `config/read` 三重关闭/验证 Codex 原生记忆；敌对租户仍需要独立 worker、OS 身份和上游身份。 |
+| R3 单 App Server/共享 `CODEX_HOME` | 正确，可消除原生记忆串忆但不能消除全部共享故障域 | Portal 进程参数、每个 thread 配置和 `config/read` 三重关闭/验证 Codex 原生记忆；敌对租户仍需要独立 worker、OS 身份和上游身份。`CODEX_HOME` 已收敛为项目私有目录，只消除与桌面 Codex 争抢 `models_cache.json` 这一跨进程故障，不宣称任何 Portal 内部隔离。 |
 | R4 同 tree 多 chat 并发写 | 风险成立，但试用要求并发优先 | 允许同 `project_access/worktree` 的不同 chat 并发；同 chat 仍串行，浏览器写入、submission 和 delivery 仍等待 access 空闲，并明确同文件并发冲突风险。 |
 | R5 单共享员工与多 assignee 冲突 | 正确，原实现为 P1 | 一个项目允许多名员工同时 active，每名员工拥有独立 access、branch 和 worktree。 |
 | R6 SSE 不可恢复 | 正确，原实现为 P1 | 引入持久语义事件 journal、游标重放和前端恢复；敏感大正文不持久化。 |

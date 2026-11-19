@@ -61,3 +61,7 @@ Portal 保留同一 HTTP/SSE、文件工作台和队列。`AgentRuntimeService` 
 详见 [操作指南](../../docs/LOCAL_PRIVATE_PROJECTS.md)。关闭本地功能可暂停使用但必须保留隐私 ACL；禁止用不认识 project_type 的旧代码运行现有数据库。备份须一致性包含 DB、项目/回收站、JSONL、记忆派生数据（可重建）和模型配置。
 
 本地 usage 计量在 Worker 的 HTTP 流边界只提取上游数值元数据，逐请求覆盖推理与本地 compaction；原始 SSE 正文不会另存计量表。缺失 usage 保持 incomplete，不使用 dsh-token-meter 的上下文估算补账。独立 Luna 搜索消费记入老板 GPT，不混入本地 Qwen，也不因此附带隐私上下文。
+
+## 部署模型身份与校验
+
+本机 2026-11-13 部署模型 ID 为 `Qwen3.8-Flash-Next-Uncensored-oQ5e-mtp`，使用 MLX affine oQ5e 与原有 oMLX/DSH 路径。模型 ID 由运维配置，health 和 usage 显示实际值。模型切换要求固定 revision、校验权重 SHA-256 与元数据 Git blob、保留回退配置，并在业务空闲时执行。验收包括回环真实推理、隐私项目文件工具、local_session_id 绑定和员工 ACL 拒绝。量化档位表达数值存储配置，回答质量由模型权重和实际测试共同决定。

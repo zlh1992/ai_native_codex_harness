@@ -4,7 +4,7 @@
 
 ## 本机 Qwen 模型前置条件
 
-先由运维启动本机 Qwen OpenAI-compatible 服务，监听明确的回环地址，例如 `127.0.0.1:8000`。不能直接使用 law_harness 默认的 Codex 桥接配置，也不能把云端模型 API 当成本地模型。当前 oMLX 安装使用 `Qwen3.8-Flash-Next-oQ5e-mtp`，配置统一使用 `LOCAL_QWEN_*`。
+先由运维启动本机 Qwen OpenAI-compatible 服务，监听明确的回环地址，例如 `127.0.0.1:8000`。不能直接使用 law_harness 默认的 Codex 桥接配置，也不能把云端模型 API 当成本地模型。当前 oMLX 安装使用 `Qwen3.8-Flash-Next-Uncensored-oQ5e-mtp`，配置统一使用 `LOCAL_QWEN_*`。
 
 - `GET /v1/models` 返回实际模型 ID。
 - `POST /v1/chat/completions` 支持 OpenAI-compatible SSE、标准 tool_calls 及 tool result 多轮消息。
@@ -24,7 +24,7 @@ npm ci --omit=dev --ignore-scripts
 ```dotenv
 LOCAL_QWEN_ENABLED=true
 LOCAL_QWEN_BASE_URL=http://127.0.0.1:8000/v1
-LOCAL_QWEN_MODEL=Qwen3.8-Flash-Next-oQ5e-mtp
+LOCAL_QWEN_MODEL=Qwen3.8-Flash-Next-Uncensored-oQ5e-mtp
 LOCAL_QWEN_CONTEXT_WINDOW=262144
 LOCAL_QWEN_MAX_TOKENS=8192
 LOCAL_QWEN_TIMEOUT_MS=1200000
@@ -65,3 +65,9 @@ LOCAL_SEARCH_TIMEOUT_MS=120000
 一致性备份整个业务数据集，尤其是 SQLite、workspaces/trees/trash、`DATA_DIR/local-sessions` 与本地模型配置。JSONL 保存原始模型上下文，权限须为目录 0700/文件 0600；记忆索引可从 SQLite 重建。删除记忆会停止检索，但不等于擦除旧 JSONL、备份或派生缓存。
 
 需要回退时先停止本地运行，再将 `LOCAL_QWEN_ENABLED=false` 并安全重启。保留项目/记忆/JSONL；不能切回不理解 project_type 的旧版本操作现有 DB，否则可能破坏“永不可分享”约束。
+
+## 当前本机模型版本
+
+2026-11-13 使用 `mlx-community/Qwen3.8-Flash-Next-Uncensored-oQ5e-mtp`，固定 revision `c7d915c693e37fa11810d600b617adb4c36ff596`。oQ5e 为混合 5/6/8-bit MLX affine，保留 MTP、视觉和 262144 上下文。量化档位与原安装一致，推理行为由新权重决定。
+
+本地服务位于同级 deepseek-local，运行脚本为 scripts/serve.py，模型在 .models 下，oMLX 配置位于 .runtime/omlx-data/model_settings.json。Portal 活动部署的私有 .env 指定此模型 ID。旧权重保留；切换前配置和 SQLite 备份位于主仓库 `.tools/qwen-uncensored/before-replacement`。回退应排空任务，恢复原 serve.py、model_settings.json 和 portal.env，重启本地模型与 Portal，并验证实际推理。launchd bootout 后应等待注销完成，再启用并 bootstrap，注册失败应做有界重试。

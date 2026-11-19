@@ -2,6 +2,8 @@
 
 - [2026-10-17 Portal 模型目录对齐与公网角色任务验证](2026-10-17-model-catalog-public-smoke.md)：阻塞；目录对齐、门控、重启和老板 GPT-6 high 推理通过；员工登录、网页浏览、GitHub clone 仍受阻。
 
+- [2026-10-11 Codex HOME 隔离：修复共享 models_cache 被旧版 pin 覆写](2026-10-11-codex-home-isolation.md)：完成；app-server 改用项目私有 `CODEX_HOME`，共用桌面家目录在 shell 与进程两侧 fail closed，桌面模型清单恢复 10 项且 `Unknown model` 归零，配套常驻流量监控与投毒自愈告警已挂 launchd。
+
 - [2026-10-10 本地修改归档与远端分支同步](2026-10-10-local-changes-sync.md)：实施中；将当前 `graph` 工作树修改归档并同步到 `origin/graph`。
 
 - [2026-10-07 启用 Portal 本地 Qwen](2026-10-07-enable-local-qwen.md)：完成；双引擎 ready、真实本地审批/文件/命令/续聊/用量验证通过，200+19 发布门禁通过。
@@ -52,6 +54,8 @@
 
 ## 当前报告
 
+- [2026-11-12 bench3/bench4 Fast 适配部署](2026-11-12-team-member-bench34-deployment.md)：完成（已部署）；7d59a5c 加本机适配，254+24 门控及双角色 Fast 真实推理通过。
+
 - [2026-09-24 本机新 Named Tunnel 公网准备](2026-09-24-new-local-named-tunnel.md)：实施中；本机准备与 Cloudflare 交接清单。
 
 - [手机聊天阅读与输入空间](2026-09-13-mobile-chat.md)：2026-09-14已联合部署；老板/员工共用移动端布局，双公网新资源验证通过。
@@ -88,3 +92,5 @@
 | 2026-09-05 | [Spec Review 八项问题修复](2026-09-05-spec-review-remediation.md) | 完成 | 文件边界、原生 approval、生命周期、ACL、运行终态、任务推进、trash 配额与启动 ready 加固 |
 | 2026-09-05 | [当前实现基线：P0/P1 加固、协作语义与发布门控](2026-09-05-current-implementation-baseline.md) | 完成 | 对当前工作树实现、审计问题处置、协议升级和验证证据的完整快照 |
 | 2026-09-05 | [Spec 治理初始化](2026-09-05-spec-governance-bootstrap.md) | 完成 | 新建架构/报告体系并固化后续修改规则 |
+
+- [2026-11-12/13 Qwen Uncensored oQ5e 替换](2026-11-12-qwen-uncensored-replacement.md)：完成；直连下载和复用128.57GB文件，37文件校验、真实老板隐私工具及员工403通过，254+24门控通过。
